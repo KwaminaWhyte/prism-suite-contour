@@ -3,7 +3,7 @@
 
 use crate::boolean::{self, BoolOp};
 use crate::canvas::{self, View};
-use crate::document::{self, Document, Shape};
+use crate::document::{self, Document, LineCap, LineJoin, Shape, StrokeStyle};
 use crate::history::History;
 use crate::{export, icons, theme};
 use egui::{Color32, Sense, Vec2};
@@ -86,6 +86,9 @@ pub struct ContourApp {
     fill: [f32; 4],
     stroke: [f32; 4],
     stroke_w: f32,
+    /// Current stroke attributes (caps/joins/dashes) applied to new shapes and
+    /// to the selected shape via the inspector's Stroke section.
+    stroke_style: StrokeStyle,
     /// Logical artboard size (document units); from the shared `Size` type.
     artboard: Size,
     inter: Interaction,
@@ -108,6 +111,7 @@ impl ContourApp {
             fill: [0.27, 0.55, 0.85, 1.0],
             stroke: [0.10, 0.12, 0.15, 1.0],
             stroke_w: 2.0,
+            stroke_style: StrokeStyle::default(),
             artboard: Size::new(1000, 700),
             inter: Interaction::default(),
             history: History::new(),
@@ -269,6 +273,7 @@ impl ContourApp {
                 fill: self.fill,
                 stroke: self.stroke,
                 stroke_w: self.stroke_w,
+                stroke_style: self.stroke_style.clone(),
                 handles,
                 visible: true,
             });
@@ -526,6 +531,8 @@ impl ContourApp {
                     ui.add(egui::Slider::new(&mut self.stroke_w, 0.0..=40.0).suffix(" px"));
                 });
 
+                self.stroke_section(ui);
+
                 // Direct-select hint when a path is the active selection.
                 if self.tool == Tool::Select && self.selected_is_path() {
                     ui.separator();
@@ -539,6 +546,109 @@ impl ContourApp {
                 ui.separator();
                 self.layers_panel(ui);
             });
+    }
+
+    /// Stroke options: caps, joins, miter limit, and a dash pattern. When a
+    /// shape is selected the controls edit *its* stroke style (one undo step per
+    /// discrete change) and the app default tracks along, so the next new shape
+    /// inherits it; with no selection the controls edit the app default only.
+    fn stroke_section(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.label(egui::RichText::new("Stroke options").strong());
+
+        // Edit a working copy seeded from the selected shape (so the panel
+        // reflects what's selected), falling back to the app default.
+        let mut s = match self.selected.and_then(|i| self.doc.shapes.get(i)) {
+            Some(shape) => shape.stroke_style().clone(),
+            None => self.stroke_style.clone(),
+        };
+        let mut changed = false;
+        let s = &mut s;
+
+        // Cap.
+        ui.horizontal(|ui| {
+            ui.label("Cap");
+            egui::ComboBox::from_id_salt("cap")
+                .selected_text(s.cap.label())
+                .show_ui(ui, |ui| {
+                    for cap in LineCap::ALL {
+                        if ui.selectable_value(&mut s.cap, cap, cap.label()).changed() {
+                            changed = true;
+                        }
+                    }
+                });
+        });
+
+        // Join (+ miter limit when miter is selected).
+        ui.horizontal(|ui| {
+            ui.label("Join");
+            egui::ComboBox::from_id_salt("join")
+                .selected_text(s.join.label())
+                .show_ui(ui, |ui| {
+                    for join in LineJoin::ALL {
+                        if ui
+                            .selectable_value(&mut s.join, join, join.label())
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    }
+                });
+        });
+        if s.join == LineJoin::Miter {
+            ui.horizontal(|ui| {
+                ui.label("Miter");
+                if ui
+                    .add(egui::Slider::new(&mut s.miter_limit, 1.0..=20.0))
+                    .changed()
+                {
+                    changed = true;
+                }
+            });
+        }
+
+        // Dash preset buttons + offset.
+        ui.horizontal(|ui| {
+            ui.label("Dashes");
+            // (label, pattern) — empty pattern == solid.
+            let presets: [(&str, &[f32]); 4] = [
+                ("Solid", &[]),
+                ("Dashed", &[12.0, 6.0]),
+                ("Dotted", &[2.0, 4.0]),
+                ("Dash-dot", &[12.0, 4.0, 2.0, 4.0]),
+            ];
+            for (label, pat) in presets {
+                let active = s.dash.as_slice() == pat;
+                if ui.selectable_label(active, label).clicked() && !active {
+                    s.dash = pat.to_vec();
+                    changed = true;
+                }
+            }
+        });
+        if s.is_dashed() {
+            ui.horizontal(|ui| {
+                ui.label("Offset");
+                if ui
+                    .add(egui::Slider::new(&mut s.dash_offset, 0.0..=40.0).suffix(" px"))
+                    .changed()
+                {
+                    changed = true;
+                }
+            });
+        }
+
+        // Commit the working copy: always update the app default (so new shapes
+        // inherit it), and push onto the selected shape as one undo step.
+        if changed {
+            let style = s.clone();
+            self.stroke_style = style.clone();
+            if let Some(i) = self.selected {
+                self.checkpoint();
+                if let Some(shape) = self.doc.shapes.get_mut(i) {
+                    *shape.stroke_style_mut() = style;
+                }
+            }
+        }
     }
 
     /// The Layers list: newest on top, with visibility toggle, reorder up/down,
@@ -888,6 +998,7 @@ impl ContourApp {
                         fill: self.fill,
                         stroke: self.stroke,
                         stroke_w: self.stroke_w,
+                        stroke_style: self.stroke_style.clone(),
                         visible: true,
                     }
                 } else {
@@ -896,6 +1007,7 @@ impl ContourApp {
                         fill: self.fill,
                         stroke: self.stroke,
                         stroke_w: self.stroke_w,
+                        stroke_style: self.stroke_style.clone(),
                         visible: true,
                     }
                 })
@@ -909,6 +1021,7 @@ impl ContourApp {
                     p1: b,
                     stroke: self.stroke,
                     stroke_w: self.stroke_w.max(1.0),
+                    stroke_style: self.stroke_style.clone(),
                     visible: true,
                 })
             }
@@ -1099,6 +1212,7 @@ impl ContourApp {
                     [0.0, 0.0, 0.0, 0.0],
                     self.stroke,
                     self.stroke_w.max(1.0),
+                    &self.stroke_style,
                 );
             }
             canvas::paint_path_handles(

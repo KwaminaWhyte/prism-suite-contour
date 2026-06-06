@@ -112,6 +112,7 @@ pub fn apply(subj_shape: &Shape, clip_shape: &Shape, op: BoolOp) -> Option<Shape
             stroke, stroke_w, ..
         } => ([0.5, 0.5, 0.5, 1.0], *stroke, *stroke_w),
     };
+    let stroke_style = subj_shape.stroke_style().clone();
 
     Some(Shape::Path {
         points,
@@ -119,6 +120,7 @@ pub fn apply(subj_shape: &Shape, clip_shape: &Shape, op: BoolOp) -> Option<Shape
         fill,
         stroke,
         stroke_w,
+        stroke_style,
         handles: Vec::new(),
         visible: true,
     })
@@ -127,6 +129,7 @@ pub fn apply(subj_shape: &Shape, clip_shape: &Shape, op: BoolOp) -> Option<Shape
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::StrokeStyle;
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> Shape {
         Shape::Rect {
@@ -134,6 +137,7 @@ mod tests {
             fill: [1.0, 0.0, 0.0, 1.0],
             stroke: [0.0, 0.0, 0.0, 1.0],
             stroke_w: 1.0,
+            stroke_style: StrokeStyle::default(),
             visible: true,
         }
     }

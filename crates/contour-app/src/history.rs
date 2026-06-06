@@ -124,7 +124,7 @@ fn documents_equal(a: &Document, b: &Document) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::Shape;
+    use crate::document::{Shape, StrokeStyle};
 
     fn rect(x: f32) -> Shape {
         Shape::Rect {
@@ -132,6 +132,7 @@ mod tests {
             fill: [1.0, 0.0, 0.0, 1.0],
             stroke: [0.0, 0.0, 0.0, 1.0],
             stroke_w: 1.0,
+            stroke_style: StrokeStyle::default(),
             visible: true,
         }
     }

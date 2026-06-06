@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Stroke options** — every shape now carries a `StrokeStyle` (line **cap**:
+  butt / round / square; line **join**: miter / round / bevel; **miter limit**;
+  and a **dash pattern** with phase **offset**), edited from a new "Stroke
+  options" inspector section with dash presets (Solid / Dashed / Dotted /
+  Dash-dot). The style applies to new shapes and, when a shape is selected, to
+  the selection live as a single undo step. Rendered faithfully across all three
+  surfaces: the on-canvas painter (dashes), **PNG** export (full caps / joins /
+  miter / dashes via `tiny-skia`), and **SVG** export (`stroke-linecap`,
+  `stroke-linejoin`, `stroke-miterlimit`, `stroke-dasharray`,
+  `stroke-dashoffset`; default attributes omitted to keep output compact). The
+  field is additive (`#[serde(default)]`), so older `.contour` files load as a
+  solid butt/miter stroke.
+
 - **Direct-select path editing** — complete on-canvas anchor/handle editing for
   `Path` shapes with the Select tool:
   - Double-click a path segment to **add an anchor** (straight segments split at

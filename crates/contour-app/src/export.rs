@@ -4,10 +4,10 @@
 //! hidden shapes. SVG emits standard `rect`/`ellipse`/`line`/`path` elements;
 //! PNG rasterizes via `tiny-skia` into a `Pixmap` sized to the artboard.
 
-use crate::document::{self, Document, Shape};
+use crate::document::{self, Document, LineCap, LineJoin, Shape, StrokeStyle};
 use tiny_skia::{
-    Color as TsColor, FillRule as TsFillRule, Paint, PathBuilder, Pixmap, Rect as TsRect, Stroke,
-    Transform,
+    Color as TsColor, FillRule as TsFillRule, LineCap as TsCap, LineJoin as TsJoin, Paint,
+    PathBuilder, Pixmap, Rect as TsRect, Stroke, StrokeDash, Transform,
 };
 
 // --- SVG ---------------------------------------------------------------------
@@ -38,8 +38,14 @@ fn hex(c: [f32; 4]) -> String {
     format!("#{:02x}{:02x}{:02x}", b(c[0]), b(c[1]), b(c[2]))
 }
 
-/// Stroke/fill paint attributes shared by all elements.
-fn paint_attrs(fill: Option<[f32; 4]>, stroke: [f32; 4], stroke_w: f32) -> String {
+/// Stroke/fill paint attributes shared by all elements, including the stroke
+/// style's caps/joins/miter/dashes.
+fn paint_attrs(
+    fill: Option<[f32; 4]>,
+    stroke: [f32; 4],
+    stroke_w: f32,
+    style: &StrokeStyle,
+) -> String {
     let mut a = String::new();
     match fill {
         Some(f) => {
@@ -59,11 +65,32 @@ fn paint_attrs(fill: Option<[f32; 4]>, stroke: [f32; 4], stroke_w: f32) -> Strin
         if stroke[3] < 1.0 {
             a.push_str(&format!(" stroke-opacity=\"{:.3}\"", stroke[3]));
         }
+        // Only emit non-default cap/join keywords to keep the SVG compact.
+        if style.cap != LineCap::Butt {
+            a.push_str(&format!(" stroke-linecap=\"{}\"", style.cap.svg()));
+        }
+        if style.join != LineJoin::Miter {
+            a.push_str(&format!(" stroke-linejoin=\"{}\"", style.join.svg()));
+        } else if (style.miter_limit - 4.0).abs() > 1e-3 {
+            a.push_str(&format!(" stroke-miterlimit=\"{}\"", style.miter_limit));
+        }
+        if let Some(runs) = style.normalized_dash() {
+            let list = runs
+                .iter()
+                .map(|v| format!("{v}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            a.push_str(&format!(" stroke-dasharray=\"{list}\""));
+            if style.dash_offset != 0.0 {
+                a.push_str(&format!(" stroke-dashoffset=\"{}\"", style.dash_offset));
+            }
+        }
     }
     a
 }
 
 fn shape_to_svg(shape: &Shape) -> String {
+    let style = shape.stroke_style();
     match shape {
         Shape::Rect {
             rect,
@@ -76,7 +103,7 @@ fn shape_to_svg(shape: &Shape) -> String {
             let (x, y, w, h) = norm_rect(rect);
             format!(
                 "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\"{} />",
-                paint_attrs(Some(*fill), *stroke, *stroke_w)
+                paint_attrs(Some(*fill), *stroke, *stroke_w, style)
             )
         }
         Shape::Ellipse {
@@ -91,7 +118,7 @@ fn shape_to_svg(shape: &Shape) -> String {
             let (rx, ry) = (w * 0.5, h * 0.5);
             format!(
                 "<ellipse cx=\"{cx}\" cy=\"{cy}\" rx=\"{rx}\" ry=\"{ry}\"{} />",
-                paint_attrs(Some(*fill), *stroke, *stroke_w)
+                paint_attrs(Some(*fill), *stroke, *stroke_w, style)
             )
         }
         Shape::Line {
@@ -106,7 +133,7 @@ fn shape_to_svg(shape: &Shape) -> String {
             p0.1,
             p1.0,
             p1.1,
-            paint_attrs(None, *stroke, *stroke_w)
+            paint_attrs(None, *stroke, *stroke_w, style)
         ),
         Shape::Path {
             points,
@@ -122,7 +149,7 @@ fn shape_to_svg(shape: &Shape) -> String {
             let fill = if *closed { Some(*fill) } else { None };
             format!(
                 "<path d=\"{d}\"{} />",
-                paint_attrs(fill, *stroke, *stroke_w)
+                paint_attrs(fill, *stroke, *stroke_w, style)
             )
         }
     }
@@ -199,6 +226,7 @@ pub fn to_png(doc: &Document, w: f32, h: f32) -> Option<Vec<u8>> {
 
 fn draw_shape_skia(pixmap: &mut Pixmap, shape: &Shape) {
     let id = Transform::identity();
+    let style = shape.stroke_style();
     match shape {
         Shape::Rect {
             rect,
@@ -210,7 +238,7 @@ fn draw_shape_skia(pixmap: &mut Pixmap, shape: &Shape) {
             let (x, y, w, h) = norm_rect(rect);
             if let Some(r) = TsRect::from_xywh(x, y, w.max(0.01), h.max(0.01)) {
                 let path = PathBuilder::from_rect(r);
-                fill_then_stroke(pixmap, &path, Some(*fill), *stroke, *stroke_w, id);
+                fill_then_stroke(pixmap, &path, Some(*fill), *stroke, *stroke_w, style, id);
             }
         }
         Shape::Ellipse {
@@ -225,7 +253,7 @@ fn draw_shape_skia(pixmap: &mut Pixmap, shape: &Shape) {
                 let mut pb = PathBuilder::new();
                 pb.push_oval(r);
                 if let Some(path) = pb.finish() {
-                    fill_then_stroke(pixmap, &path, Some(*fill), *stroke, *stroke_w, id);
+                    fill_then_stroke(pixmap, &path, Some(*fill), *stroke, *stroke_w, style, id);
                 }
             }
         }
@@ -240,7 +268,15 @@ fn draw_shape_skia(pixmap: &mut Pixmap, shape: &Shape) {
             pb.move_to(p0.0, p0.1);
             pb.line_to(p1.0, p1.1);
             if let Some(path) = pb.finish() {
-                fill_then_stroke(pixmap, &path, None, *stroke, (*stroke_w).max(1.0), id);
+                fill_then_stroke(
+                    pixmap,
+                    &path,
+                    None,
+                    *stroke,
+                    (*stroke_w).max(1.0),
+                    style,
+                    id,
+                );
             }
         }
         Shape::Path {
@@ -254,9 +290,27 @@ fn draw_shape_skia(pixmap: &mut Pixmap, shape: &Shape) {
         } => {
             if let Some(path) = build_skia_path(points, handles, *closed) {
                 let fill = if *closed { Some(*fill) } else { None };
-                fill_then_stroke(pixmap, &path, fill, *stroke, *stroke_w, id);
+                fill_then_stroke(pixmap, &path, fill, *stroke, *stroke_w, style, id);
             }
         }
+    }
+}
+
+/// Map our document [`LineCap`] to tiny-skia's.
+fn ts_cap(cap: LineCap) -> TsCap {
+    match cap {
+        LineCap::Butt => TsCap::Butt,
+        LineCap::Round => TsCap::Round,
+        LineCap::Square => TsCap::Square,
+    }
+}
+
+/// Map our document [`LineJoin`] to tiny-skia's.
+fn ts_join(join: LineJoin) -> TsJoin {
+    match join {
+        LineJoin::Miter => TsJoin::Miter,
+        LineJoin::Round => TsJoin::Round,
+        LineJoin::Bevel => TsJoin::Bevel,
     }
 }
 
@@ -291,12 +345,14 @@ fn build_skia_path(
     pb.finish()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fill_then_stroke(
     pixmap: &mut Pixmap,
     path: &tiny_skia::Path,
     fill: Option<[f32; 4]>,
     stroke: [f32; 4],
     stroke_w: f32,
+    style: &StrokeStyle,
     transform: Transform,
 ) {
     if let Some(f) = fill {
@@ -311,7 +367,15 @@ fn fill_then_stroke(
         let mut paint = Paint::default();
         paint.set_color(ts_color(stroke));
         paint.anti_alias = true;
-        let s = Stroke { width: stroke_w, ..Stroke::default() };
+        let s = Stroke {
+            width: stroke_w,
+            miter_limit: style.miter_limit.max(1.0),
+            line_cap: ts_cap(style.cap),
+            line_join: ts_join(style.join),
+            dash: style
+                .normalized_dash()
+                .and_then(|runs| StrokeDash::new(runs, style.dash_offset)),
+        };
         pixmap.stroke_path(path, &paint, &s, transform, None);
     }
 }
@@ -329,6 +393,7 @@ mod tests {
                     fill: [1.0, 0.0, 0.0, 1.0],
                     stroke: [0.0, 0.0, 0.0, 1.0],
                     stroke_w: 2.0,
+                    stroke_style: StrokeStyle::default(),
                     visible: true,
                 },
                 Shape::Path {
@@ -337,6 +402,7 @@ mod tests {
                     fill: [0.0, 0.0, 1.0, 1.0],
                     stroke: [0.0, 0.0, 0.0, 1.0],
                     stroke_w: 1.0,
+                    stroke_style: StrokeStyle::default(),
                     handles: vec![(10.0, 0.0), (0.0, 0.0), (0.0, 0.0)],
                     visible: true,
                 },
@@ -374,5 +440,49 @@ mod tests {
             &bytes[0..8],
             &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
         );
+    }
+
+    fn dashed_rect() -> Document {
+        Document {
+            shapes: vec![Shape::Rect {
+                rect: [10.0, 10.0, 80.0, 60.0],
+                fill: [0.0, 0.0, 0.0, 0.0],
+                stroke: [0.0, 0.0, 0.0, 1.0],
+                stroke_w: 4.0,
+                stroke_style: StrokeStyle {
+                    cap: LineCap::Round,
+                    join: LineJoin::Round,
+                    miter_limit: 4.0,
+                    dash: vec![12.0, 6.0],
+                    dash_offset: 3.0,
+                },
+                visible: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn svg_emits_dash_and_cap_attrs() {
+        let svg = to_svg(&dashed_rect(), 200.0, 200.0);
+        assert!(svg.contains("stroke-dasharray=\"12,6\""), "svg: {svg}");
+        assert!(svg.contains("stroke-dashoffset=\"3\""), "svg: {svg}");
+        assert!(svg.contains("stroke-linecap=\"round\""), "svg: {svg}");
+        assert!(svg.contains("stroke-linejoin=\"round\""), "svg: {svg}");
+    }
+
+    #[test]
+    fn svg_omits_default_stroke_attrs() {
+        // A solid butt/miter stroke must not emit cap/join/dash attributes.
+        let svg = to_svg(&sample_doc(), 200.0, 200.0);
+        assert!(!svg.contains("stroke-linecap"));
+        assert!(!svg.contains("stroke-linejoin"));
+        assert!(!svg.contains("stroke-dasharray"));
+    }
+
+    #[test]
+    fn png_encodes_dashed_stroke() {
+        // Dashed/round-cap stroking must not crash the rasterizer.
+        let bytes = to_png(&dashed_rect(), 120.0, 100.0).expect("png should encode");
+        assert!(bytes.len() > 8);
     }
 }

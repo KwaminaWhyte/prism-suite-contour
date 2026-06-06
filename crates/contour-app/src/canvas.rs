@@ -1,7 +1,7 @@
 //! The drawing surface: pan/zoom transform, per-frame shape painting, and tool
 //! interaction (create / select / move / pen).
 
-use crate::document::{self, Shape};
+use crate::document::{self, Shape, StrokeStyle};
 use crate::theme;
 use egui::epaint::CubicBezierShape;
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
@@ -56,6 +56,7 @@ pub fn to_color32(c: [f32; 4]) -> Color32 {
 
 /// Paint one shape using the painter, transforming document coords to screen.
 pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected: bool) {
+    let style = shape.stroke_style();
     match shape {
         Shape::Rect {
             rect,
@@ -67,12 +68,15 @@ pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected
             let r = doc_rect(view, rect);
             painter.rect_filled(r, 0.0, to_color32(*fill));
             if *stroke_w > 0.0 {
-                painter.rect_stroke(
-                    r,
-                    0.0,
-                    Stroke::new(stroke_w * view.zoom, to_color32(*stroke)),
-                    egui::StrokeKind::Middle,
-                );
+                // A rect's outline is its 4 corners as a closed polyline so we
+                // can honor a dash pattern; solid strokes use the fast path.
+                let ring = [
+                    (rect[0], rect[1]),
+                    (rect[0] + rect[2], rect[1]),
+                    (rect[0] + rect[2], rect[1] + rect[3]),
+                    (rect[0], rect[1] + rect[3]),
+                ];
+                stroke_polyline(painter, view, &ring, true, *stroke, *stroke_w, style);
             }
         }
         Shape::Ellipse {
@@ -86,12 +90,12 @@ pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected
             painter.add(egui::Shape::convex_polygon(
                 pts.clone(),
                 to_color32(*fill),
-                if *stroke_w > 0.0 {
-                    Stroke::new(stroke_w * view.zoom, to_color32(*stroke))
-                } else {
-                    Stroke::NONE
-                },
+                Stroke::NONE,
             ));
+            if *stroke_w > 0.0 {
+                let ring: Vec<(f32, f32)> = ellipse_doc_points(rect, 48);
+                stroke_polyline(painter, view, &ring, true, *stroke, *stroke_w, style);
+            }
         }
         Shape::Line {
             p0,
@@ -100,9 +104,14 @@ pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected
             stroke_w,
             ..
         } => {
-            painter.line_segment(
-                [view.doc_to_screen(*p0), view.doc_to_screen(*p1)],
-                Stroke::new(stroke_w.max(0.5) * view.zoom, to_color32(*stroke)),
+            stroke_polyline(
+                painter,
+                view,
+                &[*p0, *p1],
+                false,
+                *stroke,
+                stroke_w.max(0.5),
+                style,
             );
         }
         Shape::Path {
@@ -115,7 +124,7 @@ pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected
             ..
         } => {
             paint_path(
-                painter, view, points, handles, *closed, *fill, *stroke, *stroke_w,
+                painter, view, points, handles, *closed, *fill, *stroke, *stroke_w, style,
             );
         }
     }
@@ -134,7 +143,9 @@ pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected
 }
 
 /// Paint a (possibly cubic-bezier) path. Straight segments use a polyline /
-/// polygon; curved segments are drawn with egui's [`CubicBezierShape`].
+/// polygon; curved segments are drawn with egui's [`CubicBezierShape`]. A
+/// dashed [`StrokeStyle`] forces flattening so the dash pattern can be applied
+/// uniformly along the (curved) outline.
 #[allow(clippy::too_many_arguments)]
 pub fn paint_path(
     painter: &egui::Painter,
@@ -145,6 +156,7 @@ pub fn paint_path(
     fill: [f32; 4],
     stroke: [f32; 4],
     stroke_w: f32,
+    style: &StrokeStyle,
 ) {
     let n = points.len();
     if n < 2 {
@@ -168,8 +180,16 @@ pub fn paint_path(
         }
     }
 
+    // Dashed curves can't use the per-segment bezier fast path: flatten the
+    // whole outline so the dash phase carries across segment boundaries.
+    if style.is_dashed() {
+        let flat = document::flatten(points, handles, closed);
+        stroke_polyline(painter, view, &flat, closed, stroke, stroke_w, style);
+        return;
+    }
+
     if !any_curve {
-        // Pure polyline / polygon outline.
+        // Pure solid polyline / polygon outline.
         let pts: Vec<Pos2> = points.iter().map(|&p| view.doc_to_screen(p)).collect();
         if closed {
             let mut ring = pts.clone();
@@ -181,7 +201,7 @@ pub fn paint_path(
         return;
     }
 
-    // Stroke each segment, choosing line vs. cubic per segment.
+    // Solid curve: stroke each segment, choosing line vs. cubic per segment.
     let seg_count = if closed { n } else { n - 1 };
     for i in 0..seg_count {
         let a = points[i];
@@ -204,6 +224,73 @@ pub fn paint_path(
             painter.add(bez);
         }
     }
+}
+
+/// Stroke a polyline (a flat list of document-space points) honoring the
+/// dash pattern in `style`. `closed` repeats the first point to close the ring.
+/// Solid strokes take egui's fast line path; dashed strokes are emitted with
+/// [`egui::Shape::dashed_line_many_with_offset`], scaling the document-unit dash
+/// runs by the current zoom so dashes keep their on-screen length stable.
+fn stroke_polyline(
+    painter: &egui::Painter,
+    view: &View,
+    points: &[(f32, f32)],
+    closed: bool,
+    stroke: [f32; 4],
+    stroke_w: f32,
+    style: &StrokeStyle,
+) {
+    if points.len() < 2 {
+        return;
+    }
+    let stroke32 = Stroke::new(stroke_w.max(0.5) * view.zoom, to_color32(stroke));
+    let mut screen: Vec<Pos2> = points.iter().map(|&p| view.doc_to_screen(p)).collect();
+    if closed {
+        screen.push(screen[0]);
+    }
+
+    match style.normalized_dash() {
+        None => {
+            painter.add(egui::Shape::line(screen, stroke32));
+        }
+        Some(runs) => {
+            // `runs` alternates on,off,on,off… Split into the dash (on) and gap
+            // (off) arrays egui expects, scaling each run to screen pixels.
+            let z = view.zoom;
+            let dashes: Vec<f32> = runs.iter().step_by(2).map(|&d| (d * z).max(0.01)).collect();
+            let gaps: Vec<f32> = runs
+                .iter()
+                .skip(1)
+                .step_by(2)
+                .map(|&d| (d * z).max(0.0))
+                .collect();
+            let mut shapes = Vec::new();
+            egui::Shape::dashed_line_many_with_offset(
+                &screen,
+                stroke32,
+                &dashes,
+                &gaps,
+                style.dash_offset * z,
+                &mut shapes,
+            );
+            painter.extend(shapes);
+        }
+    }
+}
+
+/// Ellipse outline as document-space points (mirror of [`ellipse_points`] but
+/// untransformed, for dashed stroking).
+fn ellipse_doc_points(rect: &[f32; 4], segments: usize) -> Vec<(f32, f32)> {
+    let cx = rect[0] + rect[2] * 0.5;
+    let cy = rect[1] + rect[3] * 0.5;
+    let rx = rect[2] * 0.5;
+    let ry = rect[3] * 0.5;
+    (0..segments)
+        .map(|i| {
+            let t = i as f32 / segments as f32 * std::f32::consts::TAU;
+            (cx + rx * t.cos(), cy + ry * t.sin())
+        })
+        .collect()
 }
 
 /// Draw editable anchor dots and tangent handles for a selected path. Returns
