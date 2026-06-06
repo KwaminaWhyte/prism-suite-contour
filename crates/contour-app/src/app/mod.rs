@@ -78,6 +78,9 @@ struct Keys {
     arrange: Option<Arrange>,
     group: bool,
     ungroup: bool,
+    /// `Cmd/Ctrl+7` makes a clipping mask; `Alt+Cmd/Ctrl+7` releases one.
+    make_clip: bool,
+    release_clip: bool,
     clip: Option<ClipKey>,
     /// Single-key `I` pressed (no modifiers) — activate the Eyedropper tool, à la
     /// Illustrator's per-tool letter shortcuts.
@@ -276,9 +279,11 @@ impl eframe::App for ContourApp {
         let keys = ctx.input(|i| {
             let cmd = i.modifiers.command;
             let shift = i.modifiers.shift;
+            let alt = i.modifiers.alt;
             let z = i.key_pressed(egui::Key::Z);
             let y = i.key_pressed(egui::Key::Y);
             let g = i.key_pressed(egui::Key::G);
+            let seven = i.key_pressed(egui::Key::Num7);
             let arrange = if cmd && i.key_pressed(egui::Key::CloseBracket) {
                 Some(if shift {
                     Arrange::BringToFront
@@ -321,6 +326,8 @@ impl eframe::App for ContourApp {
                 arrange,
                 group: cmd && g && !shift,
                 ungroup: cmd && g && shift,
+                make_clip: cmd && seven && !alt,
+                release_clip: cmd && seven && alt,
                 clip,
                 // Plain `I` (no command) activates the eyedropper, like
                 // Illustrator's single-key tool letters.
@@ -335,6 +342,8 @@ impl eframe::App for ContourApp {
             arrange: arrange_key,
             group: group_key,
             ungroup: ungroup_key,
+            make_clip: make_clip_key,
+            release_clip: release_clip_key,
             clip: clip_key,
             eyedropper: eyedropper_key,
         } = keys;
@@ -367,6 +376,12 @@ impl eframe::App for ContourApp {
             self.ungroup_selection();
         } else if group_key {
             self.group_selection();
+        }
+        // Release before make so an Alt+Cmd+7 frame isn't misread as make.
+        if release_clip_key {
+            self.release_clip();
+        } else if make_clip_key {
+            self.make_clip();
         }
         if let Some(c) = clip_key {
             match c {

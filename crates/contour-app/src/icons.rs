@@ -116,6 +116,13 @@ pub const GROUP: &str = ph::BOUNDING_BOX;
 /// Ungroup (dissolve the group back into loose shapes).
 pub const UNGROUP: &str = ph::SELECTION_SLASH;
 
+// --- Clipping masks ---------------------------------------------------------
+
+/// Make a clipping mask (crop content to the topmost shape).
+pub const CLIP_MAKE: &str = ph::CROP;
+/// Release a clipping mask (restore the clipped originals).
+pub const CLIP_RELEASE: &str = ph::SCISSORS;
+
 // --- Boolean ops ------------------------------------------------------------
 
 /// Union of two shapes.

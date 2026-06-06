@@ -87,6 +87,8 @@ mod tests {
             stroke_style: StrokeStyle::default(),
             visible: true,
             group: Some(7),
+            clip: None,
+            mask: false,
         }
     }
 
@@ -100,6 +102,8 @@ mod tests {
             stroke_style: StrokeStyle::default(),
             visible: true,
             group: None,
+            clip: None,
+            mask: false,
         }
     }
 
@@ -112,6 +116,8 @@ mod tests {
             stroke_style: StrokeStyle::default(),
             visible: true,
             group: None,
+            clip: None,
+            mask: false,
         }
     }
 

@@ -138,6 +138,8 @@ mod tests {
             stroke_style: StrokeStyle::default(),
             visible: true,
             group,
+            clip: None,
+            mask: false,
         }
     }
 

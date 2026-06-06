@@ -10,6 +10,7 @@ mod arrange;
 mod artboard;
 mod boolean;
 mod canvas;
+mod clip;
 mod clipboard;
 mod document;
 mod export;

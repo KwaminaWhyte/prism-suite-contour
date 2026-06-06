@@ -61,9 +61,12 @@ pub fn to_svg(doc: &Document, w: f32, h: f32) -> String {
 /// by [`to_svg`] and [`to_svg_artboard`]. Does not emit the `<svg>` wrapper.
 fn svg_body(doc: &Document) -> String {
     // First pass: build the <defs> for every gradient-filled, visible shape.
+    // Clipping masks are resolved before emission: a clip mask path drops out,
+    // and clipped content is emitted already cropped to the mask outline (so the
+    // SVG matches the canvas without needing `<clipPath>` plumbing).
     let mut defs = String::new();
     let mut body = String::new();
-    for (i, shape) in doc.shapes.iter().enumerate() {
+    for (i, shape) in doc.render_shapes() {
         if !shape.visible() {
             continue;
         }
@@ -78,7 +81,7 @@ fn svg_body(doc: &Document) -> String {
             _ => None,
         };
         body.push_str("  ");
-        body.push_str(&shape_to_svg(shape, grad_id.as_deref()));
+        body.push_str(&shape_to_svg(&shape, grad_id.as_deref()));
         body.push('\n');
     }
 
@@ -339,11 +342,12 @@ pub fn to_png_artboard(doc: &Document, ab: [f32; 4]) -> Option<Vec<u8>> {
     pixmap.fill(TsColor::WHITE);
 
     let base = Transform::from_translate(-ox, -oy);
-    for shape in &doc.shapes {
+    // Clipping masks resolved: mask paths drop out, clipped content is cropped.
+    for (_, shape) in doc.render_shapes() {
         if !shape.visible() {
             continue;
         }
-        draw_shape_skia(&mut pixmap, shape, base);
+        draw_shape_skia(&mut pixmap, &shape, base);
     }
 
     pixmap.encode_png().ok()
@@ -611,6 +615,8 @@ mod tests {
                     stroke_style: StrokeStyle::default(),
                     visible: true,
                     group: None,
+                    clip: None,
+                    mask: false,
                 },
                 Shape::Path {
                     points: vec![(60.0, 60.0), (90.0, 60.0), (90.0, 90.0)],
@@ -623,6 +629,8 @@ mod tests {
                     handles: vec![(10.0, 0.0), (0.0, 0.0), (0.0, 0.0)],
                     visible: true,
                     group: None,
+                    clip: None,
+                    mask: false,
                 },
             ],
             ..Default::default()
@@ -707,6 +715,8 @@ mod tests {
                 },
                 visible: true,
                 group: None,
+                clip: None,
+                mask: false,
             }],
             ..Default::default()
         }
@@ -752,6 +762,8 @@ mod tests {
                 stroke_style: StrokeStyle::default(),
                 visible: true,
                 group: None,
+                clip: None,
+                mask: false,
             }],
             ..Default::default()
         }

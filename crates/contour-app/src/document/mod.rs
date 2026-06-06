@@ -52,6 +52,15 @@ pub enum Shape {
         /// (`#[serde(default)]` → `None`), so older files load ungrouped.
         #[serde(default)]
         group: Option<u64>,
+        /// Clip-set membership: shapes sharing a `Some(id)` form one clipping
+        /// mask, one of them flagged [`mask`](Self). Additive (`#[serde(default)]`
+        /// → `None`), so older files load unclipped.
+        #[serde(default)]
+        clip: Option<u64>,
+        /// Whether this shape is the *masking path* of its clip set. Additive
+        /// (`#[serde(default)]` → `false`).
+        #[serde(default)]
+        mask: bool,
     },
     Ellipse {
         rect: [f32; 4],
@@ -66,6 +75,10 @@ pub enum Shape {
         visible: bool,
         #[serde(default)]
         group: Option<u64>,
+        #[serde(default)]
+        clip: Option<u64>,
+        #[serde(default)]
+        mask: bool,
     },
     Line {
         p0: (f32, f32),
@@ -78,6 +91,10 @@ pub enum Shape {
         visible: bool,
         #[serde(default)]
         group: Option<u64>,
+        #[serde(default)]
+        clip: Option<u64>,
+        #[serde(default)]
+        mask: bool,
     },
     Path {
         points: Vec<(f32, f32)>,
@@ -102,6 +119,10 @@ pub enum Shape {
         visible: bool,
         #[serde(default)]
         group: Option<u64>,
+        #[serde(default)]
+        clip: Option<u64>,
+        #[serde(default)]
+        mask: bool,
     },
 }
 
@@ -155,6 +176,99 @@ impl Shape {
             | Shape::Line { group, .. }
             | Shape::Path { group, .. } => *group = g,
         }
+    }
+
+    /// The shape's clip-set id, if it belongs to a clipping mask. Shapes sharing
+    /// an id form one clip set; the one with [`is_mask`](Self::is_mask) confines
+    /// the rest.
+    pub fn clip(&self) -> Option<u64> {
+        match self {
+            Shape::Rect { clip, .. }
+            | Shape::Ellipse { clip, .. }
+            | Shape::Line { clip, .. }
+            | Shape::Path { clip, .. } => *clip,
+        }
+    }
+
+    /// Set (or clear, with `None`) the shape's clip-set membership.
+    pub fn set_clip(&mut self, c: Option<u64>) {
+        match self {
+            Shape::Rect { clip, .. }
+            | Shape::Ellipse { clip, .. }
+            | Shape::Line { clip, .. }
+            | Shape::Path { clip, .. } => *clip = c,
+        }
+    }
+
+    /// Whether this shape is the masking path of its clip set.
+    pub fn is_mask(&self) -> bool {
+        match self {
+            Shape::Rect { mask, .. }
+            | Shape::Ellipse { mask, .. }
+            | Shape::Line { mask, .. }
+            | Shape::Path { mask, .. } => *mask,
+        }
+    }
+
+    /// Flag (or unflag) this shape as the masking path of its clip set.
+    pub fn set_mask(&mut self, m: bool) {
+        match self {
+            Shape::Rect { mask, .. }
+            | Shape::Ellipse { mask, .. }
+            | Shape::Line { mask, .. }
+            | Shape::Path { mask, .. } => *mask = m,
+        }
+    }
+
+    /// Clear both clip-set tags (id + mask flag), releasing the shape from any
+    /// clipping mask. Used by `Object → Clipping Mask → Release`.
+    pub fn clear_clip(&mut self) {
+        self.set_clip(None);
+        self.set_mask(false);
+    }
+
+    /// This shape's clip tag pair, for the pure [`clip`](crate::clip) helpers.
+    pub fn clip_tag(&self) -> crate::clip::ClipTag {
+        crate::clip::ClipTag::new(self.clip(), self.is_mask())
+    }
+
+    /// The shape's filled outline as a single closed document-space polygon (the
+    /// input both boolean ops and clipping masks consume). `Rect`/`Ellipse`
+    /// sample their outline; a closed `Path` flattens its (possibly bezier)
+    /// outline; an open `Path` or a `Line` has no fillable region and returns
+    /// `None`.
+    pub fn outline_polygon(&self) -> Option<Vec<(f32, f32)>> {
+        let pts: Vec<(f32, f32)> = match self {
+            Shape::Rect { rect, .. } => {
+                let (x, y, w, h) = (rect[0], rect[1], rect[2], rect[3]);
+                vec![(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+            }
+            Shape::Ellipse { rect, .. } => {
+                let cx = rect[0] + rect[2] * 0.5;
+                let cy = rect[1] + rect[3] * 0.5;
+                let rx = rect[2] * 0.5;
+                let ry = rect[3] * 0.5;
+                (0..64)
+                    .map(|i| {
+                        let t = i as f32 / 64.0 * std::f32::consts::TAU;
+                        (cx + rx * t.cos(), cy + ry * t.sin())
+                    })
+                    .collect()
+            }
+            Shape::Path {
+                points,
+                closed,
+                handles,
+                ..
+            } => {
+                if !*closed {
+                    return None;
+                }
+                path::flatten(points, handles, true)
+            }
+            Shape::Line { .. } => return None,
+        };
+        (pts.len() >= 3).then_some(pts)
     }
 
     /// The shape's stroke colour (straight sRGB RGBA). Every variant has a
@@ -378,6 +492,29 @@ impl Shape {
         }
     }
 
+    /// A closed corner [`Shape::Path`] tracing `ring`, inheriting this shape's
+    /// paint style (fill, gradient, stroke colour / width / dashes) and group
+    /// tag, but **never** a clip/mask tag (the result is already clipped, so it
+    /// renders as a plain shape). Used by clip-mask resolution to turn a content
+    /// outline cropped to the mask into a drawable path. All anchors are corners.
+    pub fn with_outline(&self, ring: Vec<(f32, f32)>) -> Shape {
+        let n = ring.len();
+        Shape::Path {
+            points: ring,
+            closed: true,
+            fill: self.fill_color().unwrap_or([0.0, 0.0, 0.0, 0.0]),
+            fill_gradient: self.fill_gradient().cloned(),
+            stroke: self.stroke_color().unwrap_or([0.0, 0.0, 0.0, 0.0]),
+            stroke_w: self.stroke_width(),
+            stroke_style: self.stroke_style().clone(),
+            handles: vec![(0.0, 0.0); n],
+            visible: self.visible(),
+            group: self.group(),
+            clip: None,
+            mask: false,
+        }
+    }
+
     /// Convert this shape into an equivalent [`Shape::Path`], preserving paint
     /// style. `Rect` becomes a four-corner closed corner-path; `Ellipse` becomes
     /// a four-anchor closed cubic approximation; `Line` becomes a two-point open
@@ -394,6 +531,8 @@ impl Shape {
                 stroke_style,
                 visible,
                 group,
+                clip,
+                mask,
             } => {
                 let pts = vec![
                     (rect[0], rect[1]),
@@ -413,6 +552,8 @@ impl Shape {
                     handles,
                     visible: *visible,
                     group: *group,
+                    clip: *clip,
+                    mask: *mask,
                 }
             }
             Shape::Ellipse {
@@ -424,6 +565,8 @@ impl Shape {
                 stroke_style,
                 visible,
                 group,
+                clip,
+                mask,
             } => {
                 // Four anchors at the extrema with the classic 0.5523 cubic
                 // tangent so the path traces a smooth ellipse.
@@ -457,6 +600,8 @@ impl Shape {
                     handles,
                     visible: *visible,
                     group: *group,
+                    clip: *clip,
+                    mask: *mask,
                 }
             }
             Shape::Line {
@@ -467,6 +612,8 @@ impl Shape {
                 stroke_style,
                 visible,
                 group,
+                clip,
+                mask,
             } => Shape::Path {
                 points: vec![*p0, *p1],
                 closed: false,
@@ -478,6 +625,8 @@ impl Shape {
                 handles: vec![(0.0, 0.0); 2],
                 visible: *visible,
                 group: *group,
+                clip: *clip,
+                mask: *mask,
             },
         }
     }
@@ -665,5 +814,55 @@ impl Document {
         if self.active_artboard >= self.artboards.len() {
             self.active_artboard = self.artboards.len() - 1;
         }
+    }
+
+    /// The shapes to *render*, with clipping masks resolved, paired with the
+    /// originating shape's index (so the canvas keeps its selection highlight
+    /// mapping). Paint / export iterate this rather than `shapes` directly.
+    ///
+    /// For each shape:
+    /// - **mask path** of a clip set → omitted (an Illustrator clipping path
+    ///   paints no fill or stroke once it becomes a mask),
+    /// - **clipped content** (a non-mask member of a clip set) → replaced by its
+    ///   outline intersected against the mask, as a styled closed `Path`. If the
+    ///   content falls entirely outside the mask the shape is omitted; if the mask
+    ///   geometry is unusable the original shape is kept unclipped (graceful
+    ///   degradation),
+    /// - everything else → kept as-is.
+    ///
+    /// Hidden shapes are still skipped by the caller; this method does not filter
+    /// on visibility so callers keep their existing `visible()` checks.
+    pub fn render_shapes(&self) -> Vec<(usize, Shape)> {
+        let tags: Vec<crate::clip::ClipTag> = self.shapes.iter().map(|s| s.clip_tag()).collect();
+        let mut out: Vec<(usize, Shape)> = Vec::with_capacity(self.shapes.len());
+        for (i, shape) in self.shapes.iter().enumerate() {
+            match shape.clip() {
+                None => out.push((i, shape.clone())),
+                Some(_) if shape.is_mask() => { /* mask paints nothing */ }
+                Some(_) => {
+                    // Clip this content shape against its set's mask outline.
+                    let clipped = crate::clip::mask_of(&tags, i)
+                        .and_then(|m| self.shapes[m].outline_polygon())
+                        .and_then(|mask_poly| {
+                            shape
+                                .outline_polygon()
+                                .and_then(|subj| crate::clip::clip_polygon(&subj, &mask_poly))
+                        });
+                    match clipped {
+                        Some(ring) => out.push((i, shape.clone().with_outline(ring))),
+                        // No usable mask geometry: keep the content unclipped.
+                        // (An empty intersection drops the shape entirely.)
+                        None if crate::clip::mask_of(&tags, i)
+                            .map(|m| self.shapes[m].outline_polygon().is_none())
+                            .unwrap_or(true) =>
+                        {
+                            out.push((i, shape.clone()))
+                        }
+                        None => { /* clipped to nothing — omit */ }
+                    }
+                }
+            }
+        }
+        out
     }
 }

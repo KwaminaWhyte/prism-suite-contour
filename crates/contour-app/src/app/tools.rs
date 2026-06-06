@@ -113,11 +113,29 @@ impl ContourApp {
             if let Some(prev) = self.artboard_preview() {
                 canvas::paint_artboard(&painter, &self.view, &prev, "", true);
             }
+            // Bodies, with clipping masks resolved (mask paths paint nothing;
+            // clipped content is cropped to the mask). Rings are drawn separately
+            // below from the original shapes so a selected mask still shows.
+            for (_, s) in self.doc.render_shapes() {
+                if !s.visible() {
+                    continue;
+                }
+                canvas::paint_shape(&painter, &self.view, &s, false);
+            }
+            // Selection rings + a dashed outline for selected mask paths, drawn
+            // from the original (pre-clip) shapes.
             for (i, s) in self.doc.shapes.iter().enumerate() {
                 if !s.visible() {
                     continue;
                 }
-                canvas::paint_shape(&painter, &self.view, s, self.is_selected(i));
+                if self.is_selected(i) {
+                    canvas::paint_selection_ring(&painter, &self.view, s);
+                }
+                // A selected clip path is otherwise invisible; outline it so the
+                // user can see and edit the mask.
+                if s.is_mask() && self.is_selected(i) {
+                    canvas::paint_mask_outline(&painter, &self.view, s);
+                }
             }
 
             // Ruler guides (under handles/overlays, over shapes).
@@ -623,8 +641,10 @@ impl ContourApp {
                 }
             }
         }
-        // A marquee that touches any group member selects the whole group.
-        self.selection = crate::group::expand_selection(&self.group_tags(), &sel);
+        // A marquee that touches any group / clip-set member selects the whole
+        // unit (mirrors a click), via the shared group+clip expansion.
+        self.selection = sel;
+        self.expand_selection_to_groups();
     }
 
     /// Mutate a selected path while dragging one of its anchors or handles.
@@ -711,6 +731,8 @@ impl ContourApp {
                         stroke_style: self.stroke_style.clone(),
                         visible: true,
                         group: None,
+                        clip: None,
+                        mask: false,
                     }
                 } else {
                     Shape::Ellipse {
@@ -722,6 +744,8 @@ impl ContourApp {
                         stroke_style: self.stroke_style.clone(),
                         visible: true,
                         group: None,
+                        clip: None,
+                        mask: false,
                     }
                 })
             }
@@ -737,6 +761,8 @@ impl ContourApp {
                     stroke_style: self.stroke_style.clone(),
                     visible: true,
                     group: None,
+                    clip: None,
+                    mask: false,
                 })
             }
             _ => None,

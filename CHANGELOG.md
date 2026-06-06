@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Clipping masks (`Object → Clipping Mask → Make / Release`)** — a new pure,
+  unit-tested `clip` module and two additive `(clip, mask)` tags on every shape
+  (`#[serde(default)]`), bringing the everyday Illustrator / Affinity operation
+  of cropping artwork to the shape on top:
+  - **Make** turns the selection into a **clip set**: the **topmost** selected
+    shape becomes the **mask**, and the shapes below it are clipped to its
+    outline. **Release** restores the originals. Wired into an **Object →
+    Clipping Mask** submenu, an inspector "Clipping Mask" section, and the
+    Illustrator keys **Cmd/Ctrl + 7** (make) / **Alt + Cmd/Ctrl + 7** (release).
+    Make needs 2+ unclipped objects; Release lights up whenever the selection
+    touches a clip set. Each is a single undo step, and Make re-stacks the set
+    into one contiguous block (mask on top) the way grouping does.
+  - The mask is modelled non-destructively: the mask and the clipped content
+    keep their original geometry (so Release is loss-free and the set round-trips
+    through serde), and the *rendered* result is **derived**, never stored.
+    `Document::render_shapes` resolves clip sets on the fly — the mask paints
+    nothing (an Illustrator clipping path has no fill/stroke), and each content
+    shape is replaced by its outline **intersected against the mask** via
+    `i_overlay` (`clip::clip_polygon`), yielding an ordinary single-ring polygon.
+    Content lying entirely outside the mask drops out; an unusable mask degrades
+    gracefully to the unclipped original.
+  - Rendered consistently across all three surfaces by routing each through
+    `render_shapes`: the **on-canvas** painter (clipped bodies, with a selected
+    mask shown as a dashed accent outline so it stays editable), **PNG** export,
+    and **SVG** export (clipped content emitted already cropped, so the file
+    matches the canvas without `<clipPath>` plumbing).
+  - A clip set selects and moves as one unit, like a group: clicking,
+    shift-clicking, or marquee-touching any member selects the whole set (the
+    group/clip selection expansion is now unified). The `clip`/`mask` tags are
+    additive (`#[serde(default)]` → `None` / `false`), so older `.contour` files
+    load unclipped. The clip-set planning helpers (`next_clip_id`, `can_make`,
+    `can_release`, `members_of`, `mask_of`, `selected_clip_ids`) and the
+    intersection geometry are pure functions pinned by unit tests (no egui
+    context), alongside document-level `render_shapes` resolution tests.
+
 - **Eyedropper tool (sample / apply paint appearance)** — a new pure,
   unit-tested `eyedropper` module and an **Eyedropper** tool in the left palette
   (keyboard **I**), bringing the everyday Illustrator / Affinity "copy the look

@@ -277,15 +277,22 @@ pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected
     }
 
     if selected {
-        if let Some(b) = shape.bounds() {
-            let r = doc_rect(view, &[b.x, b.y, b.w, b.h]);
-            painter.rect_stroke(
-                r.expand(2.0),
-                0.0,
-                Stroke::new(1.5, theme::accent()),
-                egui::StrokeKind::Outside,
-            );
-        }
+        paint_selection_ring(painter, view, shape);
+    }
+}
+
+/// Draw the accent selection ring around a shape's bounding box. Split out from
+/// [`paint_shape`] so clip-mask rendering can paint clipped *bodies* without a
+/// ring, then draw rings from the original (pre-clip) shapes separately.
+pub fn paint_selection_ring(painter: &egui::Painter, view: &View, shape: &Shape) {
+    if let Some(b) = shape.bounds() {
+        let r = doc_rect(view, &[b.x, b.y, b.w, b.h]);
+        painter.rect_stroke(
+            r.expand(2.0),
+            0.0,
+            Stroke::new(1.5, theme::accent()),
+            egui::StrokeKind::Outside,
+        );
     }
 }
 
@@ -465,6 +472,23 @@ pub fn paint_path_handles(
             painter.rect_stroke(sq, 0.0, ring, egui::StrokeKind::Outside);
         }
     }
+}
+
+/// Draw a clip path's outline as a dashed accent ring (a clipping path paints no
+/// fill/stroke, so this is the only on-canvas cue that a selected mask exists).
+pub fn paint_mask_outline(painter: &egui::Painter, view: &View, mask: &Shape) {
+    let Some(ring) = mask.outline_polygon() else {
+        return;
+    };
+    let mut screen: Vec<Pos2> = ring.iter().map(|&p| view.doc_to_screen(p)).collect();
+    if screen.len() < 2 {
+        return;
+    }
+    screen.push(screen[0]);
+    let stroke = Stroke::new(1.0, theme::accent());
+    let mut dashed = Vec::new();
+    egui::Shape::dashed_line_many_with_offset(&screen, stroke, &[5.0], &[3.0], 0.0, &mut dashed);
+    painter.extend(dashed);
 }
 
 /// Screen-space position of transform `handle` on the document-space box

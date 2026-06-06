@@ -134,6 +134,30 @@ impl ContourApp {
                     });
 
                     ui.separator();
+                    ui.menu_button("Clipping Mask", |ui| {
+                        ui.add_enabled_ui(self.can_make_clip(), |ui| {
+                            if ui
+                                .button(format!("{}  Make", icons::CLIP_MAKE))
+                                .on_hover_text("Clip the lower objects to the topmost (Ctrl/Cmd+7)")
+                                .clicked()
+                            {
+                                self.make_clip();
+                                ui.close_menu();
+                            }
+                        });
+                        ui.add_enabled_ui(self.can_release_clip(), |ui| {
+                            if ui
+                                .button(format!("{}  Release", icons::CLIP_RELEASE))
+                                .on_hover_text("Release the clipping mask (Alt+Ctrl/Cmd+7)")
+                                .clicked()
+                            {
+                                self.release_clip();
+                                ui.close_menu();
+                            }
+                        });
+                    });
+
+                    ui.separator();
                     ui.menu_button("Align", |ui| {
                         let can_align =
                             self.selection.len() >= 2 || self.align_to == AlignTo::Artboard;
@@ -451,6 +475,11 @@ impl ContourApp {
                             .show(ui, |ui| {
                                 self.group_section(ui);
                             });
+                        egui::CollapsingHeader::new("Clipping Mask")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                self.clip_section(ui);
+                            });
                         egui::CollapsingHeader::new("Arrange")
                             .default_open(false)
                             .show(ui, |ui| {
@@ -761,6 +790,36 @@ impl ContourApp {
         });
         if !self.can_group() && !self.can_ungroup() {
             ui.weak("Select 2+ shapes to group.");
+        }
+    }
+
+    /// Make / Release clipping-mask controls. Make clips the lower selected
+    /// objects to the topmost one's outline (Cmd/Ctrl+7); Release restores the
+    /// originals (Alt+Cmd/Ctrl+7). Each is a single undo step; buttons disable
+    /// when the gesture is a no-op. Mirrors `Object → Clipping Mask`.
+    fn clip_section(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(self.can_make_clip(), |ui| {
+                if ui
+                    .button(format!("{}  Make", icons::CLIP_MAKE))
+                    .on_hover_text("Clip lower objects to the topmost (Cmd/Ctrl+7)")
+                    .clicked()
+                {
+                    self.make_clip();
+                }
+            });
+            ui.add_enabled_ui(self.can_release_clip(), |ui| {
+                if ui
+                    .button(format!("{}  Release", icons::CLIP_RELEASE))
+                    .on_hover_text("Release clipping mask (Alt+Cmd/Ctrl+7)")
+                    .clicked()
+                {
+                    self.release_clip();
+                }
+            });
+        });
+        if !self.can_make_clip() && !self.can_release_clip() {
+            ui.weak("Select 2+ objects; the topmost becomes the mask.");
         }
     }
 

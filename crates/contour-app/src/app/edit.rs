@@ -44,12 +44,25 @@ impl ContourApp {
         }
     }
 
-    /// Shift-click toggle that treats a group atomically: if shape `i` belongs to
-    /// a group, the whole group is added (when any member is currently absent) or
-    /// removed (when all members are present); an ungrouped shape toggles alone.
+    /// The shapes that select together with shape `i`: the union of `i`'s group
+    /// members and its clip-set members (a clipping mask, like a group, selects
+    /// and moves as one unit). Sorted, de-duplicated; `[i]` for a loose shape.
+    pub(super) fn unit_members_of(&self, i: usize) -> Vec<usize> {
+        let gtags = self.group_tags();
+        let ctags = self.clip_tags();
+        let mut members = group::members_of(&gtags, i);
+        members.extend(crate::clip::members_of(&ctags, i));
+        members.sort_unstable();
+        members.dedup();
+        members
+    }
+
+    /// Shift-click toggle that treats a group / clip set atomically: if shape `i`
+    /// belongs to one, the whole unit is added (when any member is currently
+    /// absent) or removed (when all members are present); a loose shape toggles
+    /// alone.
     pub(super) fn toggle_group_selection(&mut self, i: usize) {
-        let tags = self.group_tags();
-        let members = group::members_of(&tags, i);
+        let members = self.unit_members_of(i);
         if members.len() <= 1 {
             self.toggle_selection(i);
             return;
@@ -73,13 +86,21 @@ impl ContourApp {
         self.doc.shapes.iter().map(|s| s.group()).collect()
     }
 
-    /// Expand the current selection so that selecting any member of a group
-    /// selects the whole group. Keeps the original primary (last-added) shape as
-    /// primary when it survives expansion; otherwise the topmost expanded shape
-    /// becomes primary. Pure bookkeeping — records no undo entry.
+    /// Expand the current selection so that selecting any member of a group — or
+    /// of a clipping mask — selects the whole unit. Keeps the original primary
+    /// (last-added) shape as primary when it survives expansion; otherwise the
+    /// topmost expanded shape becomes primary. Pure bookkeeping — no undo entry.
     pub(super) fn expand_selection_to_groups(&mut self) {
-        let tags = self.group_tags();
-        let expanded = group::expand_selection(&tags, &self.selection);
+        // Groups expand via the shared pure helper; clip sets are unioned in.
+        let mut expanded = group::expand_selection(&self.group_tags(), &self.selection);
+        let ctags = self.clip_tags();
+        let mut clip_extra: Vec<usize> = Vec::new();
+        for &i in &expanded {
+            clip_extra.extend(crate::clip::members_of(&ctags, i));
+        }
+        expanded.extend(clip_extra);
+        expanded.sort_unstable();
+        expanded.dedup();
         // Compare against the normalised current selection; bail if unchanged.
         let mut current = self.selection.clone();
         current.sort_unstable();
@@ -178,6 +199,91 @@ impl ContourApp {
             }
         }
         self.status = "Ungrouped".into();
+    }
+
+    // --- Clipping masks ------------------------------------------------------
+
+    /// The per-shape clip tags in paint order, for the pure [`clip`] helpers.
+    pub(super) fn clip_tags(&self) -> Vec<crate::clip::ClipTag> {
+        self.doc.shapes.iter().map(|s| s.clip_tag()).collect()
+    }
+
+    /// Whether the selection can be made into a clipping mask (≥2 distinct
+    /// shapes, none already clipped). Drives menu / button enablement.
+    pub(super) fn can_make_clip(&self) -> bool {
+        crate::clip::can_make(&self.clip_tags(), &self.selection)
+    }
+
+    /// Whether the selection touches any clip set (so Release is meaningful).
+    pub(super) fn can_release_clip(&self) -> bool {
+        crate::clip::can_release(&self.clip_tags(), &self.selection)
+    }
+
+    /// Make a clipping mask from the selection (Illustrator's
+    /// `Object → Clipping Mask → Make`): the **topmost** selected shape becomes
+    /// the mask and the shapes below it are clipped to its outline. Tags all
+    /// members with a fresh clip-set id, flags the top one as the mask, and
+    /// gathers them into one contiguous block anchored at the top (so the set
+    /// reads as a unit and the mask sits above its content). One undo step; the
+    /// selection is remapped to the moved block so the set stays selected.
+    pub(super) fn make_clip(&mut self) {
+        if !self.can_make_clip() {
+            self.status = "Clipping mask: select two or more unclipped objects".into();
+            return;
+        }
+        self.checkpoint();
+        let id = crate::clip::next_clip_id(&self.clip_tags());
+
+        // Sorted, de-duplicated, in-range selection in paint order.
+        let mut sel: Vec<usize> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|&i| i < self.doc.shapes.len())
+            .collect();
+        sel.sort_unstable();
+        sel.dedup();
+
+        // The topmost (frontmost) selected shape is the mask.
+        let top = *sel.last().expect("non-empty");
+        for &i in &sel {
+            self.doc.shapes[i].set_clip(Some(id));
+            self.doc.shapes[i].set_mask(i == top);
+        }
+
+        // Gather the members into one contiguous block ending at the top's slot,
+        // preserving relative order (mask stays last = frontmost), mirroring how
+        // grouping re-stacks. Insert right after the unselected shapes at/below
+        // `top`.
+        let insert_at = (0..=top).filter(|i| !sel.contains(i)).count();
+        let mut block: Vec<Shape> = Vec::with_capacity(sel.len());
+        for &i in sel.iter().rev() {
+            block.push(self.doc.shapes.remove(i));
+        }
+        block.reverse();
+        for (k, shape) in block.into_iter().enumerate() {
+            self.doc.shapes.insert(insert_at + k, shape);
+        }
+        self.selection = (insert_at..insert_at + sel.len()).collect();
+        self.status = "Made clipping mask".into();
+    }
+
+    /// Release every clip set the selection touches (Illustrator's
+    /// `Object → Clipping Mask → Release`): clears the clip / mask tags on all
+    /// members so the originals reappear unclipped. One undo step.
+    pub(super) fn release_clip(&mut self) {
+        if !self.can_release_clip() {
+            return;
+        }
+        self.checkpoint();
+        let tags = self.clip_tags();
+        let ids = crate::clip::selected_clip_ids(&tags, &self.selection);
+        for s in self.doc.shapes.iter_mut() {
+            if s.clip().is_some_and(|c| ids.binary_search(&c).is_ok()) {
+                s.clear_clip();
+            }
+        }
+        self.status = "Released clipping mask".into();
     }
 
     // --- Undo / redo ---------------------------------------------------------
@@ -502,6 +608,8 @@ impl ContourApp {
                 handles,
                 visible: true,
                 group: None,
+                clip: None,
+                mask: false,
             });
             self.select_only(Some(self.doc.shapes.len() - 1));
         } else {

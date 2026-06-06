@@ -343,6 +343,8 @@ fn axis_aligned_scale_keeps_rect_a_rect() {
         stroke_style: StrokeStyle::default(),
         visible: true,
         group: None,
+        clip: None,
+        mask: false,
     };
     // Scale ×2 about the origin.
     s.apply_affine(&Affine::scale(2.0, 2.0));
@@ -365,6 +367,8 @@ fn flip_keeps_rect_normalized() {
         stroke_style: StrokeStyle::default(),
         visible: true,
         group: None,
+        clip: None,
+        mask: false,
     };
     // Horizontal flip about x = 30 (the rect's centre): bounds unchanged,
     // width/height stay positive.
@@ -390,6 +394,8 @@ fn rotation_converts_rect_to_path() {
         stroke_style: StrokeStyle::default(),
         visible: true,
         group: None,
+        clip: None,
+        mask: false,
     };
     s.apply_affine(&Affine::rotate_about(0.5, 5.0, 5.0));
     assert!(
@@ -413,6 +419,8 @@ fn rotation_preserves_rect_center() {
         stroke_style: StrokeStyle::default(),
         visible: true,
         group: None,
+        clip: None,
+        mask: false,
     };
     let before = s.bounds().unwrap();
     let (cx0, cy0) = (before.x + before.w * 0.5, before.y + before.h * 0.5);
@@ -437,6 +445,8 @@ fn ellipse_to_path_round_trips_bounds() {
         stroke_style: StrokeStyle::default(),
         visible: true,
         group: None,
+        clip: None,
+        mask: false,
     };
     let p = s.to_path();
     let pb = p.bounds().unwrap();
@@ -462,6 +472,8 @@ fn path_handles_transform_by_linear_part() {
         handles: vec![(3.0, 4.0), (0.0, 0.0)],
         visible: true,
         group: None,
+        clip: None,
+        mask: false,
     };
     s.apply_affine(&Affine::translate(100.0, 50.0));
     if let Shape::Path {
@@ -528,6 +540,8 @@ fn line_ignores_gradient_fill() {
         stroke_style: StrokeStyle::default(),
         visible: true,
         group: None,
+        clip: None,
+        mask: false,
     };
     line.set_fill_gradient(Some(Gradient::two_stop(
         GradientKind::Linear,
@@ -570,6 +584,8 @@ fn group_accessor_covers_every_variant() {
         stroke_style: StrokeStyle::default(),
         visible: true,
         group: None,
+        clip: None,
+        mask: false,
     };
     line.set_group(Some(3));
     assert_eq!(line.group(), Some(3));
@@ -591,6 +607,8 @@ fn to_path_preserves_group() {
         stroke_style: StrokeStyle::default(),
         visible: true,
         group: Some(42),
+        clip: None,
+        mask: false,
     };
     assert_eq!(r.to_path().group(), Some(42));
 
@@ -599,4 +617,141 @@ fn to_path_preserves_group() {
     r2.apply_affine(&Affine::rotate_about(0.5, 5.0, 5.0));
     assert!(matches!(r2, Shape::Path { .. }));
     assert_eq!(r2.group(), Some(42));
+}
+
+/// A `Rect` with a gradient fill carries that gradient through `with_outline`,
+/// and the produced shape is a clipped, plain (un-clip-tagged) closed path.
+#[test]
+fn with_outline_inherits_paint_and_clears_clip() {
+    let mut s = Shape::Rect {
+        rect: [0.0, 0.0, 10.0, 10.0],
+        fill: [0.2, 0.4, 0.6, 1.0],
+        fill_gradient: None,
+        stroke: [0.1, 0.1, 0.1, 1.0],
+        stroke_w: 3.0,
+        stroke_style: StrokeStyle::default(),
+        visible: true,
+        group: Some(5),
+        clip: Some(9),
+        mask: false,
+    };
+    s.set_mask(true);
+    let ring = vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)];
+    let out = s.with_outline(ring.clone());
+    match out {
+        Shape::Path {
+            points,
+            closed,
+            fill,
+            stroke_w,
+            group,
+            clip,
+            mask,
+            ..
+        } => {
+            assert_eq!(points, ring);
+            assert!(closed);
+            assert_eq!(fill, [0.2, 0.4, 0.6, 1.0]);
+            assert_eq!(stroke_w, 3.0);
+            assert_eq!(group, Some(5)); // group survives
+            assert_eq!(clip, None); // clip tag cleared (already clipped)
+            assert!(!mask);
+        }
+        _ => panic!("with_outline must produce a Path"),
+    }
+}
+
+/// Helper: a styled rect with explicit clip tagging, for clip-set tests.
+fn clip_rect(rect: [f32; 4], clip: Option<u64>, mask: bool) -> Shape {
+    Shape::Rect {
+        rect,
+        fill: [0.5, 0.5, 0.5, 1.0],
+        fill_gradient: None,
+        stroke: [0.0, 0.0, 0.0, 1.0],
+        stroke_w: 1.0,
+        stroke_style: StrokeStyle::default(),
+        visible: true,
+        group: None,
+        clip,
+        mask,
+    }
+}
+
+/// `render_shapes` resolves a clip set: the mask paints nothing, and the clipped
+/// content is cropped to the mask outline.
+#[test]
+fn render_shapes_resolves_a_clip_set() {
+    let mut doc = Document::new();
+    // A 20×20 content rect clipped by a 10×10 mask (set id 0; the mask is on top).
+    doc.shapes
+        .push(clip_rect([0.0, 0.0, 20.0, 20.0], Some(0), false));
+    doc.shapes
+        .push(clip_rect([0.0, 0.0, 10.0, 10.0], Some(0), true));
+    // Plus a loose rect that should pass through untouched.
+    doc.shapes
+        .push(clip_rect([50.0, 50.0, 5.0, 5.0], None, false));
+
+    let rendered = doc.render_shapes();
+    // The mask is omitted; the content (clipped) + the loose rect remain.
+    assert_eq!(rendered.len(), 2);
+    let indices: Vec<usize> = rendered.iter().map(|(i, _)| *i).collect();
+    assert!(indices.contains(&0)); // clipped content kept (original index 0)
+    assert!(indices.contains(&2)); // loose rect kept
+    assert!(!indices.contains(&1)); // mask dropped
+
+    // The clipped content's bounds shrink to the 10×10 mask region.
+    let content = &rendered.iter().find(|(i, _)| *i == 0).unwrap().1;
+    let b = content.bounds().unwrap();
+    assert!((b.x - 0.0).abs() < 1e-2 && (b.y - 0.0).abs() < 1e-2);
+    assert!((b.w - 10.0).abs() < 1e-2 && (b.h - 10.0).abs() < 1e-2);
+}
+
+/// Content lying entirely outside the mask is dropped from the render.
+#[test]
+fn render_shapes_drops_content_outside_the_mask() {
+    let mut doc = Document::new();
+    doc.shapes
+        .push(clip_rect([100.0, 100.0, 10.0, 10.0], Some(0), false));
+    doc.shapes
+        .push(clip_rect([0.0, 0.0, 10.0, 10.0], Some(0), true));
+    let rendered = doc.render_shapes();
+    // Disjoint content clips to nothing; the mask paints nothing → empty render.
+    assert!(rendered.is_empty());
+}
+
+/// A clip set round-trips through serde, and clearing the tags (Release) restores
+/// the originals so `render_shapes` returns every shape unclipped.
+#[test]
+fn clip_tags_serde_round_trip_and_release() {
+    let mut doc = Document::new();
+    doc.shapes
+        .push(clip_rect([0.0, 0.0, 20.0, 20.0], Some(3), false));
+    doc.shapes
+        .push(clip_rect([0.0, 0.0, 10.0, 10.0], Some(3), true));
+
+    let json = serde_json::to_string(&doc).unwrap();
+    let back: Document = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.shapes[0].clip(), Some(3));
+    assert!(back.shapes[1].is_mask());
+
+    // Release: clear the clip tags; both shapes now render plainly.
+    let mut released = back;
+    for s in released.shapes.iter_mut() {
+        s.clear_clip();
+    }
+    assert!(released.shapes.iter().all(|s| s.clip().is_none()));
+    assert_eq!(released.render_shapes().len(), 2);
+}
+
+/// A pre-clip `.contour` (no `clip`/`mask` keys) loads unclipped and renders every
+/// shape as-is.
+#[test]
+fn loads_pre_clip_document() {
+    let json = r#"{"shapes":[
+        {"Rect":{"rect":[0,0,10,10],"fill":[1,0,0,1],"stroke":[0,0,0,1],"stroke_w":2}}
+    ]}"#;
+    let doc: Document = serde_json::from_str(json).unwrap();
+    assert_eq!(doc.shapes[0].clip(), None);
+    assert!(!doc.shapes[0].is_mask());
+    assert_eq!(doc.render_shapes().len(), 1);
 }
