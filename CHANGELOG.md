@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Gradient fills (multi-stop, linear & radial)** — a new pure, unit-tested
+  `gradient` module and an additive `fill_gradient: Option<Gradient>` on every
+  filled shape (`Rect` / `Ellipse` / `Path`) that overrides the solid `fill`
+  when present:
+  - A `Gradient` is geometry-free — an ordered set of colour **stops** at
+    parametric offsets `0..=1`, a **kind** (linear at a chosen **angle**, or
+    radial), and a **spread mode** (Pad / Repeat / Reflect). The renderer maps
+    the `0..=1` parameter onto the shape's bounding box (`linear_endpoints` /
+    `radial_params`), so a gradient always follows the object's bounds the way
+    Illustrator's gradient fills do. `color_at` interpolates between the two
+    bracketing sorted stops, clamping/repeating/reflecting per the spread mode.
+  - An inspector **Fill** section toggles **Solid ⇄ Gradient**; the gradient
+    editor picks kind, spread and angle, and edits the **stop list** (add a stop
+    at the widest gap sampled in place, recolour, drag the offset, remove down to
+    two). Like the stroke section it edits the primary selected shape (one undo
+    step per change) and tracks the app default so the next new shape inherits
+    the fill.
+  - Rendered consistently across all three surfaces: the **on-canvas** painter
+    (a per-vertex gradient triangle-fan `Mesh` — exact for convex shapes, a
+    faithful preview otherwise), **PNG** export (tiny-skia `LinearGradient` /
+    `RadialGradient` shaders with matching spread mode), and **SVG** export
+    (`<linearGradient>` / `<radialGradient>` defs in user space, one per
+    gradient-filled shape, referenced via `fill="url(#…)"`; multi-stop with
+    `stop-opacity` and `spreadMethod`).
+  - The field is additive (`#[serde(default)]`), so older `.contour` files load
+    as a solid fill; gradients round-trip through serde. Boolean-op results
+    inherit the subject shape's gradient.
+
 - **Arrange (stacking order)** — a new pure, unit-tested `arrange` module that
   reorders the flat paint-order list for the four Illustrator commands
   (**Bring to Front**, **Bring Forward**, **Send Backward**, **Send to Back**),

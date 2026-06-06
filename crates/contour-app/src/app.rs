@@ -6,6 +6,7 @@ use crate::arrange::{self, Arrange};
 use crate::boolean::{self, BoolOp};
 use crate::canvas::{self, View};
 use crate::document::{self, Document, Guide, LineCap, LineJoin, Shape, StrokeStyle};
+use crate::gradient::{Gradient, GradientKind, GradientStop, SpreadMode};
 use crate::history::History;
 use crate::snap::{self, SnapConfig, SnapFeatures, SnapResult, SnapTargets};
 use crate::transform::{self, Affine, Handle};
@@ -135,6 +136,9 @@ pub struct ContourApp {
     /// Two-operand boolean ops use the two most-recently-added members.
     selection: Vec<usize>,
     fill: [f32; 4],
+    /// Current gradient fill applied to new shapes (and to the selected shape via
+    /// the inspector's Fill section). `None` = a solid `fill`.
+    fill_gradient: Option<Gradient>,
     stroke: [f32; 4],
     stroke_w: f32,
     /// Current stroke attributes (caps/joins/dashes) applied to new shapes and
@@ -172,6 +176,7 @@ impl ContourApp {
             tool: Tool::Select,
             selection: Vec::new(),
             fill: [0.27, 0.55, 0.85, 1.0],
+            fill_gradient: None,
             stroke: [0.10, 0.12, 0.15, 1.0],
             stroke_w: 2.0,
             stroke_style: StrokeStyle::default(),
@@ -397,6 +402,7 @@ impl ContourApp {
                 points,
                 closed,
                 fill: self.fill,
+                fill_gradient: self.fill_gradient.clone(),
                 stroke: self.stroke,
                 stroke_w: self.stroke_w,
                 stroke_style: self.stroke_style.clone(),
@@ -1170,7 +1176,7 @@ impl ContourApp {
                 ui.heading("Style");
                 ui.add_space(4.0);
 
-                color_row(ui, "Fill", &mut self.fill);
+                self.fill_section(ui);
                 color_row(ui, "Stroke", &mut self.stroke);
                 ui.horizontal(|ui| {
                     ui.label("Width");
@@ -1195,6 +1201,89 @@ impl ContourApp {
                 ui.separator();
                 self.layers_panel(ui);
             });
+    }
+
+    /// Fill controls: a solid colour or a multi-stop gradient (linear / radial).
+    /// Like the stroke section, the controls edit the primary selected shape's
+    /// fill (one undo step per discrete change) and the app default tracks along
+    /// so the next new shape inherits it; with no selection only the app default
+    /// is edited.
+    fn fill_section(&mut self, ui: &mut egui::Ui) {
+        // Seed the working state from the primary selected shape (so the panel
+        // reflects the selection), falling back to the app default.
+        let primary = self.primary();
+        let seeded = primary.and_then(|i| self.doc.shapes.get(i));
+        let mut solid = match seeded.and_then(|s| s.fill_color()) {
+            Some(c) => c,
+            None => self.fill,
+        };
+        let mut grad: Option<Gradient> = match seeded {
+            Some(s) => s.fill_gradient().cloned(),
+            None => self.fill_gradient.clone(),
+        };
+
+        let mut changed = false;
+
+        ui.horizontal(|ui| {
+            ui.label("Fill");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Solid / Gradient toggle.
+                let mut is_grad = grad.is_some();
+                if ui.selectable_label(!is_grad, "Solid").clicked() && is_grad {
+                    grad = None;
+                    is_grad = false;
+                    changed = true;
+                }
+                if ui.selectable_label(is_grad, "Gradient").clicked() && !is_grad {
+                    // Start a gradient from the current solid colour to white,
+                    // unless the shape already had one to restore.
+                    grad = Some(Gradient::two_stop(
+                        GradientKind::Linear,
+                        solid,
+                        [1.0, 1.0, 1.0, 1.0],
+                    ));
+                    changed = true;
+                }
+            });
+        });
+
+        match &mut grad {
+            None => {
+                // Solid colour swatch.
+                let mut c = Color32::from_rgba_unmultiplied(
+                    (solid[0] * 255.0) as u8,
+                    (solid[1] * 255.0) as u8,
+                    (solid[2] * 255.0) as u8,
+                    (solid[3] * 255.0) as u8,
+                );
+                if ui.color_edit_button_srgba(&mut c).changed() {
+                    solid = [
+                        c.r() as f32 / 255.0,
+                        c.g() as f32 / 255.0,
+                        c.b() as f32 / 255.0,
+                        c.a() as f32 / 255.0,
+                    ];
+                    changed = true;
+                }
+            }
+            Some(g) => {
+                changed |= gradient_editor(ui, g);
+            }
+        }
+
+        if changed {
+            // Update the app defaults so the next new shape inherits the fill.
+            self.fill = solid;
+            self.fill_gradient = grad.clone();
+            // Apply to the selected shape as a single undo step.
+            if let Some(i) = primary {
+                self.checkpoint();
+                if let Some(shape) = self.doc.shapes.get_mut(i) {
+                    shape.set_fill_color(solid);
+                    shape.set_fill_gradient(grad);
+                }
+            }
+        }
     }
 
     /// Stroke options: caps, joins, miter limit, and a dash pattern. When a
@@ -2075,6 +2164,7 @@ impl ContourApp {
                     Shape::Rect {
                         rect,
                         fill: self.fill,
+                        fill_gradient: self.fill_gradient.clone(),
                         stroke: self.stroke,
                         stroke_w: self.stroke_w,
                         stroke_style: self.stroke_style.clone(),
@@ -2084,6 +2174,7 @@ impl ContourApp {
                     Shape::Ellipse {
                         rect,
                         fill: self.fill,
+                        fill_gradient: self.fill_gradient.clone(),
                         stroke: self.stroke,
                         stroke_w: self.stroke_w,
                         stroke_style: self.stroke_style.clone(),
@@ -2289,6 +2380,7 @@ impl ContourApp {
                     &self.inter.pen_handles,
                     false,
                     [0.0, 0.0, 0.0, 0.0],
+                    None,
                     self.stroke,
                     self.stroke_w.max(1.0),
                     &self.stroke_style,
@@ -2307,6 +2399,112 @@ impl ContourApp {
 /// A small square icon button for the align/distribute row.
 fn align_button(ui: &mut egui::Ui, icon: &str) -> egui::Response {
     ui.add(egui::Button::new(egui::RichText::new(icon).size(16.0)).min_size(Vec2::new(26.0, 26.0)))
+}
+
+/// Edit a [`Gradient`] in place: kind (linear / radial), spread, linear angle,
+/// quick presets, and an editable list of colour stops (add / remove / move /
+/// recolour). Returns `true` if any control changed the gradient this frame.
+fn gradient_editor(ui: &mut egui::Ui, g: &mut Gradient) -> bool {
+    let mut changed = false;
+
+    // Kind + spread.
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt("grad_kind")
+            .selected_text(g.kind.label())
+            .show_ui(ui, |ui| {
+                for k in [GradientKind::Linear, GradientKind::Radial] {
+                    if ui.selectable_value(&mut g.kind, k, k.label()).changed() {
+                        changed = true;
+                    }
+                }
+            });
+        egui::ComboBox::from_id_salt("grad_spread")
+            .selected_text(g.spread.label())
+            .show_ui(ui, |ui| {
+                for m in SpreadMode::ALL {
+                    if ui.selectable_value(&mut g.spread, m, m.label()).changed() {
+                        changed = true;
+                    }
+                }
+            });
+    });
+
+    // Angle (linear only).
+    if g.kind == GradientKind::Linear {
+        ui.horizontal(|ui| {
+            ui.label("Angle");
+            if ui
+                .add(egui::Slider::new(&mut g.angle, 0.0..=360.0).suffix("°"))
+                .changed()
+            {
+                changed = true;
+            }
+        });
+    }
+
+    // Stops: each row is offset + colour + a remove button. A stable id per row
+    // keeps egui widgets distinct as stops are added/removed.
+    ui.label(egui::RichText::new("Stops").weak());
+    let mut remove: Option<usize> = None;
+    let can_remove = g.stops.len() > 2;
+    for (idx, stop) in g.stops.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            if ui
+                .add(
+                    egui::DragValue::new(&mut stop.offset)
+                        .speed(0.005)
+                        .range(0.0..=1.0)
+                        .fixed_decimals(2),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+            let mut c = Color32::from_rgba_unmultiplied(
+                (stop.color[0] * 255.0) as u8,
+                (stop.color[1] * 255.0) as u8,
+                (stop.color[2] * 255.0) as u8,
+                (stop.color[3] * 255.0) as u8,
+            );
+            if ui.color_edit_button_srgba(&mut c).changed() {
+                stop.color = [
+                    c.r() as f32 / 255.0,
+                    c.g() as f32 / 255.0,
+                    c.b() as f32 / 255.0,
+                    c.a() as f32 / 255.0,
+                ];
+                changed = true;
+            }
+            ui.add_enabled_ui(can_remove, |ui| {
+                if ui.small_button("✕").on_hover_text("Remove stop").clicked() {
+                    remove = Some(idx);
+                }
+            });
+        });
+    }
+    if let Some(i) = remove {
+        g.stops.remove(i);
+        changed = true;
+    }
+
+    // Add a stop at the midpoint of the widest gap, coloured by sampling there.
+    if ui.button("+ Add stop").clicked() {
+        let sorted = g.sorted_stops();
+        let mut best_gap = -1.0;
+        let mut best_mid = 0.5;
+        for w in sorted.windows(2) {
+            let gap = w[1].offset - w[0].offset;
+            if gap > best_gap {
+                best_gap = gap;
+                best_mid = (w[0].offset + w[1].offset) * 0.5;
+            }
+        }
+        let color = g.color_at(best_mid);
+        g.stops.push(GradientStop::new(best_mid, color));
+        changed = true;
+    }
+
+    changed
 }
 
 fn color_row(ui: &mut egui::Ui, label: &str, rgba: &mut [f32; 4]) {

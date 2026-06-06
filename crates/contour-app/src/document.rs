@@ -6,6 +6,7 @@
 //! (matching egui's `Rgba`/`Color32` channel order) so they round-trip cleanly
 //! through the color pickers and JSON.
 
+use crate::gradient::Gradient;
 use crate::transform::Affine;
 use kurbo::{BezPath, PathEl, Point, Shape as KurboShape};
 use prism_core::geometry::Rect as CoreRect;
@@ -156,6 +157,10 @@ pub enum Shape {
     Rect {
         rect: [f32; 4],
         fill: [f32; 4],
+        /// Optional multi-stop gradient that overrides `fill` when present.
+        /// Additive (`#[serde(default)]`), so older files load as a solid fill.
+        #[serde(default)]
+        fill_gradient: Option<Gradient>,
         stroke: [f32; 4],
         stroke_w: f32,
         #[serde(default)]
@@ -166,6 +171,8 @@ pub enum Shape {
     Ellipse {
         rect: [f32; 4],
         fill: [f32; 4],
+        #[serde(default)]
+        fill_gradient: Option<Gradient>,
         stroke: [f32; 4],
         stroke_w: f32,
         #[serde(default)]
@@ -187,6 +194,8 @@ pub enum Shape {
         points: Vec<(f32, f32)>,
         closed: bool,
         fill: [f32; 4],
+        #[serde(default)]
+        fill_gradient: Option<Gradient>,
         stroke: [f32; 4],
         stroke_w: f32,
         #[serde(default)]
@@ -253,6 +262,50 @@ impl Shape {
             | Shape::Ellipse { stroke_style, .. }
             | Shape::Line { stroke_style, .. }
             | Shape::Path { stroke_style, .. } => stroke_style,
+        }
+    }
+
+    /// The shape's gradient fill, if it has one (`Line` never does). When
+    /// present this overrides the solid `fill` colour on every render surface.
+    pub fn fill_gradient(&self) -> Option<&Gradient> {
+        match self {
+            Shape::Rect { fill_gradient, .. }
+            | Shape::Ellipse { fill_gradient, .. }
+            | Shape::Path { fill_gradient, .. } => fill_gradient.as_ref(),
+            Shape::Line { .. } => None,
+        }
+    }
+
+    /// Set (or clear, with `None`) the shape's gradient fill. No-op on `Line`,
+    /// which has no fill region.
+    pub fn set_fill_gradient(&mut self, g: Option<Gradient>) {
+        match self {
+            Shape::Rect { fill_gradient, .. }
+            | Shape::Ellipse { fill_gradient, .. }
+            | Shape::Path { fill_gradient, .. } => *fill_gradient = g,
+            Shape::Line { .. } => {}
+        }
+    }
+
+    /// The shape's solid fill colour, if it has a fill region (`Line` returns
+    /// `None`). This is the colour used when there is no gradient, and the
+    /// gradient's fallback.
+    pub fn fill_color(&self) -> Option<[f32; 4]> {
+        match self {
+            Shape::Rect { fill, .. } | Shape::Ellipse { fill, .. } | Shape::Path { fill, .. } => {
+                Some(*fill)
+            }
+            Shape::Line { .. } => None,
+        }
+    }
+
+    /// Set the shape's solid fill colour. No-op on `Line`.
+    pub fn set_fill_color(&mut self, c: [f32; 4]) {
+        match self {
+            Shape::Rect { fill, .. } | Shape::Ellipse { fill, .. } | Shape::Path { fill, .. } => {
+                *fill = c
+            }
+            Shape::Line { .. } => {}
         }
     }
 
@@ -381,6 +434,7 @@ impl Shape {
             Shape::Rect {
                 rect,
                 fill,
+                fill_gradient,
                 stroke,
                 stroke_w,
                 stroke_style,
@@ -397,6 +451,7 @@ impl Shape {
                     points: pts,
                     closed: true,
                     fill: *fill,
+                    fill_gradient: fill_gradient.clone(),
                     stroke: *stroke,
                     stroke_w: *stroke_w,
                     stroke_style: stroke_style.clone(),
@@ -407,6 +462,7 @@ impl Shape {
             Shape::Ellipse {
                 rect,
                 fill,
+                fill_gradient,
                 stroke,
                 stroke_w,
                 stroke_style,
@@ -437,6 +493,7 @@ impl Shape {
                     points,
                     closed: true,
                     fill: *fill,
+                    fill_gradient: fill_gradient.clone(),
                     stroke: *stroke,
                     stroke_w: *stroke_w,
                     stroke_style: stroke_style.clone(),
@@ -455,6 +512,7 @@ impl Shape {
                 points: vec![*p0, *p1],
                 closed: false,
                 fill: [0.0, 0.0, 0.0, 0.0],
+                fill_gradient: None,
                 stroke: *stroke,
                 stroke_w: *stroke_w,
                 stroke_style: stroke_style.clone(),
@@ -1212,6 +1270,7 @@ mod tests {
         let mut s = Shape::Rect {
             rect: [10.0, 20.0, 40.0, 30.0],
             fill: [0.0; 4],
+            fill_gradient: None,
             stroke: [0.0; 4],
             stroke_w: 1.0,
             stroke_style: StrokeStyle::default(),
@@ -1232,6 +1291,7 @@ mod tests {
         let mut s = Shape::Rect {
             rect: [10.0, 0.0, 40.0, 20.0],
             fill: [0.0; 4],
+            fill_gradient: None,
             stroke: [0.0; 4],
             stroke_w: 1.0,
             stroke_style: StrokeStyle::default(),
@@ -1255,6 +1315,7 @@ mod tests {
         let mut s = Shape::Rect {
             rect: [0.0, 0.0, 10.0, 10.0],
             fill: [0.0; 4],
+            fill_gradient: None,
             stroke: [0.0; 4],
             stroke_w: 1.0,
             stroke_style: StrokeStyle::default(),
@@ -1276,6 +1337,7 @@ mod tests {
         let mut s = Shape::Rect {
             rect: [0.0, 0.0, 100.0, 40.0],
             fill: [0.0; 4],
+            fill_gradient: None,
             stroke: [0.0; 4],
             stroke_w: 1.0,
             stroke_style: StrokeStyle::default(),
@@ -1298,6 +1360,7 @@ mod tests {
         let s = Shape::Ellipse {
             rect: [0.0, 0.0, 80.0, 40.0],
             fill: [0.0; 4],
+            fill_gradient: None,
             stroke: [0.0; 4],
             stroke_w: 1.0,
             stroke_style: StrokeStyle::default(),
@@ -1320,6 +1383,7 @@ mod tests {
             points: vec![(0.0, 0.0), (10.0, 0.0)],
             closed: false,
             fill: [0.0; 4],
+            fill_gradient: None,
             stroke: [0.0; 4],
             stroke_w: 1.0,
             stroke_style: StrokeStyle::default(),
@@ -1349,5 +1413,54 @@ mod tests {
         assert_eq!(doc.shapes.len(), 1);
         let st = doc.shapes[0].stroke_style();
         assert_eq!(st, &StrokeStyle::default());
+    }
+
+    // --- Gradient fills ----------------------------------------------------
+
+    /// `.contour` files written before gradient fills existed must load with no
+    /// gradient (a solid fill), and a gradient must round-trip through serde.
+    #[test]
+    fn fill_gradient_is_additive_and_round_trips() {
+        use crate::gradient::{Gradient, GradientKind};
+        // A pre-gradient Rect (no `fill_gradient` key) loads with `None`.
+        let json = r#"{"shapes":[
+            {"Rect":{"rect":[0,0,10,10],"fill":[1,0,0,1],"stroke":[0,0,0,1],"stroke_w":1}}
+        ]}"#;
+        let doc: Document = serde_json::from_str(json).unwrap();
+        assert!(doc.shapes[0].fill_gradient().is_none());
+        assert_eq!(doc.shapes[0].fill_color(), Some([1.0, 0.0, 0.0, 1.0]));
+
+        // Setting a gradient and serializing round-trips it back.
+        let mut doc = doc;
+        let g = Gradient::two_stop(
+            GradientKind::Radial,
+            [1.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+        );
+        doc.shapes[0].set_fill_gradient(Some(g.clone()));
+        let s = serde_json::to_string(&doc).unwrap();
+        let back: Document = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.shapes[0].fill_gradient(), Some(&g));
+    }
+
+    /// A `Line` has no fill region, so setting a gradient on it is a no-op.
+    #[test]
+    fn line_ignores_gradient_fill() {
+        use crate::gradient::{Gradient, GradientKind};
+        let mut line = Shape::Line {
+            p0: (0.0, 0.0),
+            p1: (10.0, 0.0),
+            stroke: [0.0; 4],
+            stroke_w: 1.0,
+            stroke_style: StrokeStyle::default(),
+            visible: true,
+        };
+        line.set_fill_gradient(Some(Gradient::two_stop(
+            GradientKind::Linear,
+            [0.0; 4],
+            [1.0; 4],
+        )));
+        assert!(line.fill_gradient().is_none());
+        assert!(line.fill_color().is_none());
     }
 }

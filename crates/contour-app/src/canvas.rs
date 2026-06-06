@@ -2,9 +2,10 @@
 //! interaction (create / select / move / pen).
 
 use crate::document::{self, Shape, StrokeStyle};
+use crate::gradient::{Gradient, GradientKind};
 use crate::theme;
 use crate::transform::Handle;
-use egui::epaint::CubicBezierShape;
+use egui::epaint::{CubicBezierShape, Mesh, Vertex, WHITE_UV};
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 
 use prism_core::color::{linear_to_srgb, srgb_to_linear};
@@ -55,6 +56,139 @@ pub fn to_color32(c: [f32; 4]) -> Color32 {
     )
 }
 
+/// Fill a closed document-space polygon. With no gradient this draws a solid
+/// convex polygon (the existing fast path); with a gradient it builds a
+/// triangle-fan [`Mesh`] from the polygon centroid and samples the gradient per
+/// vertex, so the canvas preview shows a smooth multi-stop blend. Export
+/// (PNG/SVG) renders the gradient exactly; the on-canvas fan is a faithful
+/// preview for convex shapes (rect / ellipse) and a good approximation for
+/// arbitrary closed paths.
+fn fill_region(
+    painter: &egui::Painter,
+    view: &View,
+    doc_pts: &[(f32, f32)],
+    fill: [f32; 4],
+    gradient: Option<&Gradient>,
+) {
+    let screen: Vec<Pos2> = doc_pts.iter().map(|&p| view.doc_to_screen(p)).collect();
+    if screen.len() < 3 {
+        return;
+    }
+    match gradient {
+        None => {
+            painter.add(egui::Shape::convex_polygon(
+                screen,
+                to_color32(fill),
+                Stroke::NONE,
+            ));
+        }
+        Some(g) => {
+            painter.add(egui::Shape::Mesh(gradient_mesh(doc_pts, view, g).into()));
+        }
+    }
+}
+
+/// Build a gradient-filled triangle-fan mesh over a closed document-space
+/// polygon. The gradient's `0..=1` parameter is mapped onto the polygon's
+/// bounding box (linear: projected along the gradient direction; radial:
+/// distance from the box centre over the corner radius), matching the exact
+/// mapping the PNG/SVG exporters use.
+fn gradient_mesh(doc_pts: &[(f32, f32)], view: &View, g: &Gradient) -> Mesh {
+    let bbox = polygon_bbox(doc_pts);
+    let sampler = GradientSampler::new(g, &bbox);
+    let mut mesh = Mesh::default();
+    // Centroid for the fan.
+    let (mut sx, mut sy) = (0.0f32, 0.0f32);
+    for &(x, y) in doc_pts {
+        sx += x;
+        sy += y;
+    }
+    let n = doc_pts.len() as f32;
+    let centroid = (sx / n, sy / n);
+
+    let vtx = |p: (f32, f32)| Vertex {
+        pos: view.doc_to_screen(p),
+        uv: WHITE_UV,
+        color: to_color32(sampler.color_at(p)),
+    };
+    mesh.vertices.push(vtx(centroid)); // index 0 = centre
+    for &p in doc_pts {
+        mesh.vertices.push(vtx(p));
+    }
+    let count = doc_pts.len() as u32;
+    for i in 0..count {
+        let a = 1 + i;
+        let b = 1 + (i + 1) % count;
+        mesh.indices.extend_from_slice(&[0, a, b]);
+    }
+    mesh
+}
+
+/// Maps a document-space point to a gradient parameter for a given bounding box,
+/// then to a colour. Pre-computes the linear axis / radial centre once.
+struct GradientSampler<'a> {
+    g: &'a Gradient,
+    kind: GradientKind,
+    // Linear: start point + inverse-squared-length axis vector.
+    start: (f32, f32),
+    axis: (f32, f32),
+    inv_len2: f32,
+    // Radial: centre + inverse radius.
+    centre: (f32, f32),
+    inv_r: f32,
+}
+
+impl<'a> GradientSampler<'a> {
+    fn new(g: &'a Gradient, bbox: &[f32; 4]) -> Self {
+        let (a, b) = crate::gradient::linear_endpoints(bbox, g.angle);
+        let axis = (b.0 - a.0, b.1 - a.1);
+        let len2 = axis.0 * axis.0 + axis.1 * axis.1;
+        let (centre, r) = crate::gradient::radial_params(bbox);
+        Self {
+            g,
+            kind: g.kind,
+            start: a,
+            axis,
+            inv_len2: if len2 > 1e-9 { 1.0 / len2 } else { 0.0 },
+            centre,
+            inv_r: 1.0 / r,
+        }
+    }
+
+    fn param_at(&self, p: (f32, f32)) -> f32 {
+        match self.kind {
+            GradientKind::Linear => {
+                let d = (p.0 - self.start.0, p.1 - self.start.1);
+                (d.0 * self.axis.0 + d.1 * self.axis.1) * self.inv_len2
+            }
+            GradientKind::Radial => {
+                ((p.0 - self.centre.0).powi(2) + (p.1 - self.centre.1).powi(2)).sqrt() * self.inv_r
+            }
+        }
+    }
+
+    fn color_at(&self, p: (f32, f32)) -> [f32; 4] {
+        self.g.color_at(self.param_at(p))
+    }
+}
+
+/// Axis-aligned bounding box `[x, y, w, h]` of a polygon.
+fn polygon_bbox(pts: &[(f32, f32)]) -> [f32; 4] {
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    );
+    for &(x, y) in pts {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    [min_x, min_y, max_x - min_x, max_y - min_y]
+}
+
 /// Paint one shape using the painter, transforming document coords to screen.
 pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected: bool) {
     let style = shape.stroke_style();
@@ -62,12 +196,18 @@ pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected
         Shape::Rect {
             rect,
             fill,
+            fill_gradient,
             stroke,
             stroke_w,
             ..
         } => {
-            let r = doc_rect(view, rect);
-            painter.rect_filled(r, 0.0, to_color32(*fill));
+            let corners = [
+                (rect[0], rect[1]),
+                (rect[0] + rect[2], rect[1]),
+                (rect[0] + rect[2], rect[1] + rect[3]),
+                (rect[0], rect[1] + rect[3]),
+            ];
+            fill_region(painter, view, &corners, *fill, fill_gradient.as_ref());
             if *stroke_w > 0.0 {
                 // A rect's outline is its 4 corners as a closed polyline so we
                 // can honor a dash pattern; solid strokes use the fast path.
@@ -83,18 +223,14 @@ pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected
         Shape::Ellipse {
             rect,
             fill,
+            fill_gradient,
             stroke,
             stroke_w,
             ..
         } => {
-            let pts = ellipse_points(view, rect, 48);
-            painter.add(egui::Shape::convex_polygon(
-                pts.clone(),
-                to_color32(*fill),
-                Stroke::NONE,
-            ));
+            let ring: Vec<(f32, f32)> = ellipse_doc_points(rect, 48);
+            fill_region(painter, view, &ring, *fill, fill_gradient.as_ref());
             if *stroke_w > 0.0 {
-                let ring: Vec<(f32, f32)> = ellipse_doc_points(rect, 48);
                 stroke_polyline(painter, view, &ring, true, *stroke, *stroke_w, style);
             }
         }
@@ -119,13 +255,23 @@ pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected
             points,
             closed,
             fill,
+            fill_gradient,
             stroke,
             stroke_w,
             handles,
             ..
         } => {
             paint_path(
-                painter, view, points, handles, *closed, *fill, *stroke, *stroke_w, style,
+                painter,
+                view,
+                points,
+                handles,
+                *closed,
+                *fill,
+                fill_gradient.as_ref(),
+                *stroke,
+                *stroke_w,
+                style,
             );
         }
     }
@@ -155,6 +301,7 @@ pub fn paint_path(
     handles: &[(f32, f32)],
     closed: bool,
     fill: [f32; 4],
+    fill_gradient: Option<&Gradient>,
     stroke: [f32; 4],
     stroke_w: f32,
     style: &StrokeStyle,
@@ -168,17 +315,8 @@ pub fn paint_path(
 
     // Fill: flatten to a polygon (closed paths only).
     if closed {
-        let flat: Vec<Pos2> = document::flatten(points, handles, true)
-            .iter()
-            .map(|&p| view.doc_to_screen(p))
-            .collect();
-        if flat.len() >= 3 {
-            painter.add(egui::Shape::convex_polygon(
-                flat,
-                to_color32(fill),
-                Stroke::NONE,
-            ));
-        }
+        let flat = document::flatten(points, handles, true);
+        fill_region(painter, view, &flat, fill, fill_gradient);
     }
 
     // Dashed curves can't use the per-segment bezier fast path: flatten the
@@ -279,8 +417,8 @@ fn stroke_polyline(
     }
 }
 
-/// Ellipse outline as document-space points (mirror of [`ellipse_points`] but
-/// untransformed, for dashed stroking).
+/// Ellipse outline as document-space points, used for fill polygons and dashed
+/// stroking.
 fn ellipse_doc_points(rect: &[f32; 4], segments: usize) -> Vec<(f32, f32)> {
     let cx = rect[0] + rect[2] * 0.5;
     let cy = rect[1] + rect[3] * 0.5;
@@ -398,19 +536,6 @@ fn doc_rect(view: &View, rect: &[f32; 4]) -> Rect {
     let a = view.doc_to_screen((rect[0], rect[1]));
     let b = view.doc_to_screen((rect[0] + rect[2], rect[1] + rect[3]));
     Rect::from_two_pos(a, b)
-}
-
-fn ellipse_points(view: &View, rect: &[f32; 4], segments: usize) -> Vec<Pos2> {
-    let cx = rect[0] + rect[2] * 0.5;
-    let cy = rect[1] + rect[3] * 0.5;
-    let rx = rect[2] * 0.5;
-    let ry = rect[3] * 0.5;
-    (0..segments)
-        .map(|i| {
-            let t = i as f32 / segments as f32 * std::f32::consts::TAU;
-            view.doc_to_screen((cx + rx * t.cos(), cy + ry * t.sin()))
-        })
-        .collect()
 }
 
 /// Paint the artboard background frame for a document of the given size.

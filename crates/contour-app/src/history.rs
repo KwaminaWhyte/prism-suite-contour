@@ -130,6 +130,7 @@ mod tests {
         Shape::Rect {
             rect: [x, 0.0, 10.0, 10.0],
             fill: [1.0, 0.0, 0.0, 1.0],
+            fill_gradient: None,
             stroke: [0.0, 0.0, 0.0, 1.0],
             stroke_w: 1.0,
             stroke_style: StrokeStyle::default(),
