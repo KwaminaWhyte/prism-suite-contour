@@ -961,6 +961,111 @@ impl ContourApp {
         ])
     }
 
+    // --- Swatches ------------------------------------------------------------
+
+    /// Apply swatch `id`'s colour to the **fill** of the current selection (one
+    /// undo step) and load it as the app's default fill so the next new shape
+    /// inherits it. Clears any gradient fill on the selected shapes (a solid
+    /// swatch replaces a gradient, à la Illustrator). With no selection only the
+    /// default updates.
+    pub(super) fn apply_swatch_fill(&mut self, id: u64) {
+        let Some(color) = self.doc.swatches.get(id).map(|s| s.color) else {
+            return;
+        };
+        self.fill = color;
+        self.fill_gradient = None;
+        if self.selection.is_empty() {
+            self.status = "Set fill swatch".into();
+            return;
+        }
+        self.checkpoint();
+        let indices: Vec<usize> = self.selection.clone();
+        for i in indices {
+            if let Some(s) = self.doc.shapes.get_mut(i) {
+                s.set_fill_color(color);
+                s.set_fill_gradient(None);
+            }
+        }
+        self.status = "Applied fill swatch".into();
+    }
+
+    /// Apply swatch `id`'s colour to the **stroke** of the current selection (one
+    /// undo step) and load it as the app's default stroke. With no selection only
+    /// the default updates.
+    pub(super) fn apply_swatch_stroke(&mut self, id: u64) {
+        let Some(color) = self.doc.swatches.get(id).map(|s| s.color) else {
+            return;
+        };
+        self.stroke = color;
+        if self.selection.is_empty() {
+            self.status = "Set stroke swatch".into();
+            return;
+        }
+        self.checkpoint();
+        let indices: Vec<usize> = self.selection.clone();
+        for i in indices {
+            if let Some(s) = self.doc.shapes.get_mut(i) {
+                s.set_stroke_color(color);
+            }
+        }
+        self.status = "Applied stroke swatch".into();
+    }
+
+    /// Add a new swatch for the current fill colour (the primary selection's
+    /// solid fill, else the app default fill). Equal colours de-dupe, so this is
+    /// idempotent. One undo step.
+    pub(super) fn add_fill_swatch(&mut self) {
+        let color = self
+            .primary()
+            .and_then(|i| self.doc.shapes.get(i))
+            .and_then(|s| s.fill_color())
+            .unwrap_or(self.fill);
+        self.checkpoint();
+        self.doc.swatches.add("Swatch", color);
+        self.status = "Added swatch".into();
+    }
+
+    /// Rename swatch `id` (one undo step). No-op if the name is unchanged.
+    pub(super) fn rename_swatch(&mut self, id: u64, name: &str) {
+        if self.doc.swatches.get(id).map(|s| s.name.as_str()) == Some(name) {
+            return;
+        }
+        self.checkpoint();
+        self.doc.swatches.rename(id, name);
+    }
+
+    /// Toggle swatch `id`'s global flag (one undo step).
+    pub(super) fn set_swatch_global(&mut self, id: u64, global: bool) {
+        self.checkpoint();
+        self.doc.swatches.set_global(id, global);
+    }
+
+    /// Recolour swatch `id` (one undo step). When the swatch is **global**, the
+    /// edit propagates: every shape painted with the swatch's old colour is
+    /// remapped to the new colour.
+    pub(super) fn recolor_swatch(&mut self, id: u64, color: [f32; 4]) {
+        self.checkpoint();
+        if let Some((old, new)) = self.doc.swatches.recolor(id, color) {
+            let n = self.doc.remap_color(old, new);
+            self.status = if n > 0 {
+                format!("Recoloured swatch · {n} updated")
+            } else {
+                "Recoloured swatch".into()
+            };
+        } else {
+            self.status = "Recoloured swatch".into();
+        }
+    }
+
+    /// Delete swatch `id` (one undo step). The artwork is untouched — a swatch is
+    /// only a named shortcut, so removing it leaves shapes' colours intact.
+    pub(super) fn delete_swatch(&mut self, id: u64) {
+        self.checkpoint();
+        if self.doc.swatches.remove(id) {
+            self.status = "Deleted swatch".into();
+        }
+    }
+
     // --- Snapping ------------------------------------------------------------
 
     /// Document-space snap tolerance: a fixed ~6px pulled into document units so

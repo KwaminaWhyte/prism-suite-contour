@@ -16,6 +16,7 @@ pub use style::{LineCap, LineJoin, StrokeStyle};
 
 use crate::artboard::{self, Artboard};
 use crate::gradient::Gradient;
+use crate::swatches::{self, Swatches};
 use crate::transform::Affine;
 use kurbo::Shape as KurboShape;
 use prism_core::geometry::Rect as CoreRect;
@@ -375,6 +376,50 @@ impl Shape {
             }
             Shape::Line { .. } => {}
         }
+    }
+
+    /// Replace every occurrence of the colour `old` with `new` across this
+    /// shape's paint — its solid fill, its stroke, and any gradient-stop colours.
+    /// Colours are compared with the same picker-rounding tolerance as the
+    /// swatch model. Returns `true` if anything changed.
+    ///
+    /// This is the per-shape half of a **global swatch** recolour: when a global
+    /// swatch's colour is edited, the document walks every shape and remaps the
+    /// old colour to the new one, so artwork painted with that swatch follows the
+    /// edit (Illustrator's global-colour behaviour).
+    pub fn remap_color(&mut self, old: [f32; 4], new: [f32; 4]) -> bool {
+        let mut changed = false;
+        if let Some(c) = self.fill_color() {
+            if swatches::colors_eq(c, old) {
+                self.set_fill_color(new);
+                changed = true;
+            }
+        }
+        if let Some(c) = self.stroke_color() {
+            if swatches::colors_eq(c, old) {
+                self.set_stroke_color(new);
+                changed = true;
+            }
+        }
+        let grad_changed = match self {
+            Shape::Rect { fill_gradient, .. }
+            | Shape::Ellipse { fill_gradient, .. }
+            | Shape::Path { fill_gradient, .. } => fill_gradient
+                .as_mut()
+                .map(|g| {
+                    let mut any = false;
+                    for stop in g.stops.iter_mut() {
+                        if swatches::colors_eq(stop.color, old) {
+                            stop.color = new;
+                            any = true;
+                        }
+                    }
+                    any
+                })
+                .unwrap_or(false),
+            Shape::Line { .. } => false,
+        };
+        changed || grad_changed
     }
 
     /// Axis-aligned bounding box in document space.
@@ -774,6 +819,11 @@ pub struct Document {
     /// placement). Clamped into range by the editor. Additive.
     #[serde(default)]
     pub active_artboard: usize,
+    /// The document colour palette (the Swatches panel). Additive
+    /// (`#[serde(default)]`), so a pre-swatches `.contour` file loads with the
+    /// default starter palette; saved palettes round-trip through serde.
+    #[serde(default)]
+    pub swatches: Swatches,
 }
 
 impl Default for Document {
@@ -783,6 +833,7 @@ impl Default for Document {
             guides: Vec::new(),
             artboards: default_artboards(),
             active_artboard: 0,
+            swatches: Swatches::default(),
         }
     }
 }
@@ -814,6 +865,24 @@ impl Document {
         if self.active_artboard >= self.artboards.len() {
             self.active_artboard = self.artboards.len() - 1;
         }
+    }
+
+    /// Remap the colour `old` to `new` across every shape's paint (fill, stroke,
+    /// gradient stops). Returns the number of shapes that changed. Drives a
+    /// **global swatch** recolour: editing a global swatch hands back its
+    /// `(old, new)` pair, and this walks the artwork so every shape painted with
+    /// that swatch follows the edit.
+    pub fn remap_color(&mut self, old: [f32; 4], new: [f32; 4]) -> usize {
+        if swatches::colors_eq(old, new) {
+            return 0;
+        }
+        let mut n = 0;
+        for s in self.shapes.iter_mut() {
+            if s.remap_color(old, new) {
+                n += 1;
+            }
+        }
+        n
     }
 
     /// The shapes to *render*, with clipping masks resolved, paired with the

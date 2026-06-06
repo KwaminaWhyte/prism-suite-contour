@@ -20,6 +20,7 @@ mod group;
 mod history;
 mod icons;
 mod snap;
+mod swatches;
 mod theme;
 mod transform;
 mod workspace;

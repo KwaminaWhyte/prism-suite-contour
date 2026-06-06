@@ -19,19 +19,27 @@ pub enum Panel {
     Tools,
     /// The right-hand inspector stack (style, transform, layers, …).
     Inspector,
+    /// The left-docked Swatches panel — the document colour palette.
+    Swatches,
     /// The bottom status / context bar (zoom %, coords, selection, artboard).
     StatusBar,
 }
 
 impl Panel {
     /// Every toggleable panel, in the order the Window menu lists them.
-    pub const ALL: [Panel; 3] = [Panel::Tools, Panel::Inspector, Panel::StatusBar];
+    pub const ALL: [Panel; 4] = [
+        Panel::Tools,
+        Panel::Inspector,
+        Panel::Swatches,
+        Panel::StatusBar,
+    ];
 
     /// Human label for the Window menu entry.
     pub fn label(self) -> &'static str {
         match self {
             Panel::Tools => "Tools",
             Panel::Inspector => "Inspector",
+            Panel::Swatches => "Swatches",
             Panel::StatusBar => "Status bar",
         }
     }
@@ -45,6 +53,10 @@ pub struct Workspace {
     pub tools: bool,
     #[serde(default = "yes")]
     pub inspector: bool,
+    /// The Swatches panel. Additive (`#[serde(default = "yes")]`), so an older
+    /// saved workspace loads with it shown.
+    #[serde(default = "yes")]
+    pub swatches: bool,
     #[serde(default = "yes")]
     pub status_bar: bool,
 }
@@ -58,6 +70,7 @@ impl Default for Workspace {
         Self {
             tools: true,
             inspector: true,
+            swatches: true,
             status_bar: true,
         }
     }
@@ -69,6 +82,7 @@ impl Workspace {
         match panel {
             Panel::Tools => self.tools,
             Panel::Inspector => self.inspector,
+            Panel::Swatches => self.swatches,
             Panel::StatusBar => self.status_bar,
         }
     }
@@ -79,6 +93,7 @@ impl Workspace {
         match panel {
             Panel::Tools => &mut self.tools,
             Panel::Inspector => &mut self.inspector,
+            Panel::Swatches => &mut self.swatches,
             Panel::StatusBar => &mut self.status_bar,
         }
     }
@@ -151,6 +166,7 @@ mod tests {
         let w = Workspace::default();
         assert!(w.visible(Panel::Tools));
         assert!(w.visible(Panel::Inspector));
+        assert!(w.visible(Panel::Swatches));
         assert!(w.visible(Panel::StatusBar));
         assert!(w.is_default());
     }
@@ -183,6 +199,7 @@ mod tests {
         let mut w = Workspace {
             tools: false,
             inspector: false,
+            swatches: false,
             status_bar: false,
         };
         assert!(!w.is_default());
@@ -193,9 +210,10 @@ mod tests {
 
     #[test]
     fn all_lists_each_panel_once() {
-        assert_eq!(Panel::ALL.len(), 3);
+        assert_eq!(Panel::ALL.len(), 4);
         assert!(Panel::ALL.contains(&Panel::Tools));
         assert!(Panel::ALL.contains(&Panel::Inspector));
+        assert!(Panel::ALL.contains(&Panel::Swatches));
         assert!(Panel::ALL.contains(&Panel::StatusBar));
     }
 

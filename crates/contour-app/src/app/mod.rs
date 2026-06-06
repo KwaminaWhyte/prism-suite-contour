@@ -228,6 +228,10 @@ pub struct ContourApp {
     /// Detached shapes from the last Copy / Cut, ready to paste. Not part of the
     /// document (paste is not undo-coupled to copy), so it survives undo/redo.
     clipboard: Clipboard,
+    /// The swatch currently selected in the Swatches panel, addressed by its
+    /// stable id (so it survives reordering). Drives the panel's rename /
+    /// recolour / delete editor. `None` until a swatch is clicked.
+    selected_swatch: Option<u64>,
 }
 
 impl ContourApp {
@@ -257,6 +261,7 @@ impl ContourApp {
             workspace: Workspace::default(),
             cursor_doc: None,
             clipboard: Clipboard::default(),
+            selected_swatch: None,
         }
     }
 
@@ -266,6 +271,7 @@ impl ContourApp {
         self.inter = Interaction::default();
         self.history.clear();
         self.status.clear();
+        self.selected_swatch = None;
     }
 }
 
@@ -403,6 +409,10 @@ impl eframe::App for ContourApp {
         }
         if self.workspace.visible(crate::workspace::Panel::Inspector) {
             self.right_panel(root);
+        }
+        // The Swatches panel docks on the left, just inside the tool column.
+        if self.workspace.visible(crate::workspace::Panel::Swatches) {
+            self.swatches_panel(root);
         }
         // The status bar docks to the bottom, between the side panels and the
         // canvas, so it spans the full window width under the artwork.

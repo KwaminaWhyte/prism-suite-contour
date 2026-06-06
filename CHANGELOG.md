@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Swatches panel (named colour library, global swatches)** — a new pure,
+  unit-tested `swatches` module and an additive `swatches: Swatches` palette on
+  the `Document` (`#[serde(default)]`), bringing the everyday Illustrator /
+  Affinity colour-library staple Contour was missing:
+  - A **`Swatch`** is a named straight-sRGB RGBA colour with a stable id and a
+    **global** flag; a **`Swatches`** collection is the document palette — an
+    ordered, name-unique list (a clash gets a numeric suffix, à la Illustrator)
+    with colour de-duplication so adding the same colour twice never piles up
+    duplicates. A fresh document opens with a small starter palette (white /
+    black / grey + red / orange / yellow / green / blue). All of the palette
+    bookkeeping — `next_id`, `unique_name`, `add` (de-dup by colour),
+    `rename` (unique, but a self-rename is a no-op), `set_global`, `recolor`,
+    `remove`, `id_for_color` — is pure and pinned by unit tests (no egui
+    context).
+  - A new **Swatches panel** docked on the left (toggled from the Window menu,
+    which now lists it): a grid of colour chips you **click** to paint the
+    selection's fill (and set the default fill so the next shape inherits it),
+    **Shift-click** to paint the stroke, or **Alt-click** to select for editing.
+    The chip naming the current fill gets an accent ring; a global swatch shows a
+    small corner dot. A `+` button adds a swatch from the current fill, and an
+    editor for the selected swatch renames it, recolours it, toggles its global
+    flag, applies it to fill / stroke, or deletes it. Each edit is one undo step.
+  - **Global swatches** recolour the artwork: editing a global swatch's colour
+    hands back its `(old, new)` pair, and `Document::remap_color` walks every
+    shape — remapping the old colour across solid fills, strokes, **and gradient
+    stops** (with the same picker-rounding tolerance the swatch model uses) — so
+    artwork painted with that swatch follows the edit, and the status bar reports
+    how many shapes changed. A non-global swatch is a plain shortcut: editing it
+    touches only the swatch, and deleting any swatch leaves the artwork's colours
+    intact. The `swatches` field is additive (`#[serde(default)]`), so a
+    pre-swatches `.contour` loads with the default starter palette; palettes
+    (names, colours, global flags) round-trip through serde. The document-level
+    `remap_color` integration is pinned by unit tests alongside the module's pure
+    helpers.
+
 - **Clipping masks (`Object → Clipping Mask → Make / Release`)** — a new pure,
   unit-tested `clip` module and two additive `(clip, mask)` tags on every shape
   (`#[serde(default)]`), bringing the everyday Illustrator / Affinity operation

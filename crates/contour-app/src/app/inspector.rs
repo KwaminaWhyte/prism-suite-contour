@@ -9,7 +9,7 @@ use crate::document::{LineCap, LineJoin};
 use crate::gradient::{Gradient, GradientKind};
 use crate::workspace::{self, Panel};
 use crate::{icons, theme};
-use egui::{Color32, Vec2};
+use egui::{Color32, Sense, Stroke, Vec2};
 
 impl ContourApp {
     pub(super) fn menu_bar(&mut self, root: &mut egui::Ui) {
@@ -393,6 +393,208 @@ impl ContourApp {
                 });
             });
         });
+    }
+
+    /// The Swatches panel: the document colour palette. A grid of colour chips —
+    /// **click** to paint the selection's fill (and set the default fill),
+    /// **Shift-click** to paint the stroke, **Alt-click** to select a swatch for
+    /// editing — above an editor for the selected swatch (rename, recolour,
+    /// global toggle, delete) and an "add the current fill" button. A **global**
+    /// swatch propagates a recolour to all artwork using its colour. Docked on
+    /// the left; toggled from the Window menu.
+    pub(super) fn swatches_panel(&mut self, root: &mut egui::Ui) {
+        egui::SidePanel::left("swatches")
+            .default_width(176.0)
+            .show_inside(root, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Swatches").strong());
+                    ui.weak(format!("{}", self.doc.swatches.len()));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button("+")
+                            .on_hover_text("Add a swatch from the current fill")
+                            .clicked()
+                        {
+                            self.add_fill_swatch();
+                        }
+                    });
+                });
+                ui.weak("Click: fill · Shift: stroke · Alt: edit");
+                ui.separator();
+
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        // Which swatch (if any) names the current fill — drawn with
+                        // a ring so the active colour is visible at a glance.
+                        let active_fill = self.doc.swatches.id_for_color(self.fill);
+
+                        // Deferred actions so we don't borrow the palette while
+                        // iterating it.
+                        let mut apply_fill: Option<u64> = None;
+                        let mut apply_stroke: Option<u64> = None;
+                        let mut select: Option<u64> = None;
+
+                        let chip = Vec2::new(24.0, 24.0);
+                        let per_row = ((ui.available_width() + 4.0) / (chip.x + 4.0))
+                            .floor()
+                            .max(1.0) as usize;
+
+                        let entries: Vec<(u64, [f32; 4], String, bool)> = self
+                            .doc
+                            .swatches
+                            .list
+                            .iter()
+                            .map(|s| (s.id, s.color, s.name.clone(), s.global))
+                            .collect();
+
+                        for row in entries.chunks(per_row) {
+                            ui.horizontal(|ui| {
+                                for (id, color, name, global) in row {
+                                    let (rect, resp) = ui.allocate_exact_size(chip, Sense::click());
+                                    let fill = Color32::from_rgba_unmultiplied(
+                                        (color[0] * 255.0) as u8,
+                                        (color[1] * 255.0) as u8,
+                                        (color[2] * 255.0) as u8,
+                                        (color[3] * 255.0) as u8,
+                                    );
+                                    let selected = self.selected_swatch == Some(*id);
+                                    let is_active = active_fill == Some(*id);
+                                    ui.painter().rect_filled(rect, 4.0, fill);
+                                    // Selected: thick accent ring. Active fill:
+                                    // thinner accent ring. Else a faint border.
+                                    let border = if selected {
+                                        Stroke::new(2.0, theme::accent())
+                                    } else if is_active {
+                                        Stroke::new(1.5, theme::accent())
+                                    } else {
+                                        Stroke::new(1.0, Color32::from_gray(70))
+                                    };
+                                    ui.painter().rect_stroke(
+                                        rect,
+                                        4.0,
+                                        border,
+                                        egui::StrokeKind::Inside,
+                                    );
+                                    // A global swatch gets a small corner dot, the
+                                    // way Illustrator marks its global swatches.
+                                    if *global {
+                                        ui.painter().circle_filled(
+                                            rect.right_bottom() + Vec2::new(-4.0, -4.0),
+                                            2.0,
+                                            theme::accent(),
+                                        );
+                                    }
+                                    let tip: String = if *global {
+                                        format!("{name} (global)")
+                                    } else {
+                                        name.to_string()
+                                    };
+                                    let resp = resp.on_hover_text(tip);
+                                    if resp.clicked() {
+                                        let mods = ui.input(|i| i.modifiers);
+                                        if mods.alt {
+                                            select = Some(*id);
+                                        } else if mods.shift {
+                                            apply_stroke = Some(*id);
+                                        } else {
+                                            apply_fill = Some(*id);
+                                        }
+                                    }
+                                }
+                            });
+                            ui.add_space(4.0);
+                        }
+
+                        if self.doc.swatches.is_empty() {
+                            ui.weak("No swatches. Add one with +.");
+                        }
+
+                        if let Some(id) = apply_fill {
+                            self.apply_swatch_fill(id);
+                            self.selected_swatch = Some(id);
+                        }
+                        if let Some(id) = apply_stroke {
+                            self.apply_swatch_stroke(id);
+                            self.selected_swatch = Some(id);
+                        }
+                        if let Some(id) = select {
+                            self.selected_swatch = Some(id);
+                        }
+
+                        // Editor for the selected swatch.
+                        if let Some(id) = self.selected_swatch {
+                            if let Some(sw) = self.doc.swatches.get(id).cloned() {
+                                ui.separator();
+                                ui.label(egui::RichText::new("Edit swatch").strong());
+
+                                let mut name = sw.name.clone();
+                                ui.horizontal(|ui| {
+                                    ui.label("Name");
+                                    if ui.text_edit_singleline(&mut name).lost_focus() {
+                                        self.rename_swatch(id, &name);
+                                    }
+                                });
+
+                                let mut c = Color32::from_rgba_unmultiplied(
+                                    (sw.color[0] * 255.0) as u8,
+                                    (sw.color[1] * 255.0) as u8,
+                                    (sw.color[2] * 255.0) as u8,
+                                    (sw.color[3] * 255.0) as u8,
+                                );
+                                ui.horizontal(|ui| {
+                                    ui.label("Colour");
+                                    if ui.color_edit_button_srgba(&mut c).changed() {
+                                        let color = [
+                                            c.r() as f32 / 255.0,
+                                            c.g() as f32 / 255.0,
+                                            c.b() as f32 / 255.0,
+                                            c.a() as f32 / 255.0,
+                                        ];
+                                        self.recolor_swatch(id, color);
+                                    }
+                                });
+
+                                let mut global = sw.global;
+                                if ui
+                                    .checkbox(&mut global, "Global")
+                                    .on_hover_text(
+                                        "Recolouring a global swatch updates all artwork using it",
+                                    )
+                                    .changed()
+                                {
+                                    self.set_swatch_global(id, global);
+                                }
+
+                                ui.horizontal(|ui| {
+                                    if ui.button("Fill").clicked() {
+                                        self.apply_swatch_fill(id);
+                                    }
+                                    if ui.button("Stroke").clicked() {
+                                        self.apply_swatch_stroke(id);
+                                    }
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui
+                                                .button(icons::TRASH)
+                                                .on_hover_text("Delete swatch")
+                                                .clicked()
+                                            {
+                                                self.delete_swatch(id);
+                                                self.selected_swatch = None;
+                                            }
+                                        },
+                                    );
+                                });
+                            } else {
+                                // The selected swatch was removed (e.g. undo).
+                                self.selected_swatch = None;
+                            }
+                        }
+                    });
+            });
     }
 
     pub(super) fn tool_palette(&mut self, root: &mut egui::Ui) {
