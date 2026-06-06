@@ -374,6 +374,26 @@ pub fn paint_transform_box(painter: &egui::Painter, view: &View, bbox: &[f32; 4]
     }
 }
 
+/// Draw the rubber-band marquee selection box: a translucent accent fill with a
+/// dashed accent outline, given the box as document-space `[x, y, w, h]`.
+pub fn paint_marquee(painter: &egui::Painter, view: &View, bbox: &[f32; 4]) {
+    let rect = doc_rect(view, bbox);
+    let accent = theme::accent();
+    let fill = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 28);
+    painter.rect_filled(rect, 0.0, fill);
+    let stroke = Stroke::new(1.0, accent);
+    let mut dashed = Vec::new();
+    let ring = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+        rect.left_top(),
+    ];
+    egui::Shape::dashed_line_many_with_offset(&ring, stroke, &[4.0], &[3.0], 0.0, &mut dashed);
+    painter.extend(dashed);
+}
+
 fn doc_rect(view: &View, rect: &[f32; 4]) -> Rect {
     let a = view.doc_to_screen((rect[0], rect[1]));
     let b = view.doc_to_screen((rect[0] + rect[2], rect[1] + rect[3]));

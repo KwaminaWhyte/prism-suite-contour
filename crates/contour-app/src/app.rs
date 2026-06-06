@@ -2,6 +2,7 @@
 //! loop that ties the document model to the canvas.
 
 use crate::align::{self, Align, AlignTo, Distribute};
+use crate::arrange::{self, Arrange};
 use crate::boolean::{self, BoolOp};
 use crate::canvas::{self, View};
 use crate::document::{self, Document, Guide, LineCap, LineJoin, Shape, StrokeStyle};
@@ -106,6 +107,12 @@ struct Interaction {
     guide_drag: Option<GuideDrag>,
     /// Snap lines that fired on the latest drag frame, drawn as smart guides.
     snap_lines: SnapResult,
+    /// An in-progress rubber-band (marquee) selection: `(anchor, current)` in
+    /// document space. Began on empty canvas with the Select tool.
+    marquee: Option<((f32, f32), (f32, f32))>,
+    /// Selection set captured when a shift-marquee began, so the marquee is
+    /// additive (toggling intersected shapes against this base).
+    marquee_base: Vec<usize>,
 }
 
 /// A ruler guide being created or moved: which orientation, and whether it is a
@@ -307,6 +314,34 @@ impl ContourApp {
                 *s = a;
             }
         }
+    }
+
+    /// Reorder the selected shapes in paint order (Arrange / stacking) as one
+    /// undo step, remapping the selection through the same permutation so the
+    /// same shapes stay selected. No-op (and no checkpoint) when the move would
+    /// not change the order.
+    fn arrange_selection(&mut self, op: Arrange) {
+        let len = self.doc.shapes.len();
+        if self.selection.is_empty() || !arrange::changes_order(len, &self.selection, op) {
+            return;
+        }
+        let perm = arrange::reorder(len, &self.selection, op);
+        let inv = arrange::invert(&perm);
+        self.checkpoint();
+        // Rebuild the shape list in the new order (perm[new] = old).
+        let old = std::mem::take(&mut self.doc.shapes);
+        // `perm` is a permutation of 0..len, so reorder by lifting each slot.
+        let mut taken: Vec<Option<Shape>> = old.into_iter().map(Some).collect();
+        let mut reordered = Vec::with_capacity(len);
+        for &src in &perm {
+            reordered.push(taken[src].take().expect("permutation visits each once"));
+        }
+        self.doc.shapes = reordered;
+        // Remap selection indices: a shape at old index `i` is now at `inv[i]`.
+        for s in self.selection.iter_mut() {
+            *s = inv[*s];
+        }
+        self.status = op.label().into();
     }
 
     fn open_dialog(&mut self) {
@@ -806,17 +841,34 @@ impl eframe::App for ContourApp {
         let ctx = root.ctx().clone();
 
         // Global keyboard: Enter commits a pen path; Delete removes selection;
-        // Cmd/Ctrl+Z undoes, Cmd/Ctrl+Shift+Z (or Ctrl+Y) redoes.
-        let (enter, delete, undo, redo) = ctx.input(|i| {
+        // Cmd/Ctrl+Z undoes, Cmd/Ctrl+Shift+Z (or Ctrl+Y) redoes; Cmd/Ctrl+]/[
+        // arrange the selection (with Shift: to front / to back), à la Illustrator.
+        let (enter, delete, undo, redo, arrange_key) = ctx.input(|i| {
             let cmd = i.modifiers.command;
             let shift = i.modifiers.shift;
             let z = i.key_pressed(egui::Key::Z);
             let y = i.key_pressed(egui::Key::Y);
+            let arrange = if cmd && i.key_pressed(egui::Key::CloseBracket) {
+                Some(if shift {
+                    Arrange::BringToFront
+                } else {
+                    Arrange::BringForward
+                })
+            } else if cmd && i.key_pressed(egui::Key::OpenBracket) {
+                Some(if shift {
+                    Arrange::SendToBack
+                } else {
+                    Arrange::SendBackward
+                })
+            } else {
+                None
+            };
             (
                 i.key_pressed(egui::Key::Enter),
                 i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
                 cmd && z && !shift,
                 (cmd && z && shift) || (cmd && y),
+                arrange,
             )
         });
         if enter && self.tool == Tool::Pen {
@@ -830,6 +882,9 @@ impl eframe::App for ContourApp {
         }
         if delete {
             self.delete_selected();
+        }
+        if let Some(op) = arrange_key {
+            self.arrange_selection(op);
         }
 
         self.menu_bar(root);
@@ -1019,6 +1074,23 @@ impl ContourApp {
                             }
                         });
                     });
+
+                    ui.separator();
+                    ui.menu_button(format!("{}  Arrange", icons::ARRANGE), |ui| {
+                        ui.add_enabled_ui(!self.selection.is_empty(), |ui| {
+                            for (icon, op) in [
+                                (icons::BRING_TO_FRONT, Arrange::BringToFront),
+                                (icons::BRING_FORWARD, Arrange::BringForward),
+                                (icons::SEND_BACKWARD, Arrange::SendBackward),
+                                (icons::SEND_TO_BACK, Arrange::SendToBack),
+                            ] {
+                                if ui.button(format!("{icon}  {}", op.label())).clicked() {
+                                    self.arrange_selection(op);
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                    });
                 });
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.show_rulers, "Rulers");
@@ -1107,6 +1179,7 @@ impl ContourApp {
 
                 self.stroke_section(ui);
                 self.transform_section(ui);
+                self.arrange_section(ui);
                 self.align_section(ui);
 
                 // Direct-select hint when a path is the active selection.
@@ -1283,6 +1356,43 @@ impl ContourApp {
 
         if !enabled {
             ui.weak("Select a shape to transform.");
+        }
+    }
+
+    /// Arrange (paint-order / stacking) controls: bring-to-front, forward,
+    /// backward, and send-to-back. Each is a single undo step; a button is
+    /// disabled when the move would not change the order (e.g. the selection is
+    /// already on top). Mirrors `Object → Arrange` and the Cmd/Ctrl+]/[ keys.
+    fn arrange_section(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.label(egui::RichText::new("Arrange").strong());
+
+        let len = self.doc.shapes.len();
+        let mut op: Option<Arrange> = None;
+        ui.horizontal(|ui| {
+            for (icon, tip, a) in [
+                (icons::SEND_TO_BACK, "Send to back", Arrange::SendToBack),
+                (icons::SEND_BACKWARD, "Send backward", Arrange::SendBackward),
+                (icons::BRING_FORWARD, "Bring forward", Arrange::BringForward),
+                (
+                    icons::BRING_TO_FRONT,
+                    "Bring to front",
+                    Arrange::BringToFront,
+                ),
+            ] {
+                let can = arrange::changes_order(len, &self.selection, a);
+                ui.add_enabled_ui(can, |ui| {
+                    if align_button(ui, icon).on_hover_text(tip).clicked() {
+                        op = Some(a);
+                    }
+                });
+            }
+        });
+        if let Some(a) = op {
+            self.arrange_selection(a);
+        }
+        if self.selection.is_empty() {
+            ui.weak("Select a shape to reorder.");
         }
     }
 
@@ -1576,6 +1686,11 @@ impl ContourApp {
 
             self.draw_preview(&painter);
 
+            // Rubber-band marquee box (Select tool, drag on empty canvas).
+            if let Some(bbox) = self.marquee_rect() {
+                canvas::paint_marquee(&painter, &self.view, &bbox);
+            }
+
             // Active smart-guide snap lines over everything.
             canvas::paint_snap_lines(
                 &painter,
@@ -1749,13 +1864,28 @@ impl ContourApp {
                     // Snapshot the start of a move so the whole drag is one undo.
                     self.begin_interaction();
                 } else {
+                    // Empty canvas: begin a rubber-band marquee. Shift extends the
+                    // existing selection; a plain marquee replaces it.
                     self.inter.move_last = None;
+                    let shift = response.ctx.input(|i| i.modifiers.shift);
+                    self.inter.marquee_base = if shift {
+                        self.selection.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    self.inter.marquee = Some(((x, y), (x, y)));
                 }
             }
         }
 
         if response.dragged() {
-            if self.inter.transform.is_some() {
+            if let Some((anchor, _)) = self.inter.marquee {
+                // Grow the marquee and recompute the live selection.
+                if let Some((x, y)) = doc_pos {
+                    self.inter.marquee = Some((anchor, (x, y)));
+                }
+                self.update_marquee_selection();
+            } else if self.inter.transform.is_some() {
                 if let Some((x, y)) = doc_pos {
                     let uniform = response.ctx.input(|i| i.modifiers.shift);
                     self.drag_transform(x, y, uniform);
@@ -1791,6 +1921,11 @@ impl ContourApp {
         }
 
         if response.drag_stopped() {
+            // Finalize a marquee: the live selection is already set; just drop the
+            // box. A marquee never mutates the document, so no undo entry.
+            if self.inter.marquee.take().is_some() {
+                self.inter.marquee_base.clear();
+            }
             self.inter.move_last = None;
             self.inter.path_edit = None;
             self.inter.transform = None;
@@ -1826,6 +1961,40 @@ impl ContourApp {
                 }
             }
         }
+    }
+
+    /// The current marquee box as a normalised document-space `[x, y, w, h]`
+    /// (non-negative extent), or `None` when no marquee is active.
+    fn marquee_rect(&self) -> Option<[f32; 4]> {
+        self.inter.marquee.map(|(a, b)| {
+            let x = a.0.min(b.0);
+            let y = a.1.min(b.1);
+            [x, y, (a.0 - b.0).abs(), (a.1 - b.1).abs()]
+        })
+    }
+
+    /// Recompute the live selection from the active marquee: every visible shape
+    /// whose bounding box intersects the box is selected, added on top of the
+    /// captured base (so a shift-marquee is additive). Intersected shapes are
+    /// pushed in document order so the topmost stays primary.
+    fn update_marquee_selection(&mut self) {
+        let Some(rect) = self.marquee_rect() else {
+            return;
+        };
+        // Start from the base (empty for a plain marquee, the prior selection for
+        // a shift-marquee), then append intersected shapes not already present.
+        let mut sel = self.inter.marquee_base.clone();
+        for (i, s) in self.doc.shapes.iter().enumerate() {
+            if !s.visible() {
+                continue;
+            }
+            if let Some(b) = s.bounds() {
+                if document::rects_intersect(&[b.x, b.y, b.w, b.h], &rect) && !sel.contains(&i) {
+                    sel.push(i);
+                }
+            }
+        }
+        self.selection = sel;
     }
 
     /// Mutate a selected path while dragging one of its anchors or handles.

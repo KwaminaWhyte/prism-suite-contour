@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Arrange (stacking order)** — a new pure, unit-tested `arrange` module that
+  reorders the flat paint-order list for the four Illustrator commands
+  (**Bring to Front**, **Bring Forward**, **Send Backward**, **Send to Back**),
+  always returning a true permutation that preserves the relative order of both
+  the moved and the untouched shapes:
+  - Wired into an **Object → Arrange** menu, an inspector "Arrange" button row,
+    and the Illustrator keys **Cmd/Ctrl + ]** (forward) / **[** (backward), with
+    **Shift** for to-front / to-back.
+  - Multi-selections move as blocks; a command is a single undo step and the
+    selection is remapped through the same permutation so the same shapes stay
+    selected. No-op moves (selection already at the extreme) are disabled in the
+    UI and skip the undo checkpoint.
+
+- **Marquee (rubber-band) selection** — dragging the Select tool over empty
+  canvas draws a translucent accent box and live-selects every visible shape
+  whose bounding box intersects it (a new unit-tested `rects_intersect` helper).
+  **Shift-drag** is additive (extends the prior selection); a plain marquee
+  replaces it. The topmost intersected shape stays primary. A marquee never
+  mutates the document, so it records no undo entry.
+
 - **Snapping, guides, grid & rulers** — a new pure `snap` module (unit-tested
   nearest-target snapping over per-axis candidate coordinates) wired into the
   canvas and a new **View** menu:

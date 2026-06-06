@@ -92,6 +92,19 @@ pub const FLIP_H: &str = ph::FLIP_HORIZONTAL;
 /// Flip vertically (mirror across a horizontal axis).
 pub const FLIP_V: &str = ph::FLIP_VERTICAL;
 
+// --- Arrange (z-order) ------------------------------------------------------
+
+/// Arrange / stacking-order submenu.
+pub const ARRANGE: &str = ph::STACK;
+/// Bring to front (jump to the top of the stack).
+pub const BRING_TO_FRONT: &str = ph::ARROW_LINE_UP;
+/// Send to back (drop to the bottom of the stack).
+pub const SEND_TO_BACK: &str = ph::ARROW_LINE_DOWN;
+/// Bring forward one step.
+pub const BRING_FORWARD: &str = ph::ARROW_UP;
+/// Send backward one step.
+pub const SEND_BACKWARD: &str = ph::ARROW_DOWN;
+
 // --- Boolean ops ------------------------------------------------------------
 
 /// Union of two shapes.

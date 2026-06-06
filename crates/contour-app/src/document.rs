@@ -561,6 +561,16 @@ pub struct ShapeBounds {
     pub rect: CoreRect,
 }
 
+/// Whether two axis-aligned rectangles (each `[x, y, w, h]`, width/height
+/// assumed non-negative) overlap. Edge-touching counts as an overlap. Used by
+/// marquee (rubber-band) selection to pick every shape whose bounding box
+/// intersects the dragged box.
+pub fn rects_intersect(a: &[f32; 4], b: &[f32; 4]) -> bool {
+    let (ax0, ay0, ax1, ay1) = (a[0], a[1], a[0] + a[2], a[1] + a[3]);
+    let (bx0, by0, bx1, by1) = (b[0], b[1], b[0] + b[2], b[1] + b[3]);
+    ax0 <= bx1 && bx0 <= ax1 && ay0 <= by1 && by0 <= ay1
+}
+
 /// The out-tangent handle offset for anchor `i`, or `(0, 0)` (a corner) when no
 /// handle is stored.
 pub fn handle_at(handles: &[(f32, f32)], i: usize) -> (f32, f32) {
@@ -956,6 +966,23 @@ mod tests {
             back.guides,
             vec![Guide::Vertical(100.0), Guide::Horizontal(42.5)]
         );
+    }
+
+    #[test]
+    fn rects_intersect_basic_cases() {
+        let a = [0.0, 0.0, 10.0, 10.0];
+        // Overlapping.
+        assert!(rects_intersect(&a, &[5.0, 5.0, 10.0, 10.0]));
+        // Fully inside.
+        assert!(rects_intersect(&a, &[2.0, 2.0, 2.0, 2.0]));
+        // Contains a (b bigger).
+        assert!(rects_intersect(&a, &[-5.0, -5.0, 100.0, 100.0]));
+        // Edge-touching counts.
+        assert!(rects_intersect(&a, &[10.0, 0.0, 5.0, 5.0]));
+        // Disjoint on x.
+        assert!(!rects_intersect(&a, &[20.0, 0.0, 5.0, 5.0]));
+        // Disjoint on y.
+        assert!(!rects_intersect(&a, &[0.0, 20.0, 5.0, 5.0]));
     }
 
     /// A path with no handles flattens to its raw points (polyline).
