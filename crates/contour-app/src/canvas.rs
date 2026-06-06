@@ -3,6 +3,7 @@
 
 use crate::document::{self, Shape, StrokeStyle};
 use crate::theme;
+use crate::transform::Handle;
 use egui::epaint::CubicBezierShape;
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 
@@ -325,6 +326,51 @@ pub fn paint_path_handles(
             painter.rect_filled(sq, 0.0, Color32::WHITE);
             painter.rect_stroke(sq, 0.0, ring, egui::StrokeKind::Outside);
         }
+    }
+}
+
+/// Screen-space position of transform `handle` on the document-space box
+/// `[x, y, w, h]`.
+pub fn handle_screen_pos(view: &View, bbox: &[f32; 4], handle: Handle) -> Pos2 {
+    let (fx, fy) = handle.unit_pos();
+    view.doc_to_screen((bbox[0] + bbox[2] * fx, bbox[1] + bbox[3] * fy))
+}
+
+/// On-screen size of a transform handle marker (square side, in pixels).
+pub const HANDLE_PX: f32 = 8.0;
+/// Pick radius (pixels) for grabbing a handle.
+pub const HANDLE_PICK_PX: f32 = 7.0;
+/// How far diagonally outside a corner the rotate ring begins (pixels).
+pub const ROTATE_PICK_PX: f32 = 18.0;
+
+/// Draw the free-transform box: a dashed outline around the selection bounds
+/// plus the eight scale handles (white squares with an accent ring). Drawn only
+/// for the Select tool when there is no per-path anchor edit in progress.
+pub fn paint_transform_box(painter: &egui::Painter, view: &View, bbox: &[f32; 4]) {
+    let tl = view.doc_to_screen((bbox[0], bbox[1]));
+    let br = view.doc_to_screen((bbox[0] + bbox[2], bbox[1] + bbox[3]));
+    let rect = Rect::from_two_pos(tl, br);
+
+    // Dashed bounding outline so it reads distinctly from a plain selection ring.
+    let stroke = Stroke::new(1.0, theme::accent());
+    let mut dashed = Vec::new();
+    let ring = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+        rect.left_top(),
+    ];
+    egui::Shape::dashed_line_many_with_offset(&ring, stroke, &[4.0], &[3.0], 0.0, &mut dashed);
+    painter.extend(dashed);
+
+    // Eight handle markers.
+    let ringv = Stroke::new(1.25, theme::accent());
+    for h in Handle::ALL {
+        let p = handle_screen_pos(view, bbox, h);
+        let sq = Rect::from_center_size(p, Vec2::splat(HANDLE_PX));
+        painter.rect_filled(sq, 0.0, Color32::WHITE);
+        painter.rect_stroke(sq, 0.0, ringv, egui::StrokeKind::Outside);
     }
 }
 

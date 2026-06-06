@@ -13,6 +13,7 @@ mod export;
 mod history;
 mod icons;
 mod theme;
+mod transform;
 
 use app::ContourApp;
 

@@ -81,6 +81,17 @@ pub const DISTRIBUTE_H: &str = ph::ARROWS_OUT_LINE_HORIZONTAL;
 /// Distribute vertically (spread along Y).
 pub const DISTRIBUTE_V: &str = ph::ARROWS_OUT_LINE_VERTICAL;
 
+// --- Transform --------------------------------------------------------------
+
+/// Rotate clockwise.
+pub const ROTATE_CW: &str = ph::ARROW_CLOCKWISE;
+/// Rotate counter-clockwise.
+pub const ROTATE_CCW: &str = ph::ARROW_COUNTER_CLOCKWISE;
+/// Flip horizontally (mirror across a vertical axis).
+pub const FLIP_H: &str = ph::FLIP_HORIZONTAL;
+/// Flip vertically (mirror across a horizontal axis).
+pub const FLIP_V: &str = ph::FLIP_VERTICAL;
+
 // --- Boolean ops ------------------------------------------------------------
 
 /// Union of two shapes.

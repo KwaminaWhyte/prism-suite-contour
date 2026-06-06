@@ -6,6 +6,7 @@ use crate::boolean::{self, BoolOp};
 use crate::canvas::{self, View};
 use crate::document::{self, Document, LineCap, LineJoin, Shape, StrokeStyle};
 use crate::history::History;
+use crate::transform::{self, Affine, Handle};
 use crate::{export, icons, theme};
 use egui::{Color32, Sense, Vec2};
 use prism_core::Size;
@@ -57,6 +58,30 @@ enum PathEdit {
     Handle(usize),
 }
 
+/// An in-progress free-transform on the selection: which gesture, the pivot it
+/// turns around, the cursor where the drag began, and a snapshot of the
+/// selected shapes (index + original geometry) so each frame transforms from the
+/// pristine start rather than accumulating float error.
+struct TransformDrag {
+    kind: TransformKind,
+    /// Document-space pivot kept fixed (opposite handle for scale; box centre
+    /// for rotate).
+    pivot: (f32, f32),
+    /// Document-space cursor at drag start.
+    start: (f32, f32),
+    /// (shape index, pristine shape) snapshot taken at drag start.
+    snapshot: Vec<(usize, Shape)>,
+}
+
+/// Which free-transform gesture a [`TransformDrag`] performs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TransformKind {
+    /// Scale by dragging the given box handle (pivot = opposite handle).
+    Scale(Handle),
+    /// Rotate about the box centre.
+    Rotate,
+}
+
 /// In-progress interaction state (drag-to-create, pen point list, dragging).
 #[derive(Default)]
 struct Interaction {
@@ -74,6 +99,8 @@ struct Interaction {
     move_last: Option<(f32, f32)>,
     /// Active edit on the currently selected path (anchor/handle drag).
     path_edit: Option<PathEdit>,
+    /// Active free-transform of the selection (scale/rotate via the box handles).
+    transform: Option<TransformDrag>,
 }
 
 pub struct ContourApp {
@@ -96,6 +123,8 @@ pub struct ContourApp {
     /// Reference frame the Align operations measure against (selection bounds or
     /// the artboard rectangle).
     align_to: AlignTo,
+    /// Angle (degrees) for the inspector's numeric "Rotate by" control.
+    transform_angle: f32,
     inter: Interaction,
     /// Undo / redo snapshot stack over the whole document.
     history: History,
@@ -118,6 +147,7 @@ impl ContourApp {
             stroke_style: StrokeStyle::default(),
             artboard: Size::new(1000, 700),
             align_to: AlignTo::Selection,
+            transform_angle: 45.0,
             inter: Interaction::default(),
             history: History::new(),
             status: String::new(),
@@ -455,6 +485,182 @@ impl ContourApp {
         self.status = "Aligned".into();
     }
 
+    // --- Transform -----------------------------------------------------------
+
+    /// The selection's combined (axis-aligned) bounding box `[x, y, w, h]` in
+    /// document space, or `None` when nothing with geometry is selected. This is
+    /// the rectangle the transform box draws around and scales from.
+    fn selection_bbox(&self) -> Option<[f32; 4]> {
+        let boxes: Vec<_> = self.selection_bounds().iter().map(|sb| sb.rect).collect();
+        align::union_bounds(&boxes).map(|r| [r.x, r.y, r.w, r.h])
+    }
+
+    /// Apply an affine to every selected shape as one undo step, dropping no-op
+    /// (identity) transforms.
+    fn transform_selection(&mut self, m: &Affine, label: &str) {
+        if m.is_identity() || self.selection.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        let n = self.doc.shapes.len();
+        let indices: Vec<usize> = self.selection.clone();
+        for i in indices {
+            if i < n {
+                self.doc.shapes[i].apply_affine(m);
+            }
+        }
+        self.status = label.into();
+    }
+
+    /// Rotate the selection about its bounding-box centre by `radians`
+    /// (positive = clockwise) as one undo step.
+    fn rotate_selection(&mut self, radians: f32, label: &str) {
+        let Some(b) = self.selection_bbox() else {
+            return;
+        };
+        let (cx, cy) = (b[0] + b[2] * 0.5, b[1] + b[3] * 0.5);
+        self.transform_selection(&Affine::rotate_about(radians, cx, cy), label);
+    }
+
+    /// Mirror the selection across its bounding-box centre, horizontally
+    /// (`horizontal = true`) or vertically, as one undo step.
+    fn flip_selection(&mut self, horizontal: bool) {
+        let Some(b) = self.selection_bbox() else {
+            return;
+        };
+        let m = if horizontal {
+            Affine::flip_h_about(b[0] + b[2] * 0.5)
+        } else {
+            Affine::flip_v_about(b[1] + b[3] * 0.5)
+        };
+        self.transform_selection(
+            &m,
+            if horizontal {
+                "Flipped horizontal"
+            } else {
+                "Flipped vertical"
+            },
+        );
+    }
+
+    /// Whether the on-canvas transform box should be shown: the Select tool, a
+    /// non-empty selection with geometry, and no active per-path anchor edit
+    /// (which has its own handles). The box is suppressed while *directly*
+    /// editing a single path's anchors so the two handle sets don't clash.
+    fn show_transform_box(&self) -> bool {
+        if self.tool != Tool::Select || self.inter.path_edit.is_some() {
+            return false;
+        }
+        // For a single selected path the anchor handles are the primary editing
+        // affordance; still show the box so the user can scale/rotate it.
+        self.selection_bbox().is_some()
+    }
+
+    /// Hit-test the transform-box handles at document point `(x, y)`. Returns the
+    /// gesture to begin: a corner/edge scale, or a rotate when the cursor is in
+    /// the rotate ring just outside a corner. `None` if not on any handle.
+    fn hit_transform_handle(&self, x: f32, y: f32) -> Option<TransformKind> {
+        if !self.show_transform_box() {
+            return None;
+        }
+        let bbox = self.selection_bbox()?;
+        let cursor = self.view.doc_to_screen((x, y));
+
+        // Scale handles take priority (inner pick radius).
+        for h in Handle::ALL {
+            let hp = self.view.doc_to_screen((
+                bbox[0] + bbox[2] * h.unit_pos().0,
+                bbox[1] + bbox[3] * h.unit_pos().1,
+            ));
+            if (cursor - hp).length() <= canvas::HANDLE_PICK_PX {
+                return Some(TransformKind::Scale(h));
+            }
+        }
+
+        // Rotate ring: just outside a corner (within ROTATE_PICK_PX, but past the
+        // handle pick radius). Checking corners only matches Illustrator.
+        for h in [
+            Handle::TopLeft,
+            Handle::TopRight,
+            Handle::BottomRight,
+            Handle::BottomLeft,
+        ] {
+            let hp = self.view.doc_to_screen((
+                bbox[0] + bbox[2] * h.unit_pos().0,
+                bbox[1] + bbox[3] * h.unit_pos().1,
+            ));
+            let d = (cursor - hp).length();
+            if d > canvas::HANDLE_PICK_PX && d <= canvas::ROTATE_PICK_PX {
+                return Some(TransformKind::Rotate);
+            }
+        }
+        None
+    }
+
+    /// Begin a free-transform: snapshot the selected shapes and the pivot.
+    fn begin_transform(&mut self, kind: TransformKind, x: f32, y: f32) {
+        let Some(bbox) = self.selection_bbox() else {
+            return;
+        };
+        let pivot = match kind {
+            TransformKind::Scale(h) => {
+                let opp = h.opposite();
+                (
+                    bbox[0] + bbox[2] * opp.unit_pos().0,
+                    bbox[1] + bbox[3] * opp.unit_pos().1,
+                )
+            }
+            TransformKind::Rotate => (bbox[0] + bbox[2] * 0.5, bbox[1] + bbox[3] * 0.5),
+        };
+        let snapshot: Vec<(usize, Shape)> = self
+            .selection
+            .iter()
+            .filter_map(|&i| self.doc.shapes.get(i).map(|s| (i, s.clone())))
+            .collect();
+        self.begin_interaction();
+        self.inter.transform = Some(TransformDrag {
+            kind,
+            pivot,
+            start: (x, y),
+            snapshot,
+        });
+    }
+
+    /// Drive an active free-transform from the current cursor `(x, y)`. Rebuilds
+    /// the selection from the start snapshot every frame and applies the affine
+    /// derived from the gesture, so dragging is exact and reversible in one undo.
+    fn drag_transform(&mut self, x: f32, y: f32, uniform: bool) {
+        let Some(td) = &self.inter.transform else {
+            return;
+        };
+        let m = match td.kind {
+            TransformKind::Scale(h) => {
+                let (px, py) = td.pivot;
+                let orig_dx = td.start.0 - px;
+                let orig_dy = td.start.1 - py;
+                let cur_dx = x - px;
+                let cur_dy = y - py;
+                let (sx, sy) = transform::scale_factors_for_handle(
+                    h, orig_dx, orig_dy, cur_dx, cur_dy, uniform,
+                );
+                Affine::scale_about(sx, sy, px, py)
+            }
+            TransformKind::Rotate => {
+                let ang = transform::angle_between(td.start, (x, y), td.pivot);
+                Affine::rotate_about(ang, td.pivot.0, td.pivot.1)
+            }
+        };
+
+        // Reset each selected shape to its pristine snapshot, then transform.
+        let snapshot = td.snapshot.clone();
+        for (i, shape) in &snapshot {
+            if let Some(slot) = self.doc.shapes.get_mut(*i) {
+                *slot = shape.clone();
+                slot.apply_affine(&m);
+            }
+        }
+    }
+
     /// Distribute the selected shapes evenly along the operation's axis as one
     /// undo step. Needs ≥3 selected shapes.
     fn distribute_selection(&mut self, op: Distribute) {
@@ -650,6 +856,49 @@ impl ContourApp {
                             }
                         });
                     });
+
+                    ui.separator();
+                    ui.menu_button("Transform", |ui| {
+                        ui.add_enabled_ui(!self.selection.is_empty(), |ui| {
+                            use std::f32::consts::PI;
+                            if ui
+                                .button(format!("{}  Rotate 90° CW", icons::ROTATE_CW))
+                                .clicked()
+                            {
+                                self.rotate_selection(PI * 0.5, "Rotated 90° CW");
+                                ui.close_menu();
+                            }
+                            if ui
+                                .button(format!("{}  Rotate 90° CCW", icons::ROTATE_CCW))
+                                .clicked()
+                            {
+                                self.rotate_selection(-PI * 0.5, "Rotated 90° CCW");
+                                ui.close_menu();
+                            }
+                            if ui
+                                .button(format!("{}  Rotate 180°", icons::ROTATE_CW))
+                                .clicked()
+                            {
+                                self.rotate_selection(PI, "Rotated 180°");
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui
+                                .button(format!("{}  Flip Horizontal", icons::FLIP_H))
+                                .clicked()
+                            {
+                                self.flip_selection(true);
+                                ui.close_menu();
+                            }
+                            if ui
+                                .button(format!("{}  Flip Vertical", icons::FLIP_V))
+                                .clicked()
+                            {
+                                self.flip_selection(false);
+                                ui.close_menu();
+                            }
+                        });
+                    });
                 });
                 ui.separator();
                 ui.label(egui::RichText::new("Contour").strong());
@@ -710,6 +959,7 @@ impl ContourApp {
                 });
 
                 self.stroke_section(ui);
+                self.transform_section(ui);
                 self.align_section(ui);
 
                 // Direct-select hint when a path is the active selection.
@@ -827,6 +1077,65 @@ impl ContourApp {
                     *shape.stroke_style_mut() = style;
                 }
             }
+        }
+    }
+
+    /// Transform controls: quick 90°/180° rotations, horizontal/vertical flips,
+    /// and a numeric "rotate by" about the selection's centre. Mirrors the
+    /// on-canvas transform box (drag a handle to scale, drag just outside a
+    /// corner to rotate). Each action is one undo step.
+    fn transform_section(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.label(egui::RichText::new("Transform").strong());
+
+        let enabled = !self.selection.is_empty();
+        ui.add_enabled_ui(enabled, |ui| {
+            use std::f32::consts::PI;
+            ui.horizontal(|ui| {
+                if align_button(ui, icons::ROTATE_CCW)
+                    .on_hover_text("Rotate 90° counter-clockwise")
+                    .clicked()
+                {
+                    self.rotate_selection(-PI * 0.5, "Rotated 90° CCW");
+                }
+                if align_button(ui, icons::ROTATE_CW)
+                    .on_hover_text("Rotate 90° clockwise")
+                    .clicked()
+                {
+                    self.rotate_selection(PI * 0.5, "Rotated 90° CW");
+                }
+                ui.add_space(6.0);
+                if align_button(ui, icons::FLIP_H)
+                    .on_hover_text("Flip horizontal")
+                    .clicked()
+                {
+                    self.flip_selection(true);
+                }
+                if align_button(ui, icons::FLIP_V)
+                    .on_hover_text("Flip vertical")
+                    .clicked()
+                {
+                    self.flip_selection(false);
+                }
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Rotate by");
+                ui.add(
+                    egui::DragValue::new(&mut self.transform_angle)
+                        .speed(1.0)
+                        .range(-360.0..=360.0)
+                        .suffix("°"),
+                );
+                if ui.button("Apply").clicked() {
+                    let rad = self.transform_angle.to_radians();
+                    self.rotate_selection(rad, "Rotated");
+                }
+            });
+        });
+
+        if !enabled {
+            ui.weak("Select a shape to transform.");
         }
     }
 
@@ -1068,6 +1377,14 @@ impl ContourApp {
 
             self.handle_input(&response, &ctx);
 
+            // Free-transform box around the selection (Select tool). Drawn under
+            // the per-path anchor handles so the anchors stay clickable on top.
+            if self.show_transform_box() {
+                if let Some(bbox) = self.selection_bbox() {
+                    canvas::paint_transform_box(&painter, &self.view, &bbox);
+                }
+            }
+
             // Editable anchors/handles for the primary selected path.
             if let Some(i) = self.primary() {
                 if let Some(Shape::Path {
@@ -1132,6 +1449,13 @@ impl ContourApp {
                     self.inter.move_last = None;
                     return;
                 }
+                // Next: grabbing a transform-box handle (scale/rotate). These can
+                // sit outside the shape, so they're tested before shape picking.
+                if let Some(kind) = self.hit_transform_handle(x, y) {
+                    self.begin_transform(kind, x, y);
+                    self.inter.move_last = None;
+                    return;
+                }
                 // Else: pick the topmost shape under the cursor to begin a move.
                 // If it is already part of the selection, keep the whole set so
                 // we drag everything together; otherwise it becomes the single
@@ -1158,7 +1482,12 @@ impl ContourApp {
         }
 
         if response.dragged() {
-            if let (Some(edit), Some((x, y)), Some(i)) =
+            if self.inter.transform.is_some() {
+                if let Some((x, y)) = doc_pos {
+                    let uniform = response.ctx.input(|i| i.modifiers.shift);
+                    self.drag_transform(x, y, uniform);
+                }
+            } else if let (Some(edit), Some((x, y)), Some(i)) =
                 (self.inter.path_edit, doc_pos, self.primary())
             {
                 self.drag_path_edit(i, edit, x, y);
@@ -1181,12 +1510,19 @@ impl ContourApp {
         if response.drag_stopped() {
             self.inter.move_last = None;
             self.inter.path_edit = None;
-            // Finalize a coalesced move / anchor-edit (no-op drags are dropped).
+            self.inter.transform = None;
+            // Finalize a coalesced move / anchor-edit / transform (no-op drags
+            // are dropped).
             self.commit_interaction();
         }
 
         if response.clicked() {
             if let Some((x, y)) = doc_pos {
+                // A click that lands on a transform handle keeps the selection
+                // (the user was aiming for the box, not the canvas behind it).
+                if self.hit_transform_handle(x, y).is_some() {
+                    return;
+                }
                 let hit = self
                     .doc
                     .shapes

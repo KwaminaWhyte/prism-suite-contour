@@ -6,6 +6,7 @@
 //! (matching egui's `Rgba`/`Color32` channel order) so they round-trip cleanly
 //! through the color pickers and JSON.
 
+use crate::transform::Affine;
 use kurbo::{BezPath, PathEl, Point, Shape as KurboShape};
 use prism_core::geometry::Rect as CoreRect;
 use serde::{Deserialize, Serialize};
@@ -320,6 +321,146 @@ impl Shape {
                     p.1 += dy;
                 }
             }
+        }
+    }
+
+    /// Apply an affine transform (rotate / scale / reflect / shear) to this
+    /// shape, in document space.
+    ///
+    /// Axis-aligned shapes (`Rect`, `Ellipse`) stay their own variant only while
+    /// the transform keeps their bounding box axis-aligned (pure
+    /// translate/scale/flip). Under any rotation or shear they are rasterised
+    /// into a [`Shape::Path`] that traces the transformed outline, exactly the
+    /// way Illustrator turns a rotated rectangle into an editable path under the
+    /// hood. `Line`/`Path` always transform in place (handles transform by the
+    /// matrix's *linear* part, since they are offsets).
+    pub fn apply_affine(&mut self, m: &Affine) {
+        // A transform is "axis-aligned" if it has no rotation or shear, i.e. the
+        // off-diagonal coefficients are (numerically) zero.
+        let axis_aligned = m.b.abs() < 1e-6 && m.c.abs() < 1e-6;
+        match self {
+            Shape::Rect { rect, .. } | Shape::Ellipse { rect, .. } if axis_aligned => {
+                let (x0, y0) = m.apply_point(rect[0], rect[1]);
+                let (x1, y1) = m.apply_point(rect[0] + rect[2], rect[1] + rect[3]);
+                // Re-normalise so width/height stay non-negative after a flip.
+                rect[0] = x0.min(x1);
+                rect[1] = y0.min(y1);
+                rect[2] = (x1 - x0).abs();
+                rect[3] = (y1 - y0).abs();
+            }
+            Shape::Rect { .. } | Shape::Ellipse { .. } => {
+                // Rotation/shear: convert to a path tracing the outline, then
+                // transform that path.
+                *self = self.to_path();
+                self.apply_affine(m);
+            }
+            Shape::Line { p0, p1, .. } => {
+                *p0 = m.apply_point(p0.0, p0.1);
+                *p1 = m.apply_point(p1.0, p1.1);
+            }
+            Shape::Path {
+                points, handles, ..
+            } => {
+                for p in points.iter_mut() {
+                    *p = m.apply_point(p.0, p.1);
+                }
+                for h in handles.iter_mut() {
+                    *h = m.apply_vector(h.0, h.1);
+                }
+            }
+        }
+    }
+
+    /// Convert this shape into an equivalent [`Shape::Path`], preserving paint
+    /// style. `Rect` becomes a four-corner closed corner-path; `Ellipse` becomes
+    /// a four-anchor closed cubic approximation; `Line` becomes a two-point open
+    /// path; an existing `Path` is returned unchanged.
+    pub fn to_path(&self) -> Shape {
+        match self {
+            Shape::Path { .. } => self.clone(),
+            Shape::Rect {
+                rect,
+                fill,
+                stroke,
+                stroke_w,
+                stroke_style,
+                visible,
+            } => {
+                let pts = vec![
+                    (rect[0], rect[1]),
+                    (rect[0] + rect[2], rect[1]),
+                    (rect[0] + rect[2], rect[1] + rect[3]),
+                    (rect[0], rect[1] + rect[3]),
+                ];
+                let handles = vec![(0.0, 0.0); 4];
+                Shape::Path {
+                    points: pts,
+                    closed: true,
+                    fill: *fill,
+                    stroke: *stroke,
+                    stroke_w: *stroke_w,
+                    stroke_style: stroke_style.clone(),
+                    handles,
+                    visible: *visible,
+                }
+            }
+            Shape::Ellipse {
+                rect,
+                fill,
+                stroke,
+                stroke_w,
+                stroke_style,
+                visible,
+            } => {
+                // Four anchors at the extrema with the classic 0.5523 cubic
+                // tangent so the path traces a smooth ellipse.
+                let cx = rect[0] + rect[2] * 0.5;
+                let cy = rect[1] + rect[3] * 0.5;
+                let rx = rect[2] * 0.5;
+                let ry = rect[3] * 0.5;
+                const K: f32 = 0.552_284_8; // (4/3)·(√2−1)
+                                            // Anchors clockwise from the rightmost point. Out-tangent offsets
+                                            // are tangent to the ellipse, scaled by K·radius.
+                let points = vec![
+                    (cx + rx, cy), // right
+                    (cx, cy + ry), // bottom
+                    (cx - rx, cy), // left
+                    (cx, cy - ry), // top
+                ];
+                let handles = vec![
+                    (0.0, K * ry),  // right anchor: tangent down
+                    (-K * rx, 0.0), // bottom anchor: tangent left
+                    (0.0, -K * ry), // left anchor: tangent up
+                    (K * rx, 0.0),  // top anchor: tangent right
+                ];
+                Shape::Path {
+                    points,
+                    closed: true,
+                    fill: *fill,
+                    stroke: *stroke,
+                    stroke_w: *stroke_w,
+                    stroke_style: stroke_style.clone(),
+                    handles,
+                    visible: *visible,
+                }
+            }
+            Shape::Line {
+                p0,
+                p1,
+                stroke,
+                stroke_w,
+                stroke_style,
+                visible,
+            } => Shape::Path {
+                points: vec![*p0, *p1],
+                closed: false,
+                fill: [0.0, 0.0, 0.0, 0.0],
+                stroke: *stroke,
+                stroke_w: *stroke_w,
+                stroke_style: stroke_style.clone(),
+                handles: vec![(0.0, 0.0); 2],
+                visible: *visible,
+            },
         }
     }
 
@@ -1003,6 +1144,139 @@ mod tests {
         };
         let n = s.normalized_dash().expect("has a positive run");
         assert_eq!(n, vec![6.0, 0.0]);
+    }
+
+    // --- Affine transforms -------------------------------------------------
+
+    #[test]
+    fn axis_aligned_scale_keeps_rect_a_rect() {
+        let mut s = Shape::Rect {
+            rect: [10.0, 20.0, 40.0, 30.0],
+            fill: [0.0; 4],
+            stroke: [0.0; 4],
+            stroke_w: 1.0,
+            stroke_style: StrokeStyle::default(),
+            visible: true,
+        };
+        // Scale ×2 about the origin.
+        s.apply_affine(&Affine::scale(2.0, 2.0));
+        match s {
+            Shape::Rect { rect, .. } => {
+                assert_eq!(rect, [20.0, 40.0, 80.0, 60.0]);
+            }
+            _ => panic!("axis-aligned scale should keep a Rect a Rect"),
+        }
+    }
+
+    #[test]
+    fn flip_keeps_rect_normalized() {
+        let mut s = Shape::Rect {
+            rect: [10.0, 0.0, 40.0, 20.0],
+            fill: [0.0; 4],
+            stroke: [0.0; 4],
+            stroke_w: 1.0,
+            stroke_style: StrokeStyle::default(),
+            visible: true,
+        };
+        // Horizontal flip about x = 30 (the rect's centre): bounds unchanged,
+        // width/height stay positive.
+        s.apply_affine(&Affine::flip_h_about(30.0));
+        match s {
+            Shape::Rect { rect, .. } => {
+                assert!((rect[0] - 10.0).abs() < 1e-3);
+                assert!((rect[2] - 40.0).abs() < 1e-3);
+                assert!(rect[2] > 0.0 && rect[3] > 0.0);
+            }
+            _ => panic!("flip should keep a Rect a Rect"),
+        }
+    }
+
+    #[test]
+    fn rotation_converts_rect_to_path() {
+        let mut s = Shape::Rect {
+            rect: [0.0, 0.0, 10.0, 10.0],
+            fill: [0.0; 4],
+            stroke: [0.0; 4],
+            stroke_w: 1.0,
+            stroke_style: StrokeStyle::default(),
+            visible: true,
+        };
+        s.apply_affine(&Affine::rotate_about(0.5, 5.0, 5.0));
+        assert!(
+            matches!(s, Shape::Path { .. }),
+            "rotation must rasterise to a Path"
+        );
+        if let Shape::Path { points, closed, .. } = &s {
+            assert_eq!(points.len(), 4);
+            assert!(*closed);
+        }
+    }
+
+    #[test]
+    fn rotation_preserves_rect_center() {
+        let mut s = Shape::Rect {
+            rect: [0.0, 0.0, 100.0, 40.0],
+            fill: [0.0; 4],
+            stroke: [0.0; 4],
+            stroke_w: 1.0,
+            stroke_style: StrokeStyle::default(),
+            visible: true,
+        };
+        let before = s.bounds().unwrap();
+        let (cx0, cy0) = (before.x + before.w * 0.5, before.y + before.h * 0.5);
+        // Rotate 90° about the rect centre; the centre must be fixed.
+        s.apply_affine(&Affine::rotate_about(std::f32::consts::FRAC_PI_2, cx0, cy0));
+        let after = s.bounds().unwrap();
+        let (cx1, cy1) = (after.x + after.w * 0.5, after.y + after.h * 0.5);
+        assert!((cx0 - cx1).abs() < 0.5 && (cy0 - cy1).abs() < 0.5);
+        // A 90° turn swaps the bbox extents.
+        assert!((after.w - before.h).abs() < 0.5);
+        assert!((after.h - before.w).abs() < 0.5);
+    }
+
+    #[test]
+    fn ellipse_to_path_round_trips_bounds() {
+        let s = Shape::Ellipse {
+            rect: [0.0, 0.0, 80.0, 40.0],
+            fill: [0.0; 4],
+            stroke: [0.0; 4],
+            stroke_w: 1.0,
+            stroke_style: StrokeStyle::default(),
+            visible: true,
+        };
+        let p = s.to_path();
+        let pb = p.bounds().unwrap();
+        // The cubic ellipse path should hug the original ellipse box closely.
+        assert!((pb.x - 0.0).abs() < 0.5);
+        assert!((pb.y - 0.0).abs() < 0.5);
+        assert!((pb.w - 80.0).abs() < 0.5);
+        assert!((pb.h - 40.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn path_handles_transform_by_linear_part() {
+        // A path with a curve handle; under a translate the handle (an offset)
+        // must NOT move, but the anchors must.
+        let mut s = Shape::Path {
+            points: vec![(0.0, 0.0), (10.0, 0.0)],
+            closed: false,
+            fill: [0.0; 4],
+            stroke: [0.0; 4],
+            stroke_w: 1.0,
+            stroke_style: StrokeStyle::default(),
+            handles: vec![(3.0, 4.0), (0.0, 0.0)],
+            visible: true,
+        };
+        s.apply_affine(&Affine::translate(100.0, 50.0));
+        if let Shape::Path {
+            points, handles, ..
+        } = &s
+        {
+            assert_eq!(points[0], (100.0, 50.0));
+            assert_eq!(handles[0], (3.0, 4.0)); // offset unchanged by translation
+        } else {
+            panic!("still a path");
+        }
     }
 
     /// `.contour` files written before stroke styles existed must load with a

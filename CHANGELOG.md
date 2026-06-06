@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Transform box (rotate / scale / reflect)** — a new pure `transform` module
+  (a 2×3 `Affine` matrix with `scale_about` / `rotate_about` / `flip_*` pivot
+  constructors, plus handle-drag → scale-factor and rotate-angle helpers; all
+  unit-tested) wired into an on-canvas free-transform box and an inspector +
+  **Object → Transform** menu:
+  - The Select tool draws a dashed bounding box around the selection with eight
+    handles (four corner + four edge). **Drag a handle** to scale — corner
+    handles scale both axes, edge handles a single axis, and the *opposite*
+    handle stays pinned as the pivot. **Shift-drag** a corner locks the aspect
+    ratio. **Drag just outside a corner** to rotate about the box centre. Each
+    drag is exact (re-applied from a start-of-drag snapshot every frame, so no
+    float drift) and lands as a single undo step.
+  - Inspector "Transform" section and **Object → Transform** menu add quick
+    **Rotate 90° CW/CCW**, **Rotate 180°**, **Flip Horizontal/Vertical**, and a
+    numeric **Rotate by** (degrees) about the selection's centre.
+  - `Shape::apply_affine` transforms `Line`/`Path` in place (handles, being
+    offsets, transform by the matrix's *linear* part only). Axis-aligned
+    `Rect`/`Ellipse` stay their own variant under pure translate/scale/flip; a
+    rotation or shear rasterises them into an editable `Path` via the new
+    `Shape::to_path` (rect → four-corner polygon, ellipse → four-anchor cubic
+    approximation), matching how Illustrator turns a rotated primitive into a
+    path.
+
 - **Multi-selection** — the Select tool now maintains a full selection *set*
   rather than a primary/secondary pair. Plain-click selects one shape;
   **shift-click** toggles a shape in or out of the set (in the canvas and the
