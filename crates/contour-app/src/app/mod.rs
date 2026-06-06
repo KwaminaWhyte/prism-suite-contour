@@ -8,6 +8,7 @@ mod tools;
 use crate::align::AlignTo;
 use crate::arrange::Arrange;
 use crate::canvas::View;
+use crate::clipboard::Clipboard;
 use crate::document::{Document, Shape, StrokeStyle};
 use crate::gradient::{Gradient, GradientKind, GradientStop, SpreadMode};
 use crate::history::History;
@@ -49,6 +50,30 @@ impl Tool {
             Tool::Artboard => "Artboard",
         }
     }
+}
+
+/// Which clipboard / duplicate command a key chord requested this frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClipKey {
+    Copy,
+    Cut,
+    Paste,
+    PasteInPlace,
+    PasteInFront,
+    PasteInBack,
+    Duplicate,
+}
+
+/// The global key chords read once per frame, dispatched into editor commands.
+struct Keys {
+    enter: bool,
+    delete: bool,
+    undo: bool,
+    redo: bool,
+    arrange: Option<Arrange>,
+    group: bool,
+    ungroup: bool,
+    clip: Option<ClipKey>,
 }
 
 /// While building a pen path, which part of the freshest anchor is being
@@ -189,6 +214,9 @@ pub struct ContourApp {
     /// Latest document-space cursor over the canvas, or `None` when the pointer
     /// is off canvas. Feeds the status bar's coordinate read-out.
     cursor_doc: Option<(f32, f32)>,
+    /// Detached shapes from the last Copy / Cut, ready to paste. Not part of the
+    /// document (paste is not undo-coupled to copy), so it survives undo/redo.
+    clipboard: Clipboard,
 }
 
 impl ContourApp {
@@ -217,6 +245,7 @@ impl ContourApp {
             fit_artboards_requested: false,
             workspace: Workspace::default(),
             cursor_doc: None,
+            clipboard: Clipboard::default(),
         }
     }
 
@@ -236,7 +265,7 @@ impl eframe::App for ContourApp {
         // Global keyboard: Enter commits a pen path; Delete removes selection;
         // Cmd/Ctrl+Z undoes, Cmd/Ctrl+Shift+Z (or Ctrl+Y) redoes; Cmd/Ctrl+]/[
         // arrange the selection (with Shift: to front / to back), à la Illustrator.
-        let (enter, delete, undo, redo, arrange_key, group_key, ungroup_key) = ctx.input(|i| {
+        let keys = ctx.input(|i| {
             let cmd = i.modifiers.command;
             let shift = i.modifiers.shift;
             let z = i.key_pressed(egui::Key::Z);
@@ -257,16 +286,46 @@ impl eframe::App for ContourApp {
             } else {
                 None
             };
-            (
-                i.key_pressed(egui::Key::Enter),
-                i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
-                cmd && z && !shift,
-                (cmd && z && shift) || (cmd && y),
+            // Clipboard shortcuts (Illustrator parity): Cmd/Ctrl + C/X/V,
+            // Shift+V = paste in place, F/B = paste in front/back, D = duplicate.
+            let clip = if cmd && i.key_pressed(egui::Key::C) {
+                Some(ClipKey::Copy)
+            } else if cmd && i.key_pressed(egui::Key::X) {
+                Some(ClipKey::Cut)
+            } else if cmd && shift && i.key_pressed(egui::Key::V) {
+                Some(ClipKey::PasteInPlace)
+            } else if cmd && i.key_pressed(egui::Key::V) {
+                Some(ClipKey::Paste)
+            } else if cmd && i.key_pressed(egui::Key::F) {
+                Some(ClipKey::PasteInFront)
+            } else if cmd && i.key_pressed(egui::Key::B) {
+                Some(ClipKey::PasteInBack)
+            } else if cmd && i.key_pressed(egui::Key::D) {
+                Some(ClipKey::Duplicate)
+            } else {
+                None
+            };
+            Keys {
+                enter: i.key_pressed(egui::Key::Enter),
+                delete: i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
+                undo: cmd && z && !shift,
+                redo: (cmd && z && shift) || (cmd && y),
                 arrange,
-                cmd && g && !shift,
-                cmd && g && shift,
-            )
+                group: cmd && g && !shift,
+                ungroup: cmd && g && shift,
+                clip,
+            }
         });
+        let Keys {
+            enter,
+            delete,
+            undo,
+            redo,
+            arrange: arrange_key,
+            group: group_key,
+            ungroup: ungroup_key,
+            clip: clip_key,
+        } = keys;
         if enter && self.tool == Tool::Pen {
             self.commit_pen(true);
         }
@@ -287,6 +346,17 @@ impl eframe::App for ContourApp {
             self.ungroup_selection();
         } else if group_key {
             self.group_selection();
+        }
+        if let Some(c) = clip_key {
+            match c {
+                ClipKey::Copy => self.copy_selection(),
+                ClipKey::Cut => self.cut_selection(),
+                ClipKey::Paste => self.paste(),
+                ClipKey::PasteInPlace => self.paste_in_place(),
+                ClipKey::PasteInFront => self.paste_in_front(),
+                ClipKey::PasteInBack => self.paste_in_back(),
+                ClipKey::Duplicate => self.duplicate_selection(),
+            }
         }
 
         self.menu_bar(root);

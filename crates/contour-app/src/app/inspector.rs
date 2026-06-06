@@ -52,7 +52,41 @@ impl ContourApp {
                         }
                     });
                     ui.separator();
-                    ui.add_enabled_ui(!self.selection.is_empty(), |ui| {
+                    let has_sel = !self.selection.is_empty();
+                    ui.add_enabled_ui(has_sel, |ui| {
+                        if ui.button("Cut").clicked() {
+                            self.cut_selection();
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy").clicked() {
+                            self.copy_selection();
+                            ui.close_menu();
+                        }
+                    });
+                    ui.add_enabled_ui(self.can_paste(), |ui| {
+                        if ui.button("Paste").clicked() {
+                            self.paste();
+                            ui.close_menu();
+                        }
+                        if ui.button("Paste in Place").clicked() {
+                            self.paste_in_place();
+                            ui.close_menu();
+                        }
+                        if ui.button("Paste in Front").clicked() {
+                            self.paste_in_front();
+                            ui.close_menu();
+                        }
+                        if ui.button("Paste in Back").clicked() {
+                            self.paste_in_back();
+                            ui.close_menu();
+                        }
+                    });
+                    ui.separator();
+                    ui.add_enabled_ui(has_sel, |ui| {
+                        if ui.button("Duplicate").clicked() {
+                            self.duplicate_selection();
+                            ui.close_menu();
+                        }
                         if ui.button("Delete").clicked() {
                             self.delete_selected();
                             ui.close_menu();

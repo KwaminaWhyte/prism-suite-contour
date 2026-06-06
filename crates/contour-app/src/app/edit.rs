@@ -254,6 +254,147 @@ impl ContourApp {
         }
     }
 
+    // --- Clipboard: copy / cut / paste / duplicate --------------------------
+
+    /// Whether anything is on the clipboard (drives menu enablement).
+    pub(super) fn can_paste(&self) -> bool {
+        !self.clipboard.is_empty()
+    }
+
+    /// The currently-selected shapes (expanded to whole groups) in paint order,
+    /// snapshotted for the clipboard. Returns the indices it gathered so callers
+    /// that also delete (Cut) can reuse them.
+    fn selection_in_paint_order(&self) -> Vec<usize> {
+        let mut idx: Vec<usize> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|&i| i < self.doc.shapes.len())
+            .collect();
+        idx.sort_unstable();
+        idx.dedup();
+        idx
+    }
+
+    /// Copy the selection (whole groups, in paint order) onto the clipboard. The
+    /// document is untouched, so Copy records no undo step.
+    pub(super) fn copy_selection(&mut self) {
+        let idx = self.selection_in_paint_order();
+        if idx.is_empty() {
+            return;
+        }
+        let shapes: Vec<Shape> = idx.iter().map(|&i| self.doc.shapes[i].clone()).collect();
+        let n = shapes.len();
+        self.clipboard.set(shapes);
+        self.status = format!("Copied {n} {}", if n == 1 { "object" } else { "objects" });
+    }
+
+    /// Cut: copy the selection to the clipboard, then delete it (one undo step).
+    pub(super) fn cut_selection(&mut self) {
+        let idx = self.selection_in_paint_order();
+        if idx.is_empty() {
+            return;
+        }
+        let shapes: Vec<Shape> = idx.iter().map(|&i| self.doc.shapes[i].clone()).collect();
+        let n = shapes.len();
+        self.clipboard.set(shapes);
+        self.checkpoint();
+        for &i in idx.iter().rev() {
+            self.doc.shapes.remove(i);
+        }
+        self.selection.clear();
+        self.status = format!("Cut {n} {}", if n == 1 { "object" } else { "objects" });
+    }
+
+    /// Append `shapes` to the top of the document (paint order) as one undo step,
+    /// remapping their group ids so a pasted group stays grouped without
+    /// colliding with the document's existing groups, and selecting the result.
+    fn paste_shapes(&mut self, mut shapes: Vec<Shape>) {
+        if shapes.is_empty() {
+            return;
+        }
+        crate::clipboard::remap_group_ids(&mut shapes, &self.group_tags());
+        self.checkpoint();
+        let start = self.doc.shapes.len();
+        let n = shapes.len();
+        self.doc.shapes.extend(shapes);
+        self.selection = (start..start + n).collect();
+        self.status = format!("Pasted {n} {}", if n == 1 { "object" } else { "objects" });
+    }
+
+    /// Insert `shapes` at paint-order position `at` (0 = back) as one undo step,
+    /// remapping group ids and selecting the inserted block. Used by paste-in-
+    /// front / -back so the paste lands at a precise stacking position.
+    fn paste_shapes_at(&mut self, mut shapes: Vec<Shape>, at: usize) {
+        if shapes.is_empty() {
+            return;
+        }
+        crate::clipboard::remap_group_ids(&mut shapes, &self.group_tags());
+        let at = at.min(self.doc.shapes.len());
+        let n = shapes.len();
+        self.checkpoint();
+        for (k, s) in shapes.into_iter().enumerate() {
+            self.doc.shapes.insert(at + k, s);
+        }
+        self.selection = (at..at + n).collect();
+        self.status = format!("Pasted {n} {}", if n == 1 { "object" } else { "objects" });
+    }
+
+    /// Plain Paste: drop the clipboard onto the top of the stack, fanned out by a
+    /// growing nudge so repeated pastes don't hide behind one another.
+    pub(super) fn paste(&mut self) {
+        if let Some(shapes) = self.clipboard.take_paste() {
+            self.paste_shapes(shapes);
+        }
+    }
+
+    /// Paste In Place: drop the clipboard at its original coordinates, on top.
+    pub(super) fn paste_in_place(&mut self) {
+        if let Some(shapes) = self.clipboard.clone_in_place() {
+            self.paste_shapes(shapes);
+        }
+    }
+
+    /// Paste In Front: clipboard at original coordinates, stacked above
+    /// everything (front of the paint list).
+    pub(super) fn paste_in_front(&mut self) {
+        if let Some(shapes) = self.clipboard.clone_in_place() {
+            let top = self.doc.shapes.len();
+            self.paste_shapes_at(shapes, top);
+        }
+    }
+
+    /// Paste In Back: clipboard at original coordinates, stacked below
+    /// everything (back of the paint list).
+    pub(super) fn paste_in_back(&mut self) {
+        if let Some(shapes) = self.clipboard.clone_in_place() {
+            self.paste_shapes_at(shapes, 0);
+        }
+    }
+
+    /// Duplicate: copy the selection in place and immediately paste a nudged copy
+    /// on top, without disturbing the clipboard — Illustrator's `Ctrl+D`-class
+    /// quick-clone. The new copies become the selection.
+    pub(super) fn duplicate_selection(&mut self) {
+        let idx = self.selection_in_paint_order();
+        if idx.is_empty() {
+            return;
+        }
+        let mut shapes: Vec<Shape> = idx.iter().map(|&i| self.doc.shapes[i].clone()).collect();
+        let off = crate::clipboard::paste_offset(1);
+        for s in shapes.iter_mut() {
+            s.translate(off.0, off.1);
+        }
+        self.paste_shapes(shapes);
+        if self.status.starts_with("Pasted") {
+            let n = idx.len();
+            self.status = format!(
+                "Duplicated {n} {}",
+                if n == 1 { "object" } else { "objects" }
+            );
+        }
+    }
+
     /// Swap shapes `a` and `b`, keeping the selection pinned to the moved shapes.
     pub(super) fn swap_shapes(&mut self, a: usize, b: usize) {
         let n = self.doc.shapes.len();

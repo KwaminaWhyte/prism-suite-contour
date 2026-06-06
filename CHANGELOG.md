@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Clipboard (copy / cut / paste / duplicate)** — a new pure, unit-tested
+  `clipboard` module and a `Clipboard` buffer on the app, bringing the
+  everyday Illustrator clipboard staples Contour was missing:
+  - **Edit → Cut / Copy / Paste / Paste in Place / Paste in Front / Paste in
+    Back** and **Duplicate**, plus the Illustrator keys **Cmd/Ctrl + C**
+    (copy), **X** (cut), **V** (paste), **Shift + V** (paste in place), **F**
+    (paste in front), **B** (paste in back), and **D** (duplicate).
+  - **Copy** snapshots the selection (expanded to whole **groups**, in paint
+    order) into a detached buffer that lives *outside* the document, so it
+    survives undo/redo and can be pasted repeatedly (or into a new document).
+    **Cut** copies then deletes the selection as one undo step.
+  - **Paste** drops the buffer on top of the stack, fanned out by a growing
+    diagonal nudge (`clipboard::paste_offset`) so repeated pastes step
+    down-and-right instead of hiding behind one another, à la Illustrator.
+    **Paste in Place** lands the copies at their original coordinates on top;
+    **Paste in Front / Back** do the same but force the copies to the front /
+    back of the paint order. **Duplicate** makes a single nudged copy without
+    disturbing the clipboard. Each paste / duplicate is one undo step and
+    selects the new copies.
+  - Pasted **group** membership is preserved without colliding with the
+    destination: `clipboard::remap_group_ids` rewrites the buffer's group ids
+    to fresh ones (starting above every id already in use), keeping shapes that
+    shared an id in the buffer grouped together and distinct buffer groups
+    distinct, while ungrouped shapes stay loose. The paste nudge growth and the
+    group-id remap are pure functions pinned by unit tests (no egui context).
+
 - **Window menu (show/hide panels) + status bar** — a new pure, unit-tested
   `workspace` module and a `Workspace` panel-visibility state on the app, giving
   the editor's shell the workspace controls a pro vector app needs:
