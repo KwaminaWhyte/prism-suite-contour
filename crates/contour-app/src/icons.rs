@@ -46,6 +46,10 @@ pub const PEN: &str = ph::PEN_NIB;
 
 /// Delete / trash.
 pub const TRASH: &str = ph::TRASH;
+/// Undo (counter-clockwise arrow).
+pub const UNDO: &str = ph::ARROW_COUNTER_CLOCKWISE;
+/// Redo (clockwise arrow).
+pub const REDO: &str = ph::ARROW_CLOCKWISE;
 
 // --- Layers panel -----------------------------------------------------------
 

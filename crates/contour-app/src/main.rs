@@ -9,6 +9,7 @@ mod boolean;
 mod canvas;
 mod document;
 mod export;
+mod history;
 mod icons;
 mod theme;
 

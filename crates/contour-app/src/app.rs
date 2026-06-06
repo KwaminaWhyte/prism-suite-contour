@@ -4,6 +4,7 @@
 use crate::boolean::{self, BoolOp};
 use crate::canvas::{self, View};
 use crate::document::{self, Document, Shape};
+use crate::history::History;
 use crate::{export, icons, theme};
 use egui::{Color32, Sense, Vec2};
 use prism_core::Size;
@@ -88,6 +89,8 @@ pub struct ContourApp {
     /// Logical artboard size (document units); from the shared `Size` type.
     artboard: Size,
     inter: Interaction,
+    /// Undo / redo snapshot stack over the whole document.
+    history: History,
     /// Transient status line shown in the menu bar (e.g. export results).
     status: String,
 }
@@ -107,6 +110,7 @@ impl ContourApp {
             stroke_w: 2.0,
             artboard: Size::new(1000, 700),
             inter: Interaction::default(),
+            history: History::new(),
             status: String::new(),
         }
     }
@@ -116,7 +120,59 @@ impl ContourApp {
         self.selected = None;
         self.selected2 = None;
         self.inter = Interaction::default();
+        self.history.clear();
         self.status.clear();
+    }
+
+    // --- Undo / redo ---------------------------------------------------------
+
+    /// Record the current document as an undo checkpoint *before* applying a
+    /// discrete (non-drag) edit. Call this immediately prior to mutating
+    /// `self.doc`.
+    fn checkpoint(&mut self) {
+        self.history.push(self.doc.clone());
+    }
+
+    /// Snapshot the start of a continuous interaction (drag). Idempotent within
+    /// a drag, so per-frame calls coalesce into one undo entry.
+    fn begin_interaction(&mut self) {
+        self.history.begin(&self.doc);
+    }
+
+    /// Finalize a continuous interaction; drops the checkpoint if nothing
+    /// actually changed.
+    fn commit_interaction(&mut self) {
+        self.history.commit(&self.doc);
+    }
+
+    fn undo(&mut self) {
+        if let Some(prev) = self.history.undo(&self.doc) {
+            self.doc = prev;
+            self.clamp_selection();
+            self.status = "Undo".into();
+        }
+    }
+
+    fn redo(&mut self) {
+        if let Some(next) = self.history.redo(&self.doc) {
+            self.doc = next;
+            self.clamp_selection();
+            self.status = "Redo".into();
+        }
+    }
+
+    /// Drop selection indices that fall outside the (possibly restored) doc.
+    fn clamp_selection(&mut self) {
+        let n = self.doc.shapes.len();
+        let fix = |sel: &mut Option<usize>| {
+            if let Some(i) = *sel {
+                if i >= n {
+                    *sel = None;
+                }
+            }
+        };
+        fix(&mut self.selected);
+        fix(&mut self.selected2);
     }
 
     /// Remove shape `i`, fixing up both selection indices.
@@ -138,6 +194,7 @@ impl ContourApp {
 
     fn delete_selected(&mut self) {
         if let Some(i) = self.selected.take() {
+            self.checkpoint();
             self.remove_shape(i);
         }
     }
@@ -181,6 +238,7 @@ impl ContourApp {
 
     fn commit_pen(&mut self, closed: bool) {
         if self.inter.pen_points.len() >= 2 {
+            self.checkpoint();
             let mut handles = std::mem::take(&mut self.inter.pen_handles);
             let points = std::mem::take(&mut self.inter.pen_points);
             handles.resize(points.len(), (0.0, 0.0));
@@ -262,6 +320,7 @@ impl ContourApp {
         let clip = self.doc.shapes[b].clone();
         match boolean::apply(&subj, &clip, op) {
             Some(result) => {
+                self.checkpoint();
                 // Remove the higher index first so the lower stays valid.
                 let (hi, lo) = if a > b { (a, b) } else { (b, a) };
                 self.doc.shapes.remove(hi);
@@ -280,15 +339,28 @@ impl eframe::App for ContourApp {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
 
-        // Global keyboard: Enter commits a pen path; Delete removes selection.
-        let (enter, delete) = ctx.input(|i| {
+        // Global keyboard: Enter commits a pen path; Delete removes selection;
+        // Cmd/Ctrl+Z undoes, Cmd/Ctrl+Shift+Z (or Ctrl+Y) redoes.
+        let (enter, delete, undo, redo) = ctx.input(|i| {
+            let cmd = i.modifiers.command;
+            let shift = i.modifiers.shift;
+            let z = i.key_pressed(egui::Key::Z);
+            let y = i.key_pressed(egui::Key::Y);
             (
                 i.key_pressed(egui::Key::Enter),
                 i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
+                cmd && z && !shift,
+                (cmd && z && shift) || (cmd && y),
             )
         });
         if enter && self.tool == Tool::Pen {
             self.commit_pen(true);
+        }
+        // Redo before undo so a Shift+Z frame can't be misread as undo.
+        if redo {
+            self.redo();
+        } else if undo {
+            self.undo();
         }
         if delete {
             self.delete_selected();
@@ -325,6 +397,19 @@ impl ContourApp {
                     }
                 });
                 ui.menu_button("Edit", |ui| {
+                    ui.add_enabled_ui(self.history.can_undo(), |ui| {
+                        if ui.button(format!("{}  Undo", icons::UNDO)).clicked() {
+                            self.undo();
+                            ui.close_menu();
+                        }
+                    });
+                    ui.add_enabled_ui(self.history.can_redo(), |ui| {
+                        if ui.button(format!("{}  Redo", icons::REDO)).clicked() {
+                            self.redo();
+                            ui.close_menu();
+                        }
+                    });
+                    ui.separator();
                     ui.add_enabled_ui(self.selected.is_some(), |ui| {
                         if ui.button("Delete").clicked() {
                             self.delete_selected();
@@ -508,12 +593,15 @@ impl ContourApp {
         });
 
         if let Some(i) = to_toggle {
+            self.checkpoint();
             self.doc.shapes[i].toggle_visible();
         }
         if let Some(i) = to_raise {
+            self.checkpoint();
             self.swap_shapes(i, i + 1);
         }
         if let Some(i) = to_lower {
+            self.checkpoint();
             self.swap_shapes(i, i - 1);
         }
         if let Some((i, shift)) = to_select {
@@ -530,6 +618,7 @@ impl ContourApp {
             }
         }
         if let Some(i) = to_delete {
+            self.checkpoint();
             self.remove_shape(i);
         }
     }
@@ -598,6 +687,7 @@ impl ContourApp {
             if let Some((x, y)) = doc_pos {
                 // First: grabbing an anchor/handle of the already-selected path.
                 if let Some(edit) = self.hit_path_edit(x, y) {
+                    self.begin_interaction();
                     self.inter.path_edit = Some(edit);
                     self.inter.move_last = None;
                     return;
@@ -623,6 +713,8 @@ impl ContourApp {
                 if let Some(i) = hit {
                     self.selected = Some(i);
                     self.inter.move_last = Some((x, y));
+                    // Snapshot the start of a move so the whole drag is one undo.
+                    self.begin_interaction();
                 } else {
                     self.inter.move_last = None;
                 }
@@ -650,6 +742,8 @@ impl ContourApp {
         if response.drag_stopped() {
             self.inter.move_last = None;
             self.inter.path_edit = None;
+            // Finalize a coalesced move / anchor-edit (no-op drags are dropped).
+            self.commit_interaction();
         }
 
         if response.clicked() {
@@ -712,6 +806,7 @@ impl ContourApp {
         if response.drag_stopped() {
             if let (Some(a), Some(b)) = (self.inter.drag_start, self.inter.drag_now) {
                 if let Some(shape) = self.shape_from_drag(a, b) {
+                    self.checkpoint();
                     self.doc.shapes.push(shape);
                     self.selected = Some(self.doc.shapes.len() - 1);
                 }

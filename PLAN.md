@@ -70,8 +70,8 @@ Grounded in `contour/crates/contour-app/src/`. Past the README's "v0 scaffold" l
 - **Shell** — `theme.rs` Prism dark theme, `icons.rs` phosphor tool glyphs; depends on `prism-core`
   (`Size`, `geometry::Rect`, `color::{srgb_to_linear, linear_to_srgb}`).
 
-**Known gaps vs the README's own "out of scope" list, now scheduled below:** undo/redo, multi-select,
-grouping, open/import, direct-anchor editing UI, real layers panel.
+**Known gaps vs the README's own "out of scope" list, now scheduled below:** ~~undo/redo~~ (done),
+multi-select, grouping, open/import, direct-anchor editing UI, real layers panel.
 
 ---
 
@@ -140,7 +140,7 @@ app-agnostic. Phases 0–1 are largely **done** (see §1); the rest is the road 
 - [x] Hit-test, translate, per-shape visibility
 - [x] Pathfinder v1: Union / Intersect / Difference (`i_overlay`)
 - [x] Export: SVG + PNG (`tiny-skia`)
-- [ ] **Undo/redo** (M) — command stack over the document (the single biggest reliability gap)
+- [x] **Undo/redo** (M) — snapshot history stack over the document (`history.rs`); Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z (or Ctrl+Y), Edit-menu entries. Coalesces drags (move / anchor-edit) into single entries; drops no-op drags; capped depth
 - [ ] **Direct-select** (M) — drag anchors/handles; add/delete/convert anchor (smooth↔corner); marquee anchors
 
 ### Phase 2 — Selection, organize, transform  *(the daily-driver core)*
@@ -234,7 +234,7 @@ app-agnostic. Phases 0–1 are largely **done** (see §1); the rest is the road 
 | Image trace | Image Trace | **Planned** (`vtracer`) | 5 |
 | Place / link / clip images | full | **Planned** (suite interop) | 5 |
 | Export: SVG/PNG | yes | **Done**; PDF/EPS/AI/for-screens **Planned** | 1,6 |
-| Undo/redo | full | **Planned** (gap today) | 1 |
+| Undo/redo | full | **Done** (snapshot history, drag-coalesced) | 1 |
 | AI (recolor/trace/generative) | Firefly | **Planned** (feature-gated) | 7 |
 | Automation / scripting / plugins | actions/scripts/SDK | **Planned** | 7 |
 | Perf (huge docs) / autosave / prefs / workspaces / multi-doc | full | **Planned** | 8 |
@@ -273,7 +273,7 @@ selection/layers/transform (Ph2) → appearance/strokes/gradients (Ph3)**.
 
 ## 7. Immediate next steps
 
-1. [ ] **Undo/redo** command stack — unblocks confident editing of everything else.
+1. [x] **Undo/redo** command stack — unblocks confident editing of everything else. *(Done: `history.rs` snapshot stack, wired into every mutation.)*
 2. [ ] **Direct-select** anchor/handle editing UI (model already stores handles).
 3. [ ] **Phase 2 core** — multi-select, groups, real layers panel, transform handles, snapping.
 4. [ ] **Appearance + stroke options + gradients** (Phase 3) — Illustrator's non-destructive edge.
