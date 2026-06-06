@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Multiple artboards** — a new pure, unit-tested `artboard` module and an
+  additive `artboards: Vec<Artboard>` + `active_artboard: usize` on the
+  `Document` (both `#[serde(default)]`), promoting the editor's former single
+  fixed-`Size` artboard into a stack of named rectangles, the way Illustrator
+  lays out several artboards on one canvas:
+  - An **`Artboard`** is a named `[x, y, w, h]` rectangle in document space. The
+    module's pure geometry — default placement of a new board (tiled to the
+    right of the rightmost existing board, top-aligned), topmost-hit picking, and
+    the union of all boards — lives apart from any UI so it is unit-tested
+    directly.
+  - A new **Artboard tool** in the left palette: drag on empty canvas to create a
+    board, drag an existing board to move it, click to make a board active. Every
+    artboard paints under the artwork with its name labelled above the top-left
+    corner; the **active** board gets an accent frame + label, inactive boards a
+    muted grey frame. Create / move land as single undo steps (artboards live on
+    the `Document`, so the snapshot history already captures them).
+  - An inspector **Artboards** section lists every board (click to activate,
+    trash to delete down to one), an **+ Add** button (and **Object → New
+    Artboard**) tiles a fresh board sized like the active one, and a per-board
+    editor renames + resizes the active board (one undo step). **View → Fit
+    artboards** zooms/pans so the union of all boards fills the window.
+  - **Per-artboard export** — SVG and PNG now crop to the *active* artboard's
+    rectangle: the PNG canvas is the board's pixel size with the artwork
+    translated by `(-x, -y)`, and the SVG sizes its `viewBox` to the board and
+    wraps the body in a `translate(-x, -y)` group (omitted at the origin) — so a
+    board placed anywhere on the canvas exports as its own cropped image, à la
+    Illustrator's per-artboard export. **Align → To artboard** now measures
+    against the active board rather than a fixed origin rectangle.
+  - The fields are additive (`#[serde(default)]`), so a pre-artboards `.contour`
+    loads with exactly one default 1000×700 board at the origin (its former
+    behaviour); artboards round-trip through serde, and opening a file repairs a
+    corrupt / hand-edited stack (always ≥1 board, active index clamped).
+
 - **Grouping (group / ungroup)** — a new pure, unit-tested `group` module and an
   additive `group: Option<u64>` tag on every shape (`#[serde(default)]`), so
   shapes sharing an id form one group that selects, moves, transforms and arranges

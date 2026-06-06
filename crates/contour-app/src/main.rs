@@ -7,6 +7,7 @@
 mod align;
 mod app;
 mod arrange;
+mod artboard;
 mod boolean;
 mod canvas;
 mod document;

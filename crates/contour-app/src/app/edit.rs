@@ -304,12 +304,15 @@ impl ContourApp {
             .pick_file()
         {
             match std::fs::read_to_string(&path) {
-                Ok(json) => match serde_json::from_str(&json) {
-                    Ok(doc) => {
+                Ok(json) => match serde_json::from_str::<crate::document::Document>(&json) {
+                    Ok(mut doc) => {
+                        // Repair a legacy / hand-edited file so the editor always
+                        // has at least one artboard and a valid active index.
+                        doc.normalize_artboards();
                         self.doc = doc;
                         self.history = crate::history::History::default();
                         self.selection.clear();
-                        log::info!("opened {} from {}", path.display(), path.display());
+                        log::info!("opened {}", path.display());
                     }
                     Err(e) => log::error!("parse failed: {e}"),
                 },
@@ -373,11 +376,7 @@ impl ContourApp {
             .set_file_name("untitled.svg")
             .save_file()
         {
-            let svg = export::to_svg(
-                &self.doc,
-                self.artboard.width as f32,
-                self.artboard.height as f32,
-            );
+            let svg = export::to_svg_artboard(&self.doc, self.active_artboard_rect());
             match std::fs::write(&path, svg) {
                 Ok(()) => self.status = format!("Exported SVG → {}", path.display()),
                 Err(e) => {
@@ -394,11 +393,7 @@ impl ContourApp {
             .set_file_name("untitled.png")
             .save_file()
         {
-            match export::to_png(
-                &self.doc,
-                self.artboard.width as f32,
-                self.artboard.height as f32,
-            ) {
+            match export::to_png_artboard(&self.doc, self.active_artboard_rect()) {
                 Some(bytes) => match std::fs::write(&path, bytes) {
                     Ok(()) => self.status = format!("Exported PNG → {}", path.display()),
                     Err(e) => {
@@ -448,12 +443,10 @@ impl ContourApp {
         sel_boxes: &[document::ShapeBounds],
     ) -> Option<prism_core::geometry::Rect> {
         match self.align_to {
-            AlignTo::Artboard => Some(prism_core::geometry::Rect::new(
-                0.0,
-                0.0,
-                self.artboard.width as f32,
-                self.artboard.height as f32,
-            )),
+            AlignTo::Artboard => {
+                let r = self.active_artboard_rect();
+                Some(prism_core::geometry::Rect::new(r[0], r[1], r[2], r[3]))
+            }
             AlignTo::Selection => {
                 let boxes: Vec<_> = sel_boxes.iter().map(|sb| sb.rect).collect();
                 align::union_bounds(&boxes)
@@ -623,6 +616,100 @@ impl ContourApp {
                 slot.apply_affine(&m);
             }
         }
+    }
+
+    // --- Artboards -----------------------------------------------------------
+
+    /// Commit a dragged-out new artboard between document-space corners
+    /// `start`..`end`. Tiny drags (a click) are ignored. The new board becomes
+    /// active. Called inside an open interaction (one undo step).
+    pub(super) fn finish_artboard_create(&mut self, start: (f32, f32), end: (f32, f32)) {
+        let x = start.0.min(end.0);
+        let y = start.1.min(end.1);
+        let w = (end.0 - start.0).abs();
+        let h = (end.1 - start.1).abs();
+        if w < 4.0 && h < 4.0 {
+            return;
+        }
+        let name = crate::artboard::default_name(self.doc.artboards.len());
+        self.doc
+            .artboards
+            .push(crate::artboard::Artboard::new(name, [x, y, w, h]));
+        self.doc.active_artboard = self.doc.artboards.len() - 1;
+        self.status = "Added artboard".into();
+    }
+
+    /// Add a new artboard the size of the active one (falling back to the
+    /// document default), tiled to the right of the rightmost board, à la
+    /// Illustrator's "New Artboard". One undo step; the new board becomes active.
+    pub(super) fn add_artboard(&mut self) {
+        let template = self
+            .doc
+            .active_artboard()
+            .map(|a| [a.rect[2], a.rect[3]])
+            .unwrap_or(crate::document::DEFAULT_ARTBOARD);
+        let rect = crate::artboard::next_placement(&self.doc.artboards, template, 40.0);
+        self.checkpoint();
+        let name = crate::artboard::default_name(self.doc.artboards.len());
+        self.doc
+            .artboards
+            .push(crate::artboard::Artboard::new(name, rect));
+        self.doc.active_artboard = self.doc.artboards.len() - 1;
+        self.status = "Added artboard".into();
+    }
+
+    /// Delete artboard `i`, keeping at least one board. The active index is
+    /// re-clamped. One undo step.
+    pub(super) fn delete_artboard(&mut self, i: usize) {
+        if self.doc.artboards.len() <= 1 || i >= self.doc.artboards.len() {
+            return;
+        }
+        self.checkpoint();
+        self.doc.artboards.remove(i);
+        if self.doc.active_artboard >= self.doc.artboards.len() {
+            self.doc.active_artboard = self.doc.artboards.len() - 1;
+        } else if self.doc.active_artboard > i {
+            self.doc.active_artboard -= 1;
+        }
+        self.status = "Deleted artboard".into();
+    }
+
+    /// Make artboard `i` the active one (no undo entry — view state).
+    pub(super) fn set_active_artboard(&mut self, i: usize) {
+        if i < self.doc.artboards.len() {
+            self.doc.active_artboard = i;
+        }
+    }
+
+    /// Zoom + pan the view so the union of all artboards fits within the screen
+    /// rectangle `content`, with a small margin and centred — Illustrator's
+    /// "Fit All in Window". View-only (no undo entry).
+    pub(super) fn fit_artboards_to(&mut self, content: egui::Rect) {
+        let Some(u) = crate::artboard::union_rect(&self.doc.artboards) else {
+            return;
+        };
+        let (uw, uh) = (u[2].max(1.0), u[3].max(1.0));
+        let margin = 40.0;
+        let avail_w = (content.width() - margin * 2.0).max(1.0);
+        let avail_h = (content.height() - margin * 2.0).max(1.0);
+        let zoom = (avail_w / uw).min(avail_h / uh).clamp(0.05, 64.0);
+        self.view.zoom = zoom;
+        // Centre the union in the content rectangle.
+        let (ucx, ucy) = (u[0] + uw * 0.5, u[1] + uh * 0.5);
+        self.view.pan.x = content.center().x - ucx * zoom;
+        self.view.pan.y = content.center().y - ucy * zoom;
+        self.status = "Fit artboards".into();
+    }
+
+    /// The active artboard's rectangle `[x, y, w, h]`, falling back to a
+    /// default-sized board at the origin for a (malformed) empty stack.
+    pub(super) fn active_artboard_rect(&self) -> [f32; 4] {
+        self.doc.active_artboard().map(|a| a.rect).unwrap_or([
+            0.0,
+            0.0,
+            crate::document::DEFAULT_ARTBOARD[0],
+            crate::document::DEFAULT_ARTBOARD[1],
+        ])
     }
 
     // --- Snapping ------------------------------------------------------------

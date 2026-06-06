@@ -14,6 +14,7 @@ mod tests;
 pub use path::{flatten, handle_at, nearest_segment, rects_intersect};
 pub use style::{LineCap, LineJoin, StrokeStyle};
 
+use crate::artboard::{self, Artboard};
 use crate::gradient::Gradient;
 use crate::transform::Affine;
 use kurbo::Shape as KurboShape;
@@ -548,18 +549,79 @@ pub enum Guide {
     Horizontal(f32),
 }
 
-/// The whole vector document: an ordered list of shapes plus any ruler guides.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// Default artboard size (document units) for a fresh document and for the
+/// single board a pre-artboards `.contour` file loads with — matching the
+/// app's former single-`Size` artboard.
+pub const DEFAULT_ARTBOARD: [f32; 2] = [1000.0, 700.0];
+
+/// One default artboard for documents that predate the `artboards` field. A
+/// pre-artboards `.contour` always rendered one 1000×700 board at the origin, so
+/// `#[serde(default)]` reconstructs exactly that.
+fn default_artboards() -> Vec<Artboard> {
+    vec![Artboard::new(
+        artboard::default_name(0),
+        [0.0, 0.0, DEFAULT_ARTBOARD[0], DEFAULT_ARTBOARD[1]],
+    )]
+}
+
+/// The whole vector document: an ordered list of shapes, any ruler guides, and
+/// the artboard stack.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Document {
     pub shapes: Vec<Shape>,
     /// User-placed ruler guides. Additive (`#[serde(default)]`) so pre-existing
     /// `.contour` files — which have no `guides` key — load with none.
     #[serde(default)]
     pub guides: Vec<Guide>,
+    /// The artboards. Always at least one (kept non-empty by the editor). A
+    /// pre-artboards `.contour` file loads with a single default board, so older
+    /// documents round-trip with no visible change. Additive
+    /// (`#[serde(default = "default_artboards")]`).
+    #[serde(default = "default_artboards")]
+    pub artboards: Vec<Artboard>,
+    /// Index of the active artboard (frames export / align-to / new-artboard
+    /// placement). Clamped into range by the editor. Additive.
+    #[serde(default)]
+    pub active_artboard: usize,
+}
+
+impl Default for Document {
+    fn default() -> Self {
+        Self {
+            shapes: Vec::new(),
+            guides: Vec::new(),
+            artboards: default_artboards(),
+            active_artboard: 0,
+        }
+    }
 }
 
 impl Document {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The active artboard, clamped so an out-of-range / empty stack still
+    /// returns a board. Always `Some` for a well-formed document (the editor
+    /// keeps ≥1 artboard); falls back to the first board if the active index is
+    /// stale.
+    pub fn active_artboard(&self) -> Option<&Artboard> {
+        if self.artboards.is_empty() {
+            return None;
+        }
+        let i = self.active_artboard.min(self.artboards.len() - 1);
+        self.artboards.get(i)
+    }
+
+    /// Repair an opened/legacy document: ensure at least one artboard exists and
+    /// the active index is in range. Called after deserialize so a hand-edited
+    /// or corrupt file can't leave the editor with zero artboards.
+    pub fn normalize_artboards(&mut self) {
+        if self.artboards.is_empty() {
+            self.artboards = default_artboards();
+        }
+        if self.active_artboard >= self.artboards.len() {
+            self.active_artboard = self.artboards.len() - 1;
+        }
     }
 }

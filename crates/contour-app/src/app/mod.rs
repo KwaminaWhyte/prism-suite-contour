@@ -15,7 +15,6 @@ use crate::snap::{SnapConfig, SnapResult};
 use crate::transform::Handle;
 use crate::{icons, theme};
 use egui::{Color32, Vec2};
-use prism_core::Size;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tool {
@@ -24,6 +23,8 @@ enum Tool {
     Ellipse,
     Line,
     Pen,
+    /// Create / move / resize artboards (Illustrator's Artboard tool).
+    Artboard,
 }
 
 impl Tool {
@@ -34,6 +35,7 @@ impl Tool {
             Tool::Ellipse => icons::ELLIPSE,
             Tool::Line => icons::LINE,
             Tool::Pen => icons::PEN,
+            Tool::Artboard => icons::ARTBOARD,
         }
     }
     fn name(self) -> &'static str {
@@ -43,6 +45,7 @@ impl Tool {
             Tool::Ellipse => "Ellipse",
             Tool::Line => "Line",
             Tool::Pen => "Pen",
+            Tool::Artboard => "Artboard",
         }
     }
 }
@@ -117,6 +120,17 @@ struct Interaction {
     /// Selection set captured when a shift-marquee began, so the marquee is
     /// additive (toggling intersected shapes against this base).
     marquee_base: Vec<usize>,
+    /// An in-progress artboard gesture (Artboard tool): creating a new board by
+    /// drag, or moving an existing board.
+    artboard_drag: Option<ArtboardDrag>,
+}
+
+/// An in-progress artboard gesture with the Artboard tool.
+enum ArtboardDrag {
+    /// Dragging out a brand-new artboard from `start` (document space).
+    Create { start: (f32, f32) },
+    /// Moving artboard `index`, last seen cursor at `last` (document space).
+    Move { index: usize, last: (f32, f32) },
 }
 
 /// A ruler guide being created or moved: which orientation, and whether it is a
@@ -147,10 +161,8 @@ pub struct ContourApp {
     /// Current stroke attributes (caps/joins/dashes) applied to new shapes and
     /// to the selected shape via the inspector's Stroke section.
     stroke_style: StrokeStyle,
-    /// Logical artboard size (document units); from the shared `Size` type.
-    artboard: Size,
     /// Reference frame the Align operations measure against (selection bounds or
-    /// the artboard rectangle).
+    /// the active artboard rectangle).
     align_to: AlignTo,
     /// Angle (degrees) for the inspector's numeric "Rotate by" control.
     transform_angle: f32,
@@ -167,6 +179,9 @@ pub struct ContourApp {
     history: History,
     /// Transient status line shown in the menu bar (e.g. export results).
     status: String,
+    /// Set by "View → Fit artboards"; consumed next frame by the canvas (which
+    /// knows the real content rectangle) to zoom/pan so every artboard fits.
+    fit_artboards_requested: bool,
 }
 
 impl ContourApp {
@@ -183,7 +198,6 @@ impl ContourApp {
             stroke: [0.10, 0.12, 0.15, 1.0],
             stroke_w: 2.0,
             stroke_style: StrokeStyle::default(),
-            artboard: Size::new(1000, 700),
             align_to: AlignTo::Selection,
             transform_angle: 45.0,
             snap: SnapConfig::default(),
@@ -193,6 +207,7 @@ impl ContourApp {
             inter: Interaction::default(),
             history: History::new(),
             status: String::new(),
+            fit_artboards_requested: false,
         }
     }
 

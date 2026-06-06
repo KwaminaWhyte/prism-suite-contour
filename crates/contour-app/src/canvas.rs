@@ -538,15 +538,40 @@ fn doc_rect(view: &View, rect: &[f32; 4]) -> Rect {
     Rect::from_two_pos(a, b)
 }
 
-/// Paint the artboard background frame for a document of the given size.
-pub fn paint_artboard(painter: &egui::Painter, view: &View, w: f32, h: f32) {
-    let r = doc_rect(view, &[0.0, 0.0, w, h]);
+/// Paint one artboard: a white page rectangle in document space `[x, y, w, h]`,
+/// with its `name` labelled just above the top-left corner. The *active* board
+/// gets an accent outline + label; inactive boards a muted grey frame, matching
+/// Illustrator's multi-artboard chrome.
+pub fn paint_artboard(
+    painter: &egui::Painter,
+    view: &View,
+    rect: &[f32; 4],
+    name: &str,
+    active: bool,
+) {
+    let r = doc_rect(view, rect);
     painter.rect_filled(r, 0.0, Color32::from_rgb(0xf4, 0xf5, 0xf7));
+    let (frame, label_col) = if active {
+        (theme::accent(), theme::accent())
+    } else {
+        (
+            Color32::from_rgb(0x50, 0x57, 0x60),
+            Color32::from_rgb(0x8a, 0x92, 0x9c),
+        )
+    };
     painter.rect_stroke(
         r,
         0.0,
-        Stroke::new(1.0, Color32::from_rgb(0x50, 0x57, 0x60)),
+        Stroke::new(if active { 1.5 } else { 1.0 }, frame),
         egui::StrokeKind::Outside,
+    );
+    // Label above the top-left corner (clamped so it stays on screen-ish).
+    painter.text(
+        Pos2::new(r.left(), r.top() - 16.0),
+        egui::Align2::LEFT_TOP,
+        name,
+        egui::FontId::proportional(11.0),
+        label_col,
     );
 }
 

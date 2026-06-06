@@ -41,6 +41,8 @@ pub const ELLIPSE: &str = ph::CIRCLE;
 pub const LINE: &str = ph::LINE_SEGMENT;
 /// Pen / bezier path tool.
 pub const PEN: &str = ph::PEN_NIB;
+/// Artboard tool (create / move / resize artboards).
+pub const ARTBOARD: &str = ph::FRAME_CORNERS;
 
 // --- Actions ----------------------------------------------------------------
 

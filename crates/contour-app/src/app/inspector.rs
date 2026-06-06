@@ -221,11 +221,25 @@ impl ContourApp {
                             }
                         });
                     });
+
+                    ui.separator();
+                    if ui
+                        .button(format!("{}  New Artboard", icons::ARTBOARD))
+                        .clicked()
+                    {
+                        self.add_artboard();
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.show_rulers, "Rulers");
                     ui.checkbox(&mut self.show_grid, "Grid");
                     ui.checkbox(&mut self.show_guides, "Guides");
+                    ui.separator();
+                    if ui.button("Fit artboards").clicked() {
+                        self.fit_artboards_requested = true;
+                        ui.close_menu();
+                    }
                     ui.separator();
                     ui.label(egui::RichText::new("Snap to").weak());
                     ui.checkbox(&mut self.snap.to_grid, "Grid");
@@ -274,6 +288,7 @@ impl ContourApp {
                         Tool::Ellipse,
                         Tool::Line,
                         Tool::Pen,
+                        Tool::Artboard,
                     ] {
                         let selected = self.tool == tool;
                         let btn = egui::Button::new(egui::RichText::new(tool.icon()).size(20.0))
@@ -312,6 +327,7 @@ impl ContourApp {
                 self.group_section(ui);
                 self.arrange_section(ui);
                 self.align_section(ui);
+                self.artboards_section(ui);
 
                 // Direct-select hint when a path is the active selection.
                 if self.tool == Tool::Select && self.selected_is_path() {
@@ -740,6 +756,108 @@ impl ContourApp {
 
         if !can_align {
             ui.weak("Select 2+ shapes (3+ to distribute).");
+        }
+    }
+
+    /// The Artboards section: a list of named artboards (click to make active),
+    /// a per-board rename + size editor for the active board, an "Add" button
+    /// (tiles a new board to the right), and a delete button. Resizing / renaming
+    /// the active board and adding / deleting are each a single undo step. The
+    /// Artboard tool (left palette) drags out / moves boards on canvas.
+    fn artboards_section(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Artboards").strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button("+ Add")
+                    .on_hover_text("Add an artboard to the right")
+                    .clicked()
+                {
+                    self.add_artboard();
+                }
+            });
+        });
+
+        let active = self
+            .doc
+            .active_artboard
+            .min(self.doc.artboards.len().saturating_sub(1));
+        // Board list: click a row to activate; trash to delete (≥2 boards).
+        let mut activate: Option<usize> = None;
+        let mut delete: Option<usize> = None;
+        let count = self.doc.artboards.len();
+        for i in 0..count {
+            let name = self.doc.artboards[i].name.clone();
+            ui.horizontal(|ui| {
+                if ui.selectable_label(i == active, name).clicked() {
+                    activate = Some(i);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_enabled_ui(count > 1, |ui| {
+                        if ui
+                            .small_button(icons::TRASH)
+                            .on_hover_text("Delete artboard")
+                            .clicked()
+                        {
+                            delete = Some(i);
+                        }
+                    });
+                });
+            });
+        }
+        if let Some(i) = activate {
+            self.set_active_artboard(i);
+        }
+        if let Some(i) = delete {
+            self.delete_artboard(i);
+            return;
+        }
+
+        // Active-board editor: rename + width/height (one undo step on change).
+        if let Some(ab) = self.doc.artboards.get(active).cloned() {
+            let mut name = ab.name.clone();
+            let mut w = ab.rect[2];
+            let mut h = ab.rect[3];
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                if ui.text_edit_singleline(&mut name).changed() {
+                    changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("W");
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut w)
+                            .speed(1.0)
+                            .range(1.0..=100_000.0),
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+                ui.label("H");
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut h)
+                            .speed(1.0)
+                            .range(1.0..=100_000.0),
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+            });
+            if changed {
+                self.checkpoint();
+                if let Some(b) = self.doc.artboards.get_mut(active) {
+                    b.name = name;
+                    b.rect[2] = w.max(1.0);
+                    b.rect[3] = h.max(1.0);
+                }
+            }
         }
     }
 

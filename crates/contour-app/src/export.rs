@@ -14,12 +14,52 @@ use tiny_skia::{
 
 // --- SVG ---------------------------------------------------------------------
 
-/// Serialize the whole document to a standalone SVG string sized to the
-/// artboard `(w, h)` in document units. Gradient fills are emitted as
-/// `<linearGradient>` / `<radialGradient>` defs (one per gradient-filled shape,
-/// in user space mapped to the shape's bounding box) and referenced via
-/// `fill="url(#…)"`, the way Illustrator's SVG export does.
+/// Serialize the whole document to a standalone SVG string cropped to one
+/// artboard `[ox, oy, w, h]` in document units: the viewBox is `0 0 w h` and the
+/// artwork is translated by `(-ox, -oy)` so the chosen artboard's content lands
+/// at the SVG origin (matching Illustrator's per-artboard SVG export). Gradient
+/// fills are emitted as `<linearGradient>` / `<radialGradient>` defs (one per
+/// gradient-filled shape, in user space mapped to the shape's bounding box) and
+/// referenced via `fill="url(#…)"`.
+pub fn to_svg_artboard(doc: &Document, ab: [f32; 4]) -> String {
+    let (ox, oy, w, h) = (ab[0], ab[1], ab[2], ab[3]);
+    let body_inner = svg_body(doc);
+    let mut s = String::new();
+    s.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" \
+         viewBox=\"0 0 {w} {h}\">\n"
+    ));
+    let translate = ox != 0.0 || oy != 0.0;
+    if translate {
+        s.push_str(&format!("  <g transform=\"translate({},{})\">\n", -ox, -oy));
+    }
+    s.push_str(&body_inner);
+    if translate {
+        s.push_str("  </g>\n");
+    }
+    s.push_str("</svg>\n");
+    s
+}
+
+/// Serialize the whole document to a standalone SVG string sized to `(w, h)` in
+/// document units, anchored at the document origin (the artboard-at-origin
+/// case). A thin wrapper over [`svg_body`] used by the export tests;
+/// [`to_svg_artboard`] is the path the editor takes (it adds the crop offset).
+#[cfg(test)]
 pub fn to_svg(doc: &Document, w: f32, h: f32) -> String {
+    let mut s = String::new();
+    s.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" \
+         viewBox=\"0 0 {w} {h}\">\n"
+    ));
+    s.push_str(&svg_body(doc));
+    s.push_str("</svg>\n");
+    s
+}
+
+/// Build the inner SVG body (`<defs>` for gradients + the shape elements) shared
+/// by [`to_svg`] and [`to_svg_artboard`]. Does not emit the `<svg>` wrapper.
+fn svg_body(doc: &Document) -> String {
     // First pass: build the <defs> for every gradient-filled, visible shape.
     let mut defs = String::new();
     let mut body = String::new();
@@ -43,17 +83,12 @@ pub fn to_svg(doc: &Document, w: f32, h: f32) -> String {
     }
 
     let mut s = String::new();
-    s.push_str(&format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" \
-         viewBox=\"0 0 {w} {h}\">\n"
-    ));
     if !defs.is_empty() {
         s.push_str("  <defs>\n");
         s.push_str(&defs);
         s.push_str("  </defs>\n");
     }
     s.push_str(&body);
-    s.push_str("</svg>\n");
     s
 }
 
@@ -283,26 +318,38 @@ fn ts_color(c: [f32; 4]) -> TsColor {
     .unwrap_or(TsColor::BLACK)
 }
 
-/// Rasterize the document to PNG bytes at the artboard size `(w, h)` (document
-/// units == output pixels). Returns `None` on degenerate sizes / encode error.
+/// Rasterize the document to PNG bytes at size `(w, h)` (document units ==
+/// output pixels), anchored at the document origin. A thin wrapper over
+/// [`to_png_artboard`] used by the export tests; the editor calls
+/// [`to_png_artboard`] directly with the active artboard's rectangle.
+#[cfg(test)]
 pub fn to_png(doc: &Document, w: f32, h: f32) -> Option<Vec<u8>> {
+    to_png_artboard(doc, [0.0, 0.0, w, h])
+}
+
+/// Rasterize the document cropped to one artboard `[ox, oy, w, h]` (document
+/// units == output pixels): the canvas is `w × h` and the artwork is translated
+/// by `(-ox, -oy)`, so the chosen artboard's content fills the image. Returns
+/// `None` on degenerate sizes / encode error.
+pub fn to_png_artboard(doc: &Document, ab: [f32; 4]) -> Option<Vec<u8>> {
+    let (ox, oy, w, h) = (ab[0], ab[1], ab[2], ab[3]);
     let pw = w.round().max(1.0) as u32;
     let ph = h.round().max(1.0) as u32;
     let mut pixmap = Pixmap::new(pw, ph)?;
     pixmap.fill(TsColor::WHITE);
 
+    let base = Transform::from_translate(-ox, -oy);
     for shape in &doc.shapes {
         if !shape.visible() {
             continue;
         }
-        draw_shape_skia(&mut pixmap, shape);
+        draw_shape_skia(&mut pixmap, shape, base);
     }
 
     pixmap.encode_png().ok()
 }
 
-fn draw_shape_skia(pixmap: &mut Pixmap, shape: &Shape) {
-    let id = Transform::identity();
+fn draw_shape_skia(pixmap: &mut Pixmap, shape: &Shape, id: Transform) {
     let style = shape.stroke_style();
     // Gradient fill geometry maps onto the shape's document-space bounding box.
     let bbox = shape
@@ -614,6 +661,35 @@ mod tests {
         );
     }
 
+    /// A non-origin artboard crop offsets the SVG body with a `translate(...)`
+    /// group and sizes the viewBox to the artboard, not the document origin.
+    #[test]
+    fn svg_artboard_crop_offsets_body() {
+        let svg = to_svg_artboard(&sample_doc(), [120.0, 40.0, 200.0, 150.0]);
+        assert!(
+            svg.contains("viewBox=\"0 0 200 150\""),
+            "viewBox sized to the artboard: {svg}"
+        );
+        assert!(
+            svg.contains("translate(-120,-40)"),
+            "artwork translated to the artboard origin: {svg}"
+        );
+        // The origin case adds no translate group.
+        let at_origin = to_svg_artboard(&sample_doc(), [0.0, 0.0, 200.0, 150.0]);
+        assert!(!at_origin.contains("translate"), "no offset at origin");
+    }
+
+    /// A cropped PNG still encodes to a valid image at the artboard pixel size.
+    #[test]
+    fn png_artboard_crop_encodes() {
+        let bytes =
+            to_png_artboard(&sample_doc(), [50.0, 25.0, 64.0, 48.0]).expect("png should encode");
+        assert_eq!(
+            &bytes[0..8],
+            &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
+        );
+    }
+
     fn dashed_rect() -> Document {
         Document {
             shapes: vec![Shape::Rect {
@@ -717,7 +793,7 @@ mod tests {
         // Re-rasterize to a pixmap directly so we can sample pixels.
         let mut pixmap = Pixmap::new(100, 100).unwrap();
         pixmap.fill(TsColor::WHITE);
-        draw_shape_skia(&mut pixmap, &doc.shapes[0]);
+        draw_shape_skia(&mut pixmap, &doc.shapes[0], Transform::identity());
         let px = |x: u32, y: u32| {
             let p = pixmap.pixel(x, y).unwrap();
             (p.red(), p.green(), p.blue())

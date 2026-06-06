@@ -87,18 +87,29 @@ impl ContourApp {
                 full
             };
 
+            // A pending "Fit artboards" zooms/pans so every board fits `content`.
+            if self.fit_artboards_requested {
+                self.fit_artboards_requested = false;
+                self.fit_artboards_to(content);
+            }
+
             // Grid behind the artboard.
             if self.show_grid {
                 canvas::paint_grid(&painter, &self.view, content, self.snap.grid);
             }
 
-            // Artboard + all shapes (bottom-up paint order).
-            canvas::paint_artboard(
-                &painter,
-                &self.view,
-                self.artboard.width as f32,
-                self.artboard.height as f32,
-            );
+            // Artboards (under the shapes) + all shapes (bottom-up paint order).
+            let active_ab = self
+                .doc
+                .active_artboard
+                .min(self.doc.artboards.len().saturating_sub(1).min(usize::MAX));
+            for (i, ab) in self.doc.artboards.iter().enumerate() {
+                canvas::paint_artboard(&painter, &self.view, &ab.rect, &ab.name, i == active_ab);
+            }
+            // Live preview of an artboard being dragged out / moved.
+            if let Some(prev) = self.artboard_preview() {
+                canvas::paint_artboard(&painter, &self.view, &prev, "", true);
+            }
             for (i, s) in self.doc.shapes.iter().enumerate() {
                 if !s.visible() {
                     continue;
@@ -255,6 +266,97 @@ impl ContourApp {
             Tool::Select => self.handle_select(response, doc_pos),
             Tool::Rect | Tool::Ellipse | Tool::Line => self.handle_create_drag(response, doc_pos),
             Tool::Pen => self.handle_pen(response, doc_pos),
+            Tool::Artboard => self.handle_artboard(response, doc_pos),
+        }
+    }
+
+    /// Artboard tool input: drag out a new artboard from empty canvas, drag an
+    /// existing board to move it, or click a board to make it active. Each
+    /// create / move lands as a single undo step (artboards live on the
+    /// `Document`, so the snapshot history captures them).
+    fn handle_artboard(&mut self, response: &egui::Response, doc_pos: Option<(f32, f32)>) {
+        use super::ArtboardDrag;
+        if response.drag_started() {
+            if let Some((x, y)) = doc_pos {
+                self.begin_interaction();
+                match crate::artboard::artboard_at(&self.doc.artboards, x, y) {
+                    Some(idx) => {
+                        self.doc.active_artboard = idx;
+                        self.inter.artboard_drag = Some(ArtboardDrag::Move {
+                            index: idx,
+                            last: (x, y),
+                        });
+                    }
+                    None => {
+                        self.inter.artboard_drag = Some(ArtboardDrag::Create { start: (x, y) });
+                    }
+                }
+            }
+        }
+        if response.dragged() {
+            if let (Some(ArtboardDrag::Move { index, last }), Some((x, y))) =
+                (self.inter.artboard_drag.as_ref(), doc_pos)
+            {
+                let (index, last) = (*index, *last);
+                let (mdx, mdy) = (x - last.0, y - last.1);
+                if let Some(ab) = self.doc.artboards.get_mut(index) {
+                    ab.rect[0] += mdx;
+                    ab.rect[1] += mdy;
+                }
+                if let Some(ArtboardDrag::Move { last, .. }) = self.inter.artboard_drag.as_mut() {
+                    *last = (x, y);
+                }
+            }
+            // Create-drag preview is recomputed each frame from the live cursor.
+            if let (Some(ArtboardDrag::Create { .. }), Some(p)) =
+                (self.inter.artboard_drag.as_ref(), doc_pos)
+            {
+                self.inter.drag_now = Some(p);
+            }
+        }
+        if response.drag_stopped() {
+            match self.inter.artboard_drag.take() {
+                Some(ArtboardDrag::Create { start }) => {
+                    if let Some(end) = doc_pos {
+                        self.finish_artboard_create(start, end);
+                    }
+                    self.inter.drag_now = None;
+                    self.commit_interaction();
+                }
+                Some(ArtboardDrag::Move { .. }) => {
+                    self.commit_interaction();
+                }
+                None => {}
+            }
+        }
+        // Plain click selects the active artboard under the cursor.
+        if response.clicked() {
+            if let Some((x, y)) = doc_pos {
+                if let Some(idx) = crate::artboard::artboard_at(&self.doc.artboards, x, y) {
+                    self.doc.active_artboard = idx;
+                }
+            }
+        }
+    }
+
+    /// The artboard rectangle being previewed this frame while the Artboard tool
+    /// drags out a new board, or `None`. A `Move` drag mutates the board
+    /// directly, so it needs no preview.
+    fn artboard_preview(&self) -> Option<[f32; 4]> {
+        use super::ArtboardDrag;
+        match (&self.inter.artboard_drag, self.inter.drag_now) {
+            (Some(ArtboardDrag::Create { start }), Some(now)) => {
+                let x = start.0.min(now.0);
+                let y = start.1.min(now.1);
+                let w = (now.0 - start.0).abs();
+                let h = (now.1 - start.1).abs();
+                if w < 1.0 && h < 1.0 {
+                    None
+                } else {
+                    Some([x, y, w, h])
+                }
+            }
+            _ => None,
         }
     }
 
