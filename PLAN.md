@@ -1,12 +1,12 @@
 # Contour — Open Source Illustrator Alternative
 
 Professional vector graphics editor in Rust, and **app #2 of the Prism suite** (sibling to
-[Pigment](../pigment), the raster editor). **Goal: reach ≥85% of Adobe Illustrator's real-world
+[Pigment](https://github.com/KwaminaWhyte/prism-suite-pigment), the raster editor). **Goal: reach ≥85% of Adobe Illustrator's real-world
 capability** — features, reliability, and ease-of-use — in staged milestones, on the suite's shared
 engine (`prism-core` / `prism-color`), with Bézier math on `kurbo`, tessellation on `lyon`, and
 boolean ops on `i_overlay`.
 
-> Companion docs: [RESEARCH.md](./RESEARCH.md) (cited findings + crate matrix), [README.md](./README.md) (current build), [../SUITE.md](../SUITE.md) (four-app vision + interop). This PLAN expands the README's v0 scaffold into a parity roadmap; the README still tracks what runs *today*.
+> Companion docs: [RESEARCH.md](./RESEARCH.md) (cited findings + crate matrix), [README.md](./README.md) (current build), [../SUITE.md](https://github.com/KwaminaWhyte/prism-suite-prism/blob/main/SUITE.md) (four-app vision + interop). This PLAN expands the README's v0 scaffold into a parity roadmap; the README still tracks what runs *today*.
 
 ---
 

@@ -1,7 +1,7 @@
 # Contour
 
 Vector graphics editor — the Illustrator analog and **app #2 of the Prism creative suite**
-(sibling to [Pigment](../pigment), the raster editor).
+(sibling to [Pigment](https://github.com/KwaminaWhyte/prism-suite-pigment), the raster editor).
 
 Built in Rust with [`eframe`](https://github.com/emilk/egui)/`egui` 0.34 (glow backend).
 Vectors are drawn through egui's `Painter` — no custom GPU pass needed. Bezier path
