@@ -280,3 +280,46 @@ selection/layers/transform (Ph2) → appearance/strokes/gradients (Ph3)**.
 5. [ ] Coordinate the **`prism-vector`** promotion with Pigment/Pulse owners before moving path/boolean code into a shared crate.
 
 *Foundations are free. The product is the polish — and the glue between apps.*
+
+---
+
+## UI/UX & workspace
+
+What a pro vector app's *shell* needs that we still lack. The inspector and tool
+column are now **scrollable + collapsible** (Affinity-Studio style: a right-side
+stack of collapsible property groups, a compact left tool column); the rest of
+this list is the road to a workspace that scales. Effort tags **S/M/L**.
+
+- [x] **Scrollable panels** (S) — tool palette + inspector wrapped in `ScrollArea::vertical` so nothing is unreachable on a short window. *(Done.)*
+- [x] **Collapsible property groups** (S) — inspector sections grouped under `CollapsingHeader` with sensible default-open/closed. *(Done.)*
+- [ ] **Dockable / floating panels** (L) — drag panels out, redock, split; tear-off windows. (egui has no native docking; needs `egui_dock` or a custom dock tree.)
+- [ ] **Saveable workspaces** (M) — named layouts (panel positions/visibility/sizes) saved to prefs and switchable; ship Essentials/Layout/Typography presets like Illustrator.
+- [ ] **Window menu — panel show/hide** (S) — a `Window` menu listing every panel with a checkbox to toggle visibility; reset-workspace command.
+- [ ] **Contextual tool-options bar** (M) — a top strip under the menu that shows the active tool's options (e.g. corner radius for Rect, anchor controls for Pen, stroke for shape tools) — Illustrator's Control bar / Affinity's context toolbar.
+- [ ] **Customizable tool palette** (M) — reorderable/groupable tools, flyout groups (e.g. shape tools share a slot), show/hide tools, single vs double column.
+- [ ] **Tabbed panel groups** (M) — stack multiple panels into one frame with tabs (Affinity Studio); drag a tab between groups.
+- [ ] **Keyboard-shortcut map** (M) — a viewable/remappable shortcut table + a command palette; per-tool single-key activation (V/M/L/P…); export/import shortcut sets. *(Overlaps Phase 8 "keyboard shortcuts".)*
+- [ ] **Dark / light theme toggle** (S) — switch the Prism theme between dark and light (and follow-OS) at runtime; persist in prefs.
+- [ ] **Panel resize + min/max + scroll-on-overflow polish** (S) — consistent resize grips, remembered widths, density (compact/comfortable) option.
+- [ ] **Status / context bar** (S) — bottom bar: zoom %, cursor coords, selection count, active artboard, units.
+
+---
+
+## Parity gaps spotted vs Illustrator + Affinity Designer
+
+Skim of PLAN against both apps. Most are already filed in §4 (cross-referenced);
+the genuinely-missing or under-specified ones are added here so nothing slips.
+Record-only — not scheduled into a phase yet.
+
+- [ ] **Appearance / Effects panel as a first-class UI** (L) — the panel surface for the Appearance stack (add/reorder/toggle fills, strokes, effects per object). *(Model planned in §3; the dedicated panel UI is the gap.)*
+- [ ] **Live shape effects** (M) — non-destructive effect entries (drop-shadow, blur, glow, round-corners, warp/distort) editable after the fact via the Appearance panel. *(Overlaps §3 "Live effects".)*
+- [ ] **Layer effects / fx on layers & groups** (M) — apply the same live effects to a whole layer or group, not just a single object (Affinity's per-layer FX).
+- [ ] **Isolation mode** (M) — double-click a group to edit its contents in isolation, dimming everything else; breadcrumb to exit. *(Listed in §2/§8; surface as its own deliverable.)*
+- [ ] **Recolor Artwork** (M) — remap a selection's colors via a palette/harmony UI, global-color edits, reduce-to-N-colors. *(In §5; the interactive dialog is the missing piece.)*
+- [ ] **Image Trace** (M) — `vtracer` raster→vector with B/W / color / sketch presets and an expand-to-paths step. *(In §5; flagged here as a headline parity feature.)*
+- [ ] **Mesh & freeform gradient** (L) — gradient mesh objects and Illustrator-2019-style freeform gradient points. *(In §3; large effort, surfaced.)*
+- [ ] **Clipping masks + compound paths** (M) — `Object → Clip` (mask by topmost shape) and even-odd/non-zero compound paths; both are everyday operations missing today. *(Compound paths in §4; clipping mask is a fresh add.)*
+- [ ] **Export presets / slices / Export for Screens** (M) — saved per-artboard export presets, drag-to-export assets, slice regions, multi-scale (@1x/2x/3x). *(In §6; called out as a polish gap.)*
+- [ ] **Eyedropper / paste-in-place / paste-in-front-back** (S) — sample appearance from any object; precise paste positioning. (Affinity + Illustrator staple; not yet planned.)
+- [ ] **Symbols & global swatches in the UI** (M) — a Swatches panel and a Symbols panel (instances + edit-master). *(Model in §5; the panels are the gap.)*
+- [ ] **Pixel-preview / overprint / soft-proof preview modes** (M) — view modes that render the artwork as it will export (pixel grid, CMYK proof, overprint). *(Partly §6; the view-mode toggles are missing.)*

@@ -280,30 +280,37 @@ impl ContourApp {
             .exact_width(56.0)
             .resizable(false)
             .show_inside(root, |ui| {
-                ui.add_space(6.0);
-                ui.vertical_centered(|ui| {
-                    for tool in [
-                        Tool::Select,
-                        Tool::Rect,
-                        Tool::Ellipse,
-                        Tool::Line,
-                        Tool::Pen,
-                        Tool::Artboard,
-                    ] {
-                        let selected = self.tool == tool;
-                        let btn = egui::Button::new(egui::RichText::new(tool.icon()).size(20.0))
-                            .min_size(Vec2::new(40.0, 40.0))
-                            .selected(selected);
-                        if ui.add(btn).on_hover_text(tool.name()).clicked() {
-                            // Switching away from pen mid-path commits it.
-                            if self.tool == Tool::Pen && tool != Tool::Pen {
-                                self.commit_pen(false);
+                // Scroll the compact tool column so every tool stays reachable
+                // even on a short window (Affinity-style left tool strip).
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add_space(6.0);
+                        ui.vertical_centered(|ui| {
+                            for tool in [
+                                Tool::Select,
+                                Tool::Rect,
+                                Tool::Ellipse,
+                                Tool::Line,
+                                Tool::Pen,
+                                Tool::Artboard,
+                            ] {
+                                let selected = self.tool == tool;
+                                let btn =
+                                    egui::Button::new(egui::RichText::new(tool.icon()).size(20.0))
+                                        .min_size(Vec2::new(40.0, 40.0))
+                                        .selected(selected);
+                                if ui.add(btn).on_hover_text(tool.name()).clicked() {
+                                    // Switching away from pen mid-path commits it.
+                                    if self.tool == Tool::Pen && tool != Tool::Pen {
+                                        self.commit_pen(false);
+                                    }
+                                    self.tool = tool;
+                                }
+                                ui.add_space(4.0);
                             }
-                            self.tool = tool;
-                        }
-                        ui.add_space(4.0);
-                    }
-                });
+                        });
+                    });
             });
     }
 
@@ -311,36 +318,74 @@ impl ContourApp {
         egui::SidePanel::right("inspector")
             .default_width(248.0)
             .show_inside(root, |ui| {
-                ui.add_space(4.0);
-                ui.heading("Style");
-                ui.add_space(4.0);
+                // The inspector is a tall stack of property groups (Affinity's
+                // right-side "Studio"). Scroll the whole body so no section is
+                // unreachable on a short window, and group each into a
+                // collapsible header so users can hide what they don't need.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::CollapsingHeader::new("Style")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                self.fill_section(ui);
+                                color_row(ui, "Stroke", &mut self.stroke);
+                                ui.horizontal(|ui| {
+                                    ui.label("Width");
+                                    ui.add(
+                                        egui::Slider::new(&mut self.stroke_w, 0.0..=40.0)
+                                            .suffix(" px"),
+                                    );
+                                });
+                            });
 
-                self.fill_section(ui);
-                color_row(ui, "Stroke", &mut self.stroke);
-                ui.horizontal(|ui| {
-                    ui.label("Width");
-                    ui.add(egui::Slider::new(&mut self.stroke_w, 0.0..=40.0).suffix(" px"));
-                });
+                        egui::CollapsingHeader::new("Stroke options")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                self.stroke_section(ui);
+                            });
+                        egui::CollapsingHeader::new("Transform")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                self.transform_section(ui);
+                            });
+                        egui::CollapsingHeader::new("Group")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                self.group_section(ui);
+                            });
+                        egui::CollapsingHeader::new("Arrange")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                self.arrange_section(ui);
+                            });
+                        egui::CollapsingHeader::new("Align")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                self.align_section(ui);
+                            });
+                        egui::CollapsingHeader::new("Artboards")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                self.artboards_section(ui);
+                            });
 
-                self.stroke_section(ui);
-                self.transform_section(ui);
-                self.group_section(ui);
-                self.arrange_section(ui);
-                self.align_section(ui);
-                self.artboards_section(ui);
+                        // Direct-select hint when a path is the active selection.
+                        if self.tool == Tool::Select && self.selected_is_path() {
+                            ui.separator();
+                            ui.label(egui::RichText::new("Edit path").strong());
+                            ui.weak("Drag an anchor or handle to reshape.");
+                            ui.weak("Dbl-click a segment to add an anchor.");
+                            ui.weak("Dbl-click an anchor to delete it.");
+                            ui.weak("Alt-click an anchor: smooth ⇄ corner.");
+                        }
 
-                // Direct-select hint when a path is the active selection.
-                if self.tool == Tool::Select && self.selected_is_path() {
-                    ui.separator();
-                    ui.label(egui::RichText::new("Edit path").strong());
-                    ui.weak("Drag an anchor or handle to reshape.");
-                    ui.weak("Dbl-click a segment to add an anchor.");
-                    ui.weak("Dbl-click an anchor to delete it.");
-                    ui.weak("Alt-click an anchor: smooth ⇄ corner.");
-                }
-
-                ui.separator();
-                self.layers_panel(ui);
+                        egui::CollapsingHeader::new("Layers")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                self.layers_panel(ui);
+                            });
+                    });
             });
     }
 
@@ -432,9 +477,6 @@ impl ContourApp {
     /// discrete change) and the app default tracks along, so the next new shape
     /// inherits it; with no selection the controls edit the app default only.
     fn stroke_section(&mut self, ui: &mut egui::Ui) {
-        ui.separator();
-        ui.label(egui::RichText::new("Stroke options").strong());
-
         // Edit a working copy seeded from the primary selected shape (so the
         // panel reflects what's selected), falling back to the app default.
         let mut s = match self.primary().and_then(|i| self.doc.shapes.get(i)) {
@@ -535,9 +577,6 @@ impl ContourApp {
     /// on-canvas transform box (drag a handle to scale, drag just outside a
     /// corner to rotate). Each action is one undo step.
     fn transform_section(&mut self, ui: &mut egui::Ui) {
-        ui.separator();
-        ui.label(egui::RichText::new("Transform").strong());
-
         let enabled = !self.selection.is_empty();
         ui.add_enabled_ui(enabled, |ui| {
             use std::f32::consts::PI;
@@ -594,8 +633,6 @@ impl ContourApp {
     /// (Cmd/Ctrl+Shift+G). Each is a single undo step; buttons disable when the
     /// gesture would be a no-op. Mirrors the `Object → Group / Ungroup` menu.
     fn group_section(&mut self, ui: &mut egui::Ui) {
-        ui.separator();
-        ui.label(egui::RichText::new("Group").strong());
         ui.horizontal(|ui| {
             ui.add_enabled_ui(self.can_group(), |ui| {
                 if ui
@@ -626,9 +663,6 @@ impl ContourApp {
     /// disabled when the move would not change the order (e.g. the selection is
     /// already on top). Mirrors `Object → Arrange` and the Cmd/Ctrl+]/[ keys.
     fn arrange_section(&mut self, ui: &mut egui::Ui) {
-        ui.separator();
-        ui.label(egui::RichText::new("Arrange").strong());
-
         let len = self.doc.shapes.len();
         let mut op: Option<Arrange> = None;
         ui.horizontal(|ui| {
@@ -663,9 +697,8 @@ impl ContourApp {
     /// three-or-more shapes evenly. Each click is a single undo step. Disabled
     /// rows guide the user toward a usable selection size.
     fn align_section(&mut self, ui: &mut egui::Ui) {
-        ui.separator();
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Align").strong());
+            ui.label("Relative to");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 egui::ComboBox::from_id_salt("align_to")
                     .selected_text(match self.align_to {
@@ -765,9 +798,7 @@ impl ContourApp {
     /// the active board and adding / deleting are each a single undo step. The
     /// Artboard tool (left palette) drags out / moves boards on canvas.
     fn artboards_section(&mut self, ui: &mut egui::Ui) {
-        ui.separator();
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Artboards").strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .button("+ Add")
@@ -866,7 +897,6 @@ impl ContourApp {
     /// multi-selection set).
     fn layers_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("Layers");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.weak(format!("{}", self.doc.shapes.len()));
             });
@@ -883,82 +913,81 @@ impl ContourApp {
         let shift = ui.input(|i| i.modifiers.shift);
         let n = self.doc.shapes.len();
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            // Paint order: index 0 painted first (bottom). "Newest on top" =>
-            // iterate indices in reverse so the last (topmost) is listed first.
-            for idx in (0..n).rev() {
-                let primary = self.primary() == Some(idx);
-                // A non-primary member of a multi-selection.
-                let secondary = !primary && self.is_selected(idx);
-                let visible = self.doc.shapes[idx].visible();
-                let label = self.doc.shapes[idx].label();
-                let grouped = self.doc.shapes[idx].group().is_some();
+        // Paint order: index 0 painted first (bottom). "Newest on top" =>
+        // iterate indices in reverse so the last (topmost) is listed first. The
+        // enclosing inspector ScrollArea scrolls these rows; no inner scroll.
+        for idx in (0..n).rev() {
+            let primary = self.primary() == Some(idx);
+            // A non-primary member of a multi-selection.
+            let secondary = !primary && self.is_selected(idx);
+            let visible = self.doc.shapes[idx].visible();
+            let label = self.doc.shapes[idx].label();
+            let grouped = self.doc.shapes[idx].group().is_some();
 
-                ui.horizontal(|ui| {
-                    // Visibility toggle.
-                    let eye = if visible {
-                        icons::EYE
-                    } else {
-                        icons::EYE_SLASH
-                    };
-                    if ui
-                        .add(egui::Button::new(eye).frame(false))
-                        .on_hover_text("Toggle visibility")
-                        .clicked()
-                    {
-                        to_toggle = Some(idx);
-                    }
+            ui.horizontal(|ui| {
+                // Visibility toggle.
+                let eye = if visible {
+                    icons::EYE
+                } else {
+                    icons::EYE_SLASH
+                };
+                if ui
+                    .add(egui::Button::new(eye).frame(false))
+                    .on_hover_text("Toggle visibility")
+                    .clicked()
+                {
+                    to_toggle = Some(idx);
+                }
 
-                    // A leading group glyph marks shapes that belong to a group.
-                    let prefix = if grouped {
-                        format!("{}  ", icons::GROUP)
-                    } else {
-                        String::new()
-                    };
-                    let mut text = egui::RichText::new(format!("{}{}  {}", prefix, n - idx, label));
-                    if !visible {
-                        text = text.weak();
-                    }
-                    if secondary {
-                        text = text.color(theme::accent());
-                    }
-                    if ui
-                        .selectable_label(primary, text)
-                        .on_hover_text(if grouped { "Grouped" } else { "" })
-                        .clicked()
-                    {
-                        to_select = Some((idx, shift));
-                    }
+                // A leading group glyph marks shapes that belong to a group.
+                let prefix = if grouped {
+                    format!("{}  ", icons::GROUP)
+                } else {
+                    String::new()
+                };
+                let mut text = egui::RichText::new(format!("{}{}  {}", prefix, n - idx, label));
+                if !visible {
+                    text = text.weak();
+                }
+                if secondary {
+                    text = text.color(theme::accent());
+                }
+                if ui
+                    .selectable_label(primary, text)
+                    .on_hover_text(if grouped { "Grouped" } else { "" })
+                    .clicked()
+                {
+                    to_select = Some((idx, shift));
+                }
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(icons::TRASH).on_hover_text("Delete").clicked() {
-                            to_delete = Some(idx);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(icons::TRASH).on_hover_text("Delete").clicked() {
+                        to_delete = Some(idx);
+                    }
+                    ui.add_enabled_ui(idx > 0, |ui| {
+                        if ui
+                            .button(icons::CARET_DOWN)
+                            .on_hover_text("Move down")
+                            .clicked()
+                        {
+                            to_lower = Some(idx);
                         }
-                        ui.add_enabled_ui(idx > 0, |ui| {
-                            if ui
-                                .button(icons::CARET_DOWN)
-                                .on_hover_text("Move down")
-                                .clicked()
-                            {
-                                to_lower = Some(idx);
-                            }
-                        });
-                        ui.add_enabled_ui(idx + 1 < n, |ui| {
-                            if ui
-                                .button(icons::CARET_UP)
-                                .on_hover_text("Move up")
-                                .clicked()
-                            {
-                                to_raise = Some(idx);
-                            }
-                        });
+                    });
+                    ui.add_enabled_ui(idx + 1 < n, |ui| {
+                        if ui
+                            .button(icons::CARET_UP)
+                            .on_hover_text("Move up")
+                            .clicked()
+                        {
+                            to_raise = Some(idx);
+                        }
                     });
                 });
-            }
-            if n == 0 {
-                ui.weak("No shapes yet. Pick a tool and draw.");
-            }
-        });
+            });
+        }
+        if n == 0 {
+            ui.weak("No shapes yet. Pick a tool and draw.");
+        }
 
         if let Some(i) = to_toggle {
             self.checkpoint();
