@@ -320,6 +320,6 @@ Record-only — not scheduled into a phase yet.
 - [ ] **Mesh & freeform gradient** (L) — gradient mesh objects and Illustrator-2019-style freeform gradient points. *(In §3; large effort, surfaced.)*
 - [ ] **Clipping masks + compound paths** (M) — `Object → Clip` (mask by topmost shape) and even-odd/non-zero compound paths; both are everyday operations missing today. *(Compound paths in §4; clipping mask is a fresh add.)*
 - [ ] **Export presets / slices / Export for Screens** (M) — saved per-artboard export presets, drag-to-export assets, slice regions, multi-scale (@1x/2x/3x). *(In §6; called out as a polish gap.)*
-- [ ] **Eyedropper / paste-in-place / paste-in-front-back** (S) — sample appearance from any object; precise paste positioning. (Affinity + Illustrator staple; not yet planned.)
+- [x] **Eyedropper / paste-in-place / paste-in-front-back** (S) — sample appearance from any object; precise paste positioning. (Affinity + Illustrator staple.) *(Done: `eyedropper` module + Eyedropper tool (`I`) samples/applies fill, gradient, stroke colour/width/style; paste-in-place / -front / -back shipped with the clipboard.)*
 - [ ] **Symbols & global swatches in the UI** (M) — a Swatches panel and a Symbols panel (instances + edit-master). *(Model in §5; the panels are the gap.)*
 - [ ] **Pixel-preview / overprint / soft-proof preview modes** (M) — view modes that render the artwork as it will export (pixel grid, CMYK proof, overprint). *(Partly §6; the view-mode toggles are missing.)*

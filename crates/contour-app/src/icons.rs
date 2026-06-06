@@ -43,6 +43,8 @@ pub const LINE: &str = ph::LINE_SEGMENT;
 pub const PEN: &str = ph::PEN_NIB;
 /// Artboard tool (create / move / resize artboards).
 pub const ARTBOARD: &str = ph::FRAME_CORNERS;
+/// Eyedropper tool (sample / apply a shape's paint appearance).
+pub const EYEDROPPER: &str = ph::EYEDROPPER;
 
 // --- Actions ----------------------------------------------------------------
 

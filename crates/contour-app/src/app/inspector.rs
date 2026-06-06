@@ -389,6 +389,7 @@ impl ContourApp {
                                 Tool::Ellipse,
                                 Tool::Line,
                                 Tool::Pen,
+                                Tool::Eyedropper,
                                 Tool::Artboard,
                             ] {
                                 let selected = self.tool == tool;
@@ -474,6 +475,15 @@ impl ContourApp {
                             ui.weak("Dbl-click a segment to add an anchor.");
                             ui.weak("Dbl-click an anchor to delete it.");
                             ui.weak("Alt-click an anchor: smooth ⇄ corner.");
+                        }
+
+                        // Eyedropper usage hint.
+                        if self.tool == Tool::Eyedropper {
+                            ui.separator();
+                            ui.label(egui::RichText::new("Eyedropper").strong());
+                            ui.weak("Click a shape to sample its fill & stroke.");
+                            ui.weak("With a selection, the look is applied to it.");
+                            ui.weak("Alt-click: sample only (don't apply).");
                         }
 
                         egui::CollapsingHeader::new("Layers")

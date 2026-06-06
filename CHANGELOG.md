@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Eyedropper tool (sample / apply paint appearance)** — a new pure,
+  unit-tested `eyedropper` module and an **Eyedropper** tool in the left palette
+  (keyboard **I**), bringing the everyday Illustrator / Affinity "copy the look
+  of that object onto this one" staple:
+  - An **`Appearance`** is the *paint* of a shape — its fill (solid colour
+    and/or an overriding gradient), stroke colour, stroke width, and stroke
+    style (caps / joins / dashes) — detached from the shape's geometry, group
+    membership, and visibility. `Appearance::sample` reads it off a shape;
+    `Appearance::apply_to` writes it onto another shape **without disturbing
+    geometry** (an ellipse stays an ellipse, only its colours change). Both are
+    pure functions pinned by unit tests (no egui context).
+  - **Click** a shape with the Eyedropper to sample its appearance: the look is
+    applied to the current selection as one undo step, and the app's default
+    paint is loaded from the sample so the next shape you draw inherits it.
+    With **no selection**, the click only loads the defaults (nothing to apply
+    to yet). **Alt-click** never paints — it samples into the defaults only
+    (Illustrator's "pick up but don't apply" modifier). Clicking empty canvas is
+    a no-op.
+  - Edge cases match Illustrator: a **`Line`** carries no fill, so sampling it
+    leaves a filled target's fill colour intact while clearing any gradient and
+    copying the stroke; applying any appearance to a line takes only the stroke.
+    New `Shape::stroke_color` / `set_stroke_color` / `stroke_width` /
+    `set_stroke_width` accessors back the transfer (shaped like the existing
+    `fill_color` / `stroke_style` accessors). The inspector shows a usage hint
+    while the Eyedropper is active.
+
 - **Clipboard (copy / cut / paste / duplicate)** — a new pure, unit-tested
   `clipboard` module and a `Clipboard` buffer on the app, bringing the
   everyday Illustrator clipboard staples Contour was missing:

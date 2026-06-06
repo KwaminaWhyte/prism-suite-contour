@@ -27,6 +27,9 @@ enum Tool {
     Pen,
     /// Create / move / resize artboards (Illustrator's Artboard tool).
     Artboard,
+    /// Sample a shape's paint appearance and apply it to others (Illustrator's
+    /// Eyedropper, `I`).
+    Eyedropper,
 }
 
 impl Tool {
@@ -38,6 +41,7 @@ impl Tool {
             Tool::Line => icons::LINE,
             Tool::Pen => icons::PEN,
             Tool::Artboard => icons::ARTBOARD,
+            Tool::Eyedropper => icons::EYEDROPPER,
         }
     }
     fn name(self) -> &'static str {
@@ -48,6 +52,7 @@ impl Tool {
             Tool::Line => "Line",
             Tool::Pen => "Pen",
             Tool::Artboard => "Artboard",
+            Tool::Eyedropper => "Eyedropper (I)",
         }
     }
 }
@@ -74,6 +79,9 @@ struct Keys {
     group: bool,
     ungroup: bool,
     clip: Option<ClipKey>,
+    /// Single-key `I` pressed (no modifiers) — activate the Eyedropper tool, à la
+    /// Illustrator's per-tool letter shortcuts.
+    eyedropper: bool,
 }
 
 /// While building a pen path, which part of the freshest anchor is being
@@ -314,6 +322,9 @@ impl eframe::App for ContourApp {
                 group: cmd && g && !shift,
                 ungroup: cmd && g && shift,
                 clip,
+                // Plain `I` (no command) activates the eyedropper, like
+                // Illustrator's single-key tool letters.
+                eyedropper: !cmd && i.key_pressed(egui::Key::I),
             }
         });
         let Keys {
@@ -325,7 +336,17 @@ impl eframe::App for ContourApp {
             group: group_key,
             ungroup: ungroup_key,
             clip: clip_key,
+            eyedropper: eyedropper_key,
         } = keys;
+        // `I` switches to the eyedropper (committing any in-progress pen path
+        // first, mirroring how clicking a tool button behaves). Guarded so it is
+        // ignored while a text field has keyboard focus.
+        if eyedropper_key && self.tool != Tool::Eyedropper && !ctx.wants_keyboard_input() {
+            if self.tool == Tool::Pen {
+                self.commit_pen(false);
+            }
+            self.tool = Tool::Eyedropper;
+        }
         if enter && self.tool == Tool::Pen {
             self.commit_pen(true);
         }

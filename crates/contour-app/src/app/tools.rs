@@ -270,6 +270,74 @@ impl ContourApp {
             Tool::Rect | Tool::Ellipse | Tool::Line => self.handle_create_drag(response, doc_pos),
             Tool::Pen => self.handle_pen(response, doc_pos),
             Tool::Artboard => self.handle_artboard(response, doc_pos),
+            Tool::Eyedropper => self.handle_eyedropper(response, doc_pos),
+        }
+    }
+
+    /// Eyedropper input: click a shape to sample its paint appearance.
+    ///
+    /// Mirrors Illustrator's eyedropper:
+    /// - A **plain click** on a shape samples its appearance, applies it to the
+    ///   current selection (one undo step), and updates the app's default paint
+    ///   so the next new shape inherits it.
+    /// - With **no selection**, a click only loads the sampled appearance into
+    ///   the app defaults (nothing to apply to yet).
+    /// - **Alt-click** never applies — it only loads the defaults (Illustrator's
+    ///   "pick up but don't paint" modifier).
+    ///
+    /// Clicking empty canvas is a no-op (there is nothing to sample).
+    fn handle_eyedropper(&mut self, response: &egui::Response, doc_pos: Option<(f32, f32)>) {
+        if !response.clicked() {
+            return;
+        }
+        let Some((x, y)) = doc_pos else { return };
+        let tol = 4.0 / self.view.zoom;
+        // Topmost visible shape under the cursor.
+        let Some(src) = self
+            .doc
+            .shapes
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, s)| s.visible() && s.hit(x, y, tol))
+            .map(|(i, _)| i)
+        else {
+            return;
+        };
+        let appearance = crate::eyedropper::Appearance::sample(&self.doc.shapes[src]);
+        let alt = response.ctx.input(|i| i.modifiers.alt);
+
+        // Always load the app defaults from the sample (so the next drawn shape
+        // inherits the picked look). Lines carry no fill; keep the prior default
+        // fill in that case.
+        if let Some(c) = appearance.fill {
+            self.fill = c;
+        }
+        self.fill_gradient = appearance.fill_gradient.clone();
+        self.stroke = appearance.stroke;
+        self.stroke_w = appearance.stroke_w;
+        self.stroke_style = appearance.stroke_style.clone();
+
+        // Apply to the selection (unless Alt was held, or the source itself is the
+        // only selected shape, or nothing is selected).
+        let targets: Vec<usize> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|&i| i < self.doc.shapes.len() && i != src)
+            .collect();
+        if !alt && !targets.is_empty() {
+            self.checkpoint();
+            for i in &targets {
+                appearance.apply_to(&mut self.doc.shapes[*i]);
+            }
+            let n = targets.len();
+            self.status = format!(
+                "Applied appearance to {n} {}",
+                if n == 1 { "object" } else { "objects" }
+            );
+        } else {
+            self.status = "Sampled appearance".into();
         }
     }
 

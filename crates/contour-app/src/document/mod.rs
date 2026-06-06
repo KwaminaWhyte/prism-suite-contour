@@ -157,6 +157,48 @@ impl Shape {
         }
     }
 
+    /// The shape's stroke colour (straight sRGB RGBA). Every variant has a
+    /// stroke, so this is always `Some` — the `Option` keeps the accessor shaped
+    /// like [`fill_color`](Self::fill_color) for the appearance helpers.
+    pub fn stroke_color(&self) -> Option<[f32; 4]> {
+        match self {
+            Shape::Rect { stroke, .. }
+            | Shape::Ellipse { stroke, .. }
+            | Shape::Line { stroke, .. }
+            | Shape::Path { stroke, .. } => Some(*stroke),
+        }
+    }
+
+    /// Set the shape's stroke colour.
+    pub fn set_stroke_color(&mut self, c: [f32; 4]) {
+        match self {
+            Shape::Rect { stroke, .. }
+            | Shape::Ellipse { stroke, .. }
+            | Shape::Line { stroke, .. }
+            | Shape::Path { stroke, .. } => *stroke = c,
+        }
+    }
+
+    /// The shape's stroke width in document units.
+    pub fn stroke_width(&self) -> f32 {
+        match self {
+            Shape::Rect { stroke_w, .. }
+            | Shape::Ellipse { stroke_w, .. }
+            | Shape::Line { stroke_w, .. }
+            | Shape::Path { stroke_w, .. } => *stroke_w,
+        }
+    }
+
+    /// Set the shape's stroke width (document units).
+    pub fn set_stroke_width(&mut self, w: f32) {
+        match self {
+            Shape::Rect { stroke_w, .. }
+            | Shape::Ellipse { stroke_w, .. }
+            | Shape::Line { stroke_w, .. }
+            | Shape::Path { stroke_w, .. } => *stroke_w = w,
+        }
+    }
+
     /// The shape's stroke attributes (caps/joins/dashes).
     pub fn stroke_style(&self) -> &StrokeStyle {
         match self {

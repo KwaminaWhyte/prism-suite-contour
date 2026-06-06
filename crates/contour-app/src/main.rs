@@ -13,6 +13,7 @@ mod canvas;
 mod clipboard;
 mod document;
 mod export;
+mod eyedropper;
 mod gradient;
 mod group;
 mod history;
