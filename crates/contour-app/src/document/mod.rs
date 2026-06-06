@@ -46,6 +46,11 @@ pub enum Shape {
         stroke_style: StrokeStyle,
         #[serde(default = "default_true")]
         visible: bool,
+        /// Group membership: shapes sharing a `Some(id)` form one group and are
+        /// selected / moved / transformed as a unit. Additive
+        /// (`#[serde(default)]` → `None`), so older files load ungrouped.
+        #[serde(default)]
+        group: Option<u64>,
     },
     Ellipse {
         rect: [f32; 4],
@@ -58,6 +63,8 @@ pub enum Shape {
         stroke_style: StrokeStyle,
         #[serde(default = "default_true")]
         visible: bool,
+        #[serde(default)]
+        group: Option<u64>,
     },
     Line {
         p0: (f32, f32),
@@ -68,6 +75,8 @@ pub enum Shape {
         stroke_style: StrokeStyle,
         #[serde(default = "default_true")]
         visible: bool,
+        #[serde(default)]
+        group: Option<u64>,
     },
     Path {
         points: Vec<(f32, f32)>,
@@ -90,6 +99,8 @@ pub enum Shape {
         handles: Vec<(f32, f32)>,
         #[serde(default = "default_true")]
         visible: bool,
+        #[serde(default)]
+        group: Option<u64>,
     },
 }
 
@@ -121,6 +132,27 @@ impl Shape {
             | Shape::Ellipse { visible, .. }
             | Shape::Line { visible, .. }
             | Shape::Path { visible, .. } => *visible = !*visible,
+        }
+    }
+
+    /// The shape's group id, if it belongs to one. Shapes sharing an id form a
+    /// group that selects / moves / transforms as a unit.
+    pub fn group(&self) -> Option<u64> {
+        match self {
+            Shape::Rect { group, .. }
+            | Shape::Ellipse { group, .. }
+            | Shape::Line { group, .. }
+            | Shape::Path { group, .. } => *group,
+        }
+    }
+
+    /// Set (or clear, with `None`) the shape's group membership.
+    pub fn set_group(&mut self, g: Option<u64>) {
+        match self {
+            Shape::Rect { group, .. }
+            | Shape::Ellipse { group, .. }
+            | Shape::Line { group, .. }
+            | Shape::Path { group, .. } => *group = g,
         }
     }
 
@@ -318,6 +350,7 @@ impl Shape {
                 stroke_w,
                 stroke_style,
                 visible,
+                group,
             } => {
                 let pts = vec![
                     (rect[0], rect[1]),
@@ -336,6 +369,7 @@ impl Shape {
                     stroke_style: stroke_style.clone(),
                     handles,
                     visible: *visible,
+                    group: *group,
                 }
             }
             Shape::Ellipse {
@@ -346,6 +380,7 @@ impl Shape {
                 stroke_w,
                 stroke_style,
                 visible,
+                group,
             } => {
                 // Four anchors at the extrema with the classic 0.5523 cubic
                 // tangent so the path traces a smooth ellipse.
@@ -378,6 +413,7 @@ impl Shape {
                     stroke_style: stroke_style.clone(),
                     handles,
                     visible: *visible,
+                    group: *group,
                 }
             }
             Shape::Line {
@@ -387,6 +423,7 @@ impl Shape {
                 stroke_w,
                 stroke_style,
                 visible,
+                group,
             } => Shape::Path {
                 points: vec![*p0, *p1],
                 closed: false,
@@ -397,6 +434,7 @@ impl Shape {
                 stroke_style: stroke_style.clone(),
                 handles: vec![(0.0, 0.0); 2],
                 visible: *visible,
+                group: *group,
             },
         }
     }

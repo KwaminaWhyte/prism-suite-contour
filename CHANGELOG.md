@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Grouping (group / ungroup)** — a new pure, unit-tested `group` module and an
+  additive `group: Option<u64>` tag on every shape (`#[serde(default)]`), so
+  shapes sharing an id form one group that selects, moves, transforms and arranges
+  as a single unit, the way Illustrator's groups behave for day-to-day editing —
+  without refactoring the flat `Vec<Shape>` document into a tree:
+  - **Object → Group / Ungroup**, an inspector "Group" button row, and the
+    Illustrator keys **Cmd/Ctrl + G** (group) / **Cmd/Ctrl + Shift + G**
+    (ungroup). Group needs 2+ selected shapes; Ungroup lights up whenever the
+    selection touches a group. Each is a single undo step.
+  - **Group** assigns a fresh group id (never colliding with an existing one) to
+    the selection and gathers its members into one contiguous block in paint
+    order, anchored at the frontmost selected shape (so a group reads as a single
+    stacked unit). The selection is remapped to the moved block so the group stays
+    selected. **Ungroup** clears the tag on every member of each group the
+    selection touches.
+  - **Selection propagation** — clicking (or shift-clicking, marquee-selecting, or
+    picking in the Layers list) any member of a group selects the *whole* group; a
+    shift-click toggles the entire group in or out atomically. Dragging then moves,
+    and the transform box scales/rotates, the whole group together. A leading group
+    glyph marks grouped shapes in the Layers list.
+  - The tag is additive (`#[serde(default)]` → `None`), so older `.contour` files
+    load ungrouped and group membership round-trips through serde. Group ids
+    survive `Shape::to_path` (so rotating a grouped rect/ellipse keeps it in its
+    group), and boolean-op results are ungrouped.
+
 - **Gradient fills (multi-stop, linear & radial)** — a new pure, unit-tested
   `gradient` module and an additive `fill_gradient: Option<Gradient>` on every
   filled shape (`Rect` / `Ellipse` / `Path`) that overrides the solid `fill`

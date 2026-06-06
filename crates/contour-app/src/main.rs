@@ -12,6 +12,7 @@ mod canvas;
 mod document;
 mod export;
 mod gradient;
+mod group;
 mod history;
 mod icons;
 mod snap;

@@ -212,11 +212,12 @@ impl eframe::App for ContourApp {
         // Global keyboard: Enter commits a pen path; Delete removes selection;
         // Cmd/Ctrl+Z undoes, Cmd/Ctrl+Shift+Z (or Ctrl+Y) redoes; Cmd/Ctrl+]/[
         // arrange the selection (with Shift: to front / to back), à la Illustrator.
-        let (enter, delete, undo, redo, arrange_key) = ctx.input(|i| {
+        let (enter, delete, undo, redo, arrange_key, group_key, ungroup_key) = ctx.input(|i| {
             let cmd = i.modifiers.command;
             let shift = i.modifiers.shift;
             let z = i.key_pressed(egui::Key::Z);
             let y = i.key_pressed(egui::Key::Y);
+            let g = i.key_pressed(egui::Key::G);
             let arrange = if cmd && i.key_pressed(egui::Key::CloseBracket) {
                 Some(if shift {
                     Arrange::BringToFront
@@ -238,6 +239,8 @@ impl eframe::App for ContourApp {
                 cmd && z && !shift,
                 (cmd && z && shift) || (cmd && y),
                 arrange,
+                cmd && g && !shift,
+                cmd && g && shift,
             )
         });
         if enter && self.tool == Tool::Pen {
@@ -254,6 +257,12 @@ impl eframe::App for ContourApp {
         }
         if let Some(op) = arrange_key {
             self.arrange_selection(op);
+        }
+        // Ungroup before group so a Shift+G frame isn't misread as group.
+        if ungroup_key {
+            self.ungroup_selection();
+        } else if group_key {
+            self.group_selection();
         }
 
         self.menu_bar(root);

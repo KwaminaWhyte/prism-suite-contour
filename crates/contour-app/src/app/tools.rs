@@ -312,6 +312,7 @@ impl ContourApp {
                 if let Some(i) = hit {
                     if !self.is_selected(i) {
                         self.select_only(Some(i));
+                        self.expand_selection_to_groups();
                     }
                     self.inter.move_last = Some((x, y));
                     // Snapshot the start of a move so the whole drag is one undo.
@@ -405,12 +406,14 @@ impl ContourApp {
                     .map(|(i, _)| i);
                 let shift = response.ctx.input(|inp| inp.modifiers.shift);
                 if shift {
-                    // Shift-click toggles the hit shape in the multi-selection.
+                    // Shift-click toggles the hit shape (and its group) in the
+                    // multi-selection.
                     if let Some(i) = hit {
-                        self.toggle_selection(i);
+                        self.toggle_group_selection(i);
                     }
                 } else {
                     self.select_only(hit);
+                    self.expand_selection_to_groups();
                 }
             }
         }
@@ -447,7 +450,8 @@ impl ContourApp {
                 }
             }
         }
-        self.selection = sel;
+        // A marquee that touches any group member selects the whole group.
+        self.selection = crate::group::expand_selection(&self.group_tags(), &sel);
     }
 
     /// Mutate a selected path while dragging one of its anchors or handles.
@@ -533,6 +537,7 @@ impl ContourApp {
                         stroke_w: self.stroke_w,
                         stroke_style: self.stroke_style.clone(),
                         visible: true,
+                        group: None,
                     }
                 } else {
                     Shape::Ellipse {
@@ -543,6 +548,7 @@ impl ContourApp {
                         stroke_w: self.stroke_w,
                         stroke_style: self.stroke_style.clone(),
                         visible: true,
+                        group: None,
                     }
                 })
             }
@@ -557,6 +563,7 @@ impl ContourApp {
                     stroke_w: self.stroke_w.max(1.0),
                     stroke_style: self.stroke_style.clone(),
                     visible: true,
+                    group: None,
                 })
             }
             _ => None,

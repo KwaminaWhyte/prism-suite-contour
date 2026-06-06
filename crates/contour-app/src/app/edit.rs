@@ -9,6 +9,7 @@ use crate::arrange::{self, Arrange};
 use crate::boolean::{self, BoolOp};
 use crate::document::{self, Guide, Shape};
 use crate::export;
+use crate::group;
 use crate::snap::{self, SnapFeatures, SnapResult, SnapTargets};
 use crate::transform::{self, Affine};
 
@@ -41,6 +42,142 @@ impl ContourApp {
         } else {
             self.selection.push(i);
         }
+    }
+
+    /// Shift-click toggle that treats a group atomically: if shape `i` belongs to
+    /// a group, the whole group is added (when any member is currently absent) or
+    /// removed (when all members are present); an ungrouped shape toggles alone.
+    pub(super) fn toggle_group_selection(&mut self, i: usize) {
+        let tags = self.group_tags();
+        let members = group::members_of(&tags, i);
+        if members.len() <= 1 {
+            self.toggle_selection(i);
+            return;
+        }
+        let all_present = members.iter().all(|m| self.is_selected(*m));
+        if all_present {
+            self.selection.retain(|s| !members.contains(s));
+        } else {
+            for m in members {
+                if !self.is_selected(m) {
+                    self.selection.push(m);
+                }
+            }
+        }
+    }
+
+    // --- Grouping ------------------------------------------------------------
+
+    /// The per-shape group tags in paint order, for the pure [`group`] helpers.
+    pub(super) fn group_tags(&self) -> Vec<Option<u64>> {
+        self.doc.shapes.iter().map(|s| s.group()).collect()
+    }
+
+    /// Expand the current selection so that selecting any member of a group
+    /// selects the whole group. Keeps the original primary (last-added) shape as
+    /// primary when it survives expansion; otherwise the topmost expanded shape
+    /// becomes primary. Pure bookkeeping — records no undo entry.
+    pub(super) fn expand_selection_to_groups(&mut self) {
+        let tags = self.group_tags();
+        let expanded = group::expand_selection(&tags, &self.selection);
+        // Compare against the normalised current selection; bail if unchanged.
+        let mut current = self.selection.clone();
+        current.sort_unstable();
+        current.dedup();
+        if expanded == current {
+            return;
+        }
+        // Preserve the primary if it is still present; else use the topmost.
+        let primary = self.primary().filter(|p| expanded.contains(p));
+        self.selection = expanded;
+        if let Some(p) = primary {
+            self.selection.retain(|&i| i != p);
+            self.selection.push(p);
+        }
+    }
+
+    /// Whether the current selection can be grouped (≥2 distinct shapes).
+    pub(super) fn can_group(&self) -> bool {
+        group::can_group(self.doc.shapes.len(), &self.selection)
+    }
+
+    /// Whether the current selection contains any grouped shape (so Ungroup is
+    /// meaningful).
+    pub(super) fn can_ungroup(&self) -> bool {
+        group::can_ungroup(&self.group_tags(), &self.selection)
+    }
+
+    /// Group the selected shapes: tag them all with a fresh group id, then gather
+    /// them into one contiguous block in paint order (anchored at the topmost
+    /// selected shape, preserving their relative order) so the group reads as a
+    /// single stacked unit, à la Illustrator. One undo step; the selection is
+    /// remapped to the moved shapes so the group stays selected.
+    pub(super) fn group_selection(&mut self) {
+        if !self.can_group() {
+            return;
+        }
+        self.checkpoint();
+        let id = group::next_group_id(&self.group_tags());
+
+        // Sorted, de-duplicated, in-range selection in paint order.
+        let mut sel: Vec<usize> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|&i| i < self.doc.shapes.len())
+            .collect();
+        sel.sort_unstable();
+        sel.dedup();
+
+        // Tag the members, then lift them out and re-insert as a block. The block
+        // lands so its top sits where the topmost selected shape was, matching
+        // "group in place" (Illustrator keeps the group at the frontmost member).
+        for &i in &sel {
+            self.doc.shapes[i].set_group(Some(id));
+        }
+        let top = *sel.last().expect("non-empty");
+        // Count how many unselected shapes sit at or below `top`; the block is
+        // inserted right after them.
+        let insert_at = (0..=top).filter(|i| !sel.contains(i)).count();
+
+        // Remove members (highest first to keep indices valid) collecting them in
+        // ascending order.
+        let mut block: Vec<Shape> = Vec::with_capacity(sel.len());
+        for &i in sel.iter().rev() {
+            block.push(self.doc.shapes.remove(i));
+        }
+        block.reverse(); // restore ascending paint order
+        for (k, shape) in block.into_iter().enumerate() {
+            self.doc.shapes.insert(insert_at + k, shape);
+        }
+        // The group now occupies a contiguous run starting at `insert_at`.
+        self.selection = (insert_at..insert_at + sel.len()).collect();
+        self.status = "Grouped".into();
+    }
+
+    /// Ungroup: clear the group tag on every selected shape (and, so an Illustrator
+    /// "select a group then ungroup" gesture works, on every other member of any
+    /// group a selected shape belongs to). One undo step.
+    pub(super) fn ungroup_selection(&mut self) {
+        if !self.can_ungroup() {
+            return;
+        }
+        self.checkpoint();
+        let tags = self.group_tags();
+        // Group ids touched by the selection.
+        let mut ids: Vec<u64> = self
+            .selection
+            .iter()
+            .filter_map(|&i| tags.get(i).copied().flatten())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        for s in self.doc.shapes.iter_mut() {
+            if s.group().is_some_and(|g| ids.binary_search(&g).is_ok()) {
+                s.set_group(None);
+            }
+        }
+        self.status = "Ungrouped".into();
     }
 
     // --- Undo / redo ---------------------------------------------------------
@@ -220,6 +357,7 @@ impl ContourApp {
                 stroke_style: self.stroke_style.clone(),
                 handles,
                 visible: true,
+                group: None,
             });
             self.select_only(Some(self.doc.shapes.len() - 1));
         } else {

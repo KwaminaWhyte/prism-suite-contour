@@ -85,6 +85,20 @@ impl ContourApp {
                     }
 
                     ui.separator();
+                    ui.add_enabled_ui(self.can_group(), |ui| {
+                        if ui.button(format!("{}  Group", icons::GROUP)).clicked() {
+                            self.group_selection();
+                            ui.close_menu();
+                        }
+                    });
+                    ui.add_enabled_ui(self.can_ungroup(), |ui| {
+                        if ui.button(format!("{}  Ungroup", icons::UNGROUP)).clicked() {
+                            self.ungroup_selection();
+                            ui.close_menu();
+                        }
+                    });
+
+                    ui.separator();
                     ui.menu_button("Align", |ui| {
                         let can_align =
                             self.selection.len() >= 2 || self.align_to == AlignTo::Artboard;
@@ -295,6 +309,7 @@ impl ContourApp {
 
                 self.stroke_section(ui);
                 self.transform_section(ui);
+                self.group_section(ui);
                 self.arrange_section(ui);
                 self.align_section(ui);
 
@@ -558,6 +573,38 @@ impl ContourApp {
         }
     }
 
+    /// Group / Ungroup controls. Group folds the selection into one unit that
+    /// selects and transforms together (Cmd/Ctrl+G); Ungroup dissolves it
+    /// (Cmd/Ctrl+Shift+G). Each is a single undo step; buttons disable when the
+    /// gesture would be a no-op. Mirrors the `Object → Group / Ungroup` menu.
+    fn group_section(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.label(egui::RichText::new("Group").strong());
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(self.can_group(), |ui| {
+                if ui
+                    .button(format!("{}  Group", icons::GROUP))
+                    .on_hover_text("Group selection (Cmd/Ctrl+G)")
+                    .clicked()
+                {
+                    self.group_selection();
+                }
+            });
+            ui.add_enabled_ui(self.can_ungroup(), |ui| {
+                if ui
+                    .button(format!("{}  Ungroup", icons::UNGROUP))
+                    .on_hover_text("Ungroup selection (Cmd/Ctrl+Shift+G)")
+                    .clicked()
+                {
+                    self.ungroup_selection();
+                }
+            });
+        });
+        if !self.can_group() && !self.can_ungroup() {
+            ui.weak("Select 2+ shapes to group.");
+        }
+    }
+
     /// Arrange (paint-order / stacking) controls: bring-to-front, forward,
     /// backward, and send-to-back. Each is a single undo step; a button is
     /// disabled when the move would not change the order (e.g. the selection is
@@ -727,6 +774,7 @@ impl ContourApp {
                 let secondary = !primary && self.is_selected(idx);
                 let visible = self.doc.shapes[idx].visible();
                 let label = self.doc.shapes[idx].label();
+                let grouped = self.doc.shapes[idx].group().is_some();
 
                 ui.horizontal(|ui| {
                     // Visibility toggle.
@@ -743,14 +791,24 @@ impl ContourApp {
                         to_toggle = Some(idx);
                     }
 
-                    let mut text = egui::RichText::new(format!("{}  {}", n - idx, label));
+                    // A leading group glyph marks shapes that belong to a group.
+                    let prefix = if grouped {
+                        format!("{}  ", icons::GROUP)
+                    } else {
+                        String::new()
+                    };
+                    let mut text = egui::RichText::new(format!("{}{}  {}", prefix, n - idx, label));
                     if !visible {
                         text = text.weak();
                     }
                     if secondary {
                         text = text.color(theme::accent());
                     }
-                    if ui.selectable_label(primary, text).clicked() {
+                    if ui
+                        .selectable_label(primary, text)
+                        .on_hover_text(if grouped { "Grouped" } else { "" })
+                        .clicked()
+                    {
                         to_select = Some((idx, shift));
                     }
 
@@ -798,9 +856,10 @@ impl ContourApp {
         }
         if let Some((i, shift)) = to_select {
             if shift {
-                self.toggle_selection(i);
+                self.toggle_group_selection(i);
             } else {
                 self.select_only(Some(i));
+                self.expand_selection_to_groups();
             }
         }
         if let Some(i) = to_delete {

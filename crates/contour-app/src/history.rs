@@ -135,6 +135,7 @@ mod tests {
             stroke_w: 1.0,
             stroke_style: StrokeStyle::default(),
             visible: true,
+            group: None,
         }
     }
 

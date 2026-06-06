@@ -14,6 +14,9 @@ fn loads_legacy_document() {
     assert_eq!(doc.shapes.len(), 2);
     assert!(doc.shapes[0].visible());
     assert!(doc.shapes[1].visible());
+    // A pre-group document loads with every shape ungrouped.
+    assert_eq!(doc.shapes[0].group(), None);
+    assert_eq!(doc.shapes[1].group(), None);
     // A pre-guides document loads with no guides.
     assert!(doc.guides.is_empty());
     if let Shape::Path { handles, .. } = &doc.shapes[1] {
@@ -286,6 +289,7 @@ fn axis_aligned_scale_keeps_rect_a_rect() {
         stroke_w: 1.0,
         stroke_style: StrokeStyle::default(),
         visible: true,
+        group: None,
     };
     // Scale ×2 about the origin.
     s.apply_affine(&Affine::scale(2.0, 2.0));
@@ -307,6 +311,7 @@ fn flip_keeps_rect_normalized() {
         stroke_w: 1.0,
         stroke_style: StrokeStyle::default(),
         visible: true,
+        group: None,
     };
     // Horizontal flip about x = 30 (the rect's centre): bounds unchanged,
     // width/height stay positive.
@@ -331,6 +336,7 @@ fn rotation_converts_rect_to_path() {
         stroke_w: 1.0,
         stroke_style: StrokeStyle::default(),
         visible: true,
+        group: None,
     };
     s.apply_affine(&Affine::rotate_about(0.5, 5.0, 5.0));
     assert!(
@@ -353,6 +359,7 @@ fn rotation_preserves_rect_center() {
         stroke_w: 1.0,
         stroke_style: StrokeStyle::default(),
         visible: true,
+        group: None,
     };
     let before = s.bounds().unwrap();
     let (cx0, cy0) = (before.x + before.w * 0.5, before.y + before.h * 0.5);
@@ -376,6 +383,7 @@ fn ellipse_to_path_round_trips_bounds() {
         stroke_w: 1.0,
         stroke_style: StrokeStyle::default(),
         visible: true,
+        group: None,
     };
     let p = s.to_path();
     let pb = p.bounds().unwrap();
@@ -400,6 +408,7 @@ fn path_handles_transform_by_linear_part() {
         stroke_style: StrokeStyle::default(),
         handles: vec![(3.0, 4.0), (0.0, 0.0)],
         visible: true,
+        group: None,
     };
     s.apply_affine(&Affine::translate(100.0, 50.0));
     if let Shape::Path {
@@ -465,6 +474,7 @@ fn line_ignores_gradient_fill() {
         stroke_w: 1.0,
         stroke_style: StrokeStyle::default(),
         visible: true,
+        group: None,
     };
     line.set_fill_gradient(Some(Gradient::two_stop(
         GradientKind::Linear,
@@ -473,4 +483,67 @@ fn line_ignores_gradient_fill() {
     )));
     assert!(line.fill_gradient().is_none());
     assert!(line.fill_color().is_none());
+}
+
+// --- Group membership --------------------------------------------------
+
+/// The additive `group` tag round-trips through serde and is `None` on a
+/// document written before grouping existed.
+#[test]
+fn group_tag_is_additive_and_round_trips() {
+    // A pre-group Rect (no `group` key) loads ungrouped.
+    let json = r#"{"shapes":[
+        {"Rect":{"rect":[0,0,10,10],"fill":[1,0,0,1],"stroke":[0,0,0,1],"stroke_w":1}}
+    ]}"#;
+    let mut doc: Document = serde_json::from_str(json).unwrap();
+    assert_eq!(doc.shapes[0].group(), None);
+
+    // Tagging it with a group and serializing round-trips the id back.
+    doc.shapes[0].set_group(Some(7));
+    let s = serde_json::to_string(&doc).unwrap();
+    let back: Document = serde_json::from_str(&s).unwrap();
+    assert_eq!(back.shapes[0].group(), Some(7));
+}
+
+/// `set_group` / `group` work uniformly across every variant, including `Line`
+/// (which has no fill but can still belong to a group).
+#[test]
+fn group_accessor_covers_every_variant() {
+    let mut line = Shape::Line {
+        p0: (0.0, 0.0),
+        p1: (10.0, 0.0),
+        stroke: [0.0; 4],
+        stroke_w: 1.0,
+        stroke_style: StrokeStyle::default(),
+        visible: true,
+        group: None,
+    };
+    line.set_group(Some(3));
+    assert_eq!(line.group(), Some(3));
+    line.set_group(None);
+    assert_eq!(line.group(), None);
+}
+
+/// Converting a grouped shape to a path preserves its group membership, so a
+/// rotation (which rasterises a `Rect`/`Ellipse` into a `Path`) keeps it in its
+/// group.
+#[test]
+fn to_path_preserves_group() {
+    let r = Shape::Rect {
+        rect: [0.0, 0.0, 10.0, 10.0],
+        fill: [0.0; 4],
+        fill_gradient: None,
+        stroke: [0.0; 4],
+        stroke_w: 1.0,
+        stroke_style: StrokeStyle::default(),
+        visible: true,
+        group: Some(42),
+    };
+    assert_eq!(r.to_path().group(), Some(42));
+
+    // And a rotation (Rect -> Path under the hood) keeps the group too.
+    let mut r2 = r;
+    r2.apply_affine(&Affine::rotate_about(0.5, 5.0, 5.0));
+    assert!(matches!(r2, Shape::Path { .. }));
+    assert_eq!(r2.group(), Some(42));
 }

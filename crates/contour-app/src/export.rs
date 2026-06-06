@@ -563,6 +563,7 @@ mod tests {
                     stroke_w: 2.0,
                     stroke_style: StrokeStyle::default(),
                     visible: true,
+                    group: None,
                 },
                 Shape::Path {
                     points: vec![(60.0, 60.0), (90.0, 60.0), (90.0, 90.0)],
@@ -574,6 +575,7 @@ mod tests {
                     stroke_style: StrokeStyle::default(),
                     handles: vec![(10.0, 0.0), (0.0, 0.0), (0.0, 0.0)],
                     visible: true,
+                    group: None,
                 },
             ],
             ..Default::default()
@@ -628,6 +630,7 @@ mod tests {
                     dash_offset: 3.0,
                 },
                 visible: true,
+                group: None,
             }],
             ..Default::default()
         }
@@ -672,6 +675,7 @@ mod tests {
                 stroke_w: 0.0,
                 stroke_style: StrokeStyle::default(),
                 visible: true,
+                group: None,
             }],
             ..Default::default()
         }

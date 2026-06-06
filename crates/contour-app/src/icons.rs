@@ -105,6 +105,13 @@ pub const BRING_FORWARD: &str = ph::ARROW_UP;
 /// Send backward one step.
 pub const SEND_BACKWARD: &str = ph::ARROW_DOWN;
 
+// --- Grouping ---------------------------------------------------------------
+
+/// Group the selected shapes into one unit.
+pub const GROUP: &str = ph::BOUNDING_BOX;
+/// Ungroup (dissolve the group back into loose shapes).
+pub const UNGROUP: &str = ph::SELECTION_SLASH;
+
 // --- Boolean ops ------------------------------------------------------------
 
 /// Union of two shapes.

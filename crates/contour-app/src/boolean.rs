@@ -125,6 +125,7 @@ pub fn apply(subj_shape: &Shape, clip_shape: &Shape, op: BoolOp) -> Option<Shape
         stroke_style,
         handles: Vec::new(),
         visible: true,
+        group: None,
     })
 }
 
@@ -142,6 +143,7 @@ mod tests {
             stroke_w: 1.0,
             stroke_style: StrokeStyle::default(),
             visible: true,
+            group: None,
         }
     }
 
