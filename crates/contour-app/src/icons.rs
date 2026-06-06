@@ -62,6 +62,25 @@ pub const CARET_UP: &str = ph::CARET_UP;
 /// Move layer down in paint order.
 pub const CARET_DOWN: &str = ph::CARET_DOWN;
 
+// --- Align & distribute -----------------------------------------------------
+
+/// Align left edges.
+pub const ALIGN_LEFT: &str = ph::ALIGN_LEFT;
+/// Align horizontal centres.
+pub const ALIGN_CENTER_H: &str = ph::ALIGN_CENTER_HORIZONTAL;
+/// Align right edges.
+pub const ALIGN_RIGHT: &str = ph::ALIGN_RIGHT;
+/// Align top edges.
+pub const ALIGN_TOP: &str = ph::ALIGN_TOP;
+/// Align vertical centres.
+pub const ALIGN_CENTER_V: &str = ph::ALIGN_CENTER_VERTICAL;
+/// Align bottom edges.
+pub const ALIGN_BOTTOM: &str = ph::ALIGN_BOTTOM;
+/// Distribute horizontally (spread along X).
+pub const DISTRIBUTE_H: &str = ph::ARROWS_OUT_LINE_HORIZONTAL;
+/// Distribute vertically (spread along Y).
+pub const DISTRIBUTE_V: &str = ph::ARROWS_OUT_LINE_VERTICAL;
+
 // --- Boolean ops ------------------------------------------------------------
 
 /// Union of two shapes.

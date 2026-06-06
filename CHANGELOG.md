@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Multi-selection** — the Select tool now maintains a full selection *set*
+  rather than a primary/secondary pair. Plain-click selects one shape;
+  **shift-click** toggles a shape in or out of the set (in the canvas and the
+  Layers list); dragging any selected shape moves the **whole selection**
+  together as a single undo step. The most-recently-added shape is the *primary*
+  (drives the inspector and direct-select path editing). Boolean ops now require
+  exactly two selected shapes (subject = first, clip = second).
+
+- **Align & distribute** — a new `align` module (pure, unit-tested geometry over
+  bounding boxes) plus an inspector "Align" section and an **Object → Align /
+  Distribute** menu:
+  - **Align** the selection's left / horizontal-center / right edges and top /
+    vertical-center / bottom edges to a reference frame, switchable between the
+    **selection bounds** and the **artboard** (so a single shape can be centered
+    on the artboard).
+  - **Distribute** three-or-more shapes by evenly spacing a chosen feature (left
+    / right / top / bottom edges or centers) *or* by equalising the **gaps**
+    between them (horizontal / vertical "distribute spacing", à la Illustrator).
+    Distribution sorts by visual position, so selection order does not matter and
+    the two outermost shapes stay fixed.
+  - Each align/distribute action is a single undo step; controls disable until
+    the selection is large enough (2+ to align, 3+ to distribute).
+
 - **Stroke options** — every shape now carries a `StrokeStyle` (line **cap**:
   butt / round / square; line **join**: miter / round / bevel; **miter limit**;
   and a **dash pattern** with phase **offset**), edited from a new "Stroke

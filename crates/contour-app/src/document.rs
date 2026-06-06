@@ -411,6 +411,15 @@ impl Shape {
     }
 }
 
+/// A shape's index in the document paired with its bounding box. Used by the
+/// align/distribute layer, which needs to map per-box translation deltas back to
+/// the originating shape.
+#[derive(Clone, Copy, Debug)]
+pub struct ShapeBounds {
+    pub index: usize,
+    pub rect: CoreRect,
+}
+
 /// The out-tangent handle offset for anchor `i`, or `(0, 0)` (a corner) when no
 /// handle is stored.
 pub fn handle_at(handles: &[(f32, f32)], i: usize) -> (f32, f32) {

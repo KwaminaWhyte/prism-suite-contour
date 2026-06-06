@@ -1,6 +1,7 @@
 //! The Contour application: tool state, panels, menus, and the per-frame draw
 //! loop that ties the document model to the canvas.
 
+use crate::align::{self, Align, AlignTo, Distribute};
 use crate::boolean::{self, BoolOp};
 use crate::canvas::{self, View};
 use crate::document::{self, Document, LineCap, LineJoin, Shape, StrokeStyle};
@@ -79,10 +80,11 @@ pub struct ContourApp {
     doc: Document,
     view: View,
     tool: Tool,
-    selected: Option<usize>,
-    /// Secondary selection (shift-click) — used as the *clip* operand for the
-    /// boolean Object menu.
-    selected2: Option<usize>,
+    /// Multi-selection set of shape indices, in click order. The **last** entry
+    /// is the *primary* (active) shape: it drives the inspector and direct-select
+    /// path editing. Shift-click toggles membership; a plain click selects one.
+    /// Two-operand boolean ops use the two most-recently-added members.
+    selection: Vec<usize>,
     fill: [f32; 4],
     stroke: [f32; 4],
     stroke_w: f32,
@@ -91,6 +93,9 @@ pub struct ContourApp {
     stroke_style: StrokeStyle,
     /// Logical artboard size (document units); from the shared `Size` type.
     artboard: Size,
+    /// Reference frame the Align operations measure against (selection bounds or
+    /// the artboard rectangle).
+    align_to: AlignTo,
     inter: Interaction,
     /// Undo / redo snapshot stack over the whole document.
     history: History,
@@ -106,13 +111,13 @@ impl ContourApp {
             doc: Document::new(),
             view: View::default(),
             tool: Tool::Select,
-            selected: None,
-            selected2: None,
+            selection: Vec::new(),
             fill: [0.27, 0.55, 0.85, 1.0],
             stroke: [0.10, 0.12, 0.15, 1.0],
             stroke_w: 2.0,
             stroke_style: StrokeStyle::default(),
             artboard: Size::new(1000, 700),
+            align_to: AlignTo::Selection,
             inter: Interaction::default(),
             history: History::new(),
             status: String::new(),
@@ -121,11 +126,40 @@ impl ContourApp {
 
     fn new_document(&mut self) {
         self.doc = Document::new();
-        self.selected = None;
-        self.selected2 = None;
+        self.selection.clear();
         self.inter = Interaction::default();
         self.history.clear();
         self.status.clear();
+    }
+
+    // --- Selection helpers ---------------------------------------------------
+
+    /// The primary (active) shape index — the last one added to the selection.
+    fn primary(&self) -> Option<usize> {
+        self.selection.last().copied()
+    }
+
+    /// Whether shape `i` is in the selection set.
+    fn is_selected(&self, i: usize) -> bool {
+        self.selection.contains(&i)
+    }
+
+    /// Replace the selection with a single shape (or clear it when `None`).
+    fn select_only(&mut self, i: Option<usize>) {
+        self.selection.clear();
+        if let Some(i) = i {
+            self.selection.push(i);
+        }
+    }
+
+    /// Toggle shape `i` in the selection (shift-click). Re-adding moves it to the
+    /// end so it becomes primary.
+    fn toggle_selection(&mut self, i: usize) {
+        if let Some(pos) = self.selection.iter().position(|&s| s == i) {
+            self.selection.remove(pos);
+        } else {
+            self.selection.push(i);
+        }
     }
 
     // --- Undo / redo ---------------------------------------------------------
@@ -168,52 +202,53 @@ impl ContourApp {
     /// Drop selection indices that fall outside the (possibly restored) doc.
     fn clamp_selection(&mut self) {
         let n = self.doc.shapes.len();
-        let fix = |sel: &mut Option<usize>| {
-            if let Some(i) = *sel {
-                if i >= n {
-                    *sel = None;
-                }
-            }
-        };
-        fix(&mut self.selected);
-        fix(&mut self.selected2);
+        self.selection.retain(|&i| i < n);
     }
 
-    /// Remove shape `i`, fixing up both selection indices.
+    /// Remove shape `i`, fixing up the selection indices (entries above shift
+    /// down by one; the removed entry, if selected, is dropped).
     fn remove_shape(&mut self, i: usize) {
         if i >= self.doc.shapes.len() {
             return;
         }
         self.doc.shapes.remove(i);
-        let fix = |sel: &mut Option<usize>| {
-            *sel = match *sel {
-                Some(s) if s == i => None,
-                Some(s) if s > i => Some(s - 1),
-                other => other,
-            };
-        };
-        fix(&mut self.selected);
-        fix(&mut self.selected2);
-    }
-
-    fn delete_selected(&mut self) {
-        if let Some(i) = self.selected.take() {
-            self.checkpoint();
-            self.remove_shape(i);
+        self.selection.retain(|&s| s != i);
+        for s in self.selection.iter_mut() {
+            if *s > i {
+                *s -= 1;
+            }
         }
     }
 
-    /// Swap shapes `a` and `b`, keeping selection pinned to the moved shape.
+    fn delete_selected(&mut self) {
+        if self.selection.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        // Remove highest index first so lower indices stay valid.
+        let mut idx: Vec<usize> = std::mem::take(&mut self.selection);
+        idx.sort_unstable();
+        idx.dedup();
+        for &i in idx.iter().rev() {
+            if i < self.doc.shapes.len() {
+                self.doc.shapes.remove(i);
+            }
+        }
+    }
+
+    /// Swap shapes `a` and `b`, keeping the selection pinned to the moved shapes.
     fn swap_shapes(&mut self, a: usize, b: usize) {
         let n = self.doc.shapes.len();
         if a >= n || b >= n || a == b {
             return;
         }
         self.doc.shapes.swap(a, b);
-        if self.selected == Some(a) {
-            self.selected = Some(b);
-        } else if self.selected == Some(b) {
-            self.selected = Some(a);
+        for s in self.selection.iter_mut() {
+            if *s == a {
+                *s = b;
+            } else if *s == b {
+                *s = a;
+            }
         }
     }
 
@@ -227,8 +262,7 @@ impl ContourApp {
                     Ok(doc) => {
                         self.doc = doc;
                         self.history = crate::history::History::default();
-                        self.selected = None;
-                        self.selected2 = None;
+                        self.selection.clear();
                         log::info!("opened {} from {}", path.display(), path.display());
                     }
                     Err(e) => log::error!("parse failed: {e}"),
@@ -277,7 +311,7 @@ impl ContourApp {
                 handles,
                 visible: true,
             });
-            self.selected = Some(self.doc.shapes.len() - 1);
+            self.select_only(Some(self.doc.shapes.len() - 1));
         } else {
             self.inter.pen_points.clear();
             self.inter.pen_handles.clear();
@@ -332,13 +366,14 @@ impl ContourApp {
         }
     }
 
-    /// Apply a boolean op to the two selected shapes (subject = primary,
-    /// clip = secondary), replacing both with the single result path.
+    /// Apply a boolean op to exactly two selected shapes (subject = first added,
+    /// clip = second/primary), replacing both with the single result path.
     fn apply_bool(&mut self, op: BoolOp) {
-        let (Some(a), Some(b)) = (self.selected, self.selected2) else {
-            self.status = "Boolean op needs two selected shapes".into();
+        if self.selection.len() != 2 {
+            self.status = "Boolean op needs exactly two selected shapes".into();
             return;
-        };
+        }
+        let (a, b) = (self.selection[0], self.selection[1]);
         if a == b || a >= self.doc.shapes.len() || b >= self.doc.shapes.len() {
             return;
         }
@@ -352,12 +387,91 @@ impl ContourApp {
                 self.doc.shapes.remove(hi);
                 self.doc.shapes.remove(lo);
                 self.doc.shapes.push(result);
-                self.selected = Some(self.doc.shapes.len() - 1);
-                self.selected2 = None;
+                self.select_only(Some(self.doc.shapes.len() - 1));
                 self.status = "Boolean op applied".into();
             }
             None => self.status = "Boolean op produced no geometry".into(),
         }
+    }
+
+    /// Reference rectangle the Align operations measure against.
+    fn align_frame(
+        &self,
+        sel_boxes: &[document::ShapeBounds],
+    ) -> Option<prism_core::geometry::Rect> {
+        match self.align_to {
+            AlignTo::Artboard => Some(prism_core::geometry::Rect::new(
+                0.0,
+                0.0,
+                self.artboard.width as f32,
+                self.artboard.height as f32,
+            )),
+            AlignTo::Selection => {
+                let boxes: Vec<_> = sel_boxes.iter().map(|sb| sb.rect).collect();
+                align::union_bounds(&boxes)
+            }
+        }
+    }
+
+    /// Bounding box of each currently-selected shape, paired with its shape
+    /// index, skipping shapes with no geometry. Order follows the selection set.
+    fn selection_bounds(&self) -> Vec<document::ShapeBounds> {
+        self.selection
+            .iter()
+            .filter_map(|&i| {
+                self.doc
+                    .shapes
+                    .get(i)
+                    .and_then(|s| s.bounds())
+                    .map(|rect| document::ShapeBounds { index: i, rect })
+            })
+            .collect()
+    }
+
+    /// Align every selected shape to the current reference frame as one undo
+    /// step. Needs ≥2 selected shapes (or ≥1 when aligning to the artboard).
+    fn align_selection(&mut self, op: Align) {
+        let sel = self.selection_bounds();
+        let min = if self.align_to == AlignTo::Artboard {
+            1
+        } else {
+            2
+        };
+        if sel.len() < min {
+            self.status = "Select shapes to align".into();
+            return;
+        }
+        let Some(frame) = self.align_frame(&sel) else {
+            return;
+        };
+        let boxes: Vec<_> = sel.iter().map(|sb| sb.rect).collect();
+        let deltas = align::align_deltas(&boxes, op, frame);
+        self.checkpoint();
+        for (sb, (dx, dy)) in sel.iter().zip(deltas) {
+            if (dx != 0.0 || dy != 0.0) && sb.index < self.doc.shapes.len() {
+                self.doc.shapes[sb.index].translate(dx, dy);
+            }
+        }
+        self.status = "Aligned".into();
+    }
+
+    /// Distribute the selected shapes evenly along the operation's axis as one
+    /// undo step. Needs ≥3 selected shapes.
+    fn distribute_selection(&mut self, op: Distribute) {
+        let sel = self.selection_bounds();
+        if sel.len() < 3 {
+            self.status = "Distribute needs three or more shapes".into();
+            return;
+        }
+        let boxes: Vec<_> = sel.iter().map(|sb| sb.rect).collect();
+        let deltas = align::distribute_deltas(&boxes, op);
+        self.checkpoint();
+        for (sb, (dx, dy)) in sel.iter().zip(deltas) {
+            if (dx != 0.0 || dy != 0.0) && sb.index < self.doc.shapes.len() {
+                self.doc.shapes[sb.index].translate(dx, dy);
+            }
+        }
+        self.status = "Distributed".into();
     }
 }
 
@@ -440,7 +554,7 @@ impl ContourApp {
                         }
                     });
                     ui.separator();
-                    ui.add_enabled_ui(self.selected.is_some(), |ui| {
+                    ui.add_enabled_ui(!self.selection.is_empty(), |ui| {
                         if ui.button("Delete").clicked() {
                             self.delete_selected();
                             ui.close_menu();
@@ -448,7 +562,7 @@ impl ContourApp {
                     });
                 });
                 ui.menu_button("Object", |ui| {
-                    let two = self.selected.is_some() && self.selected2.is_some();
+                    let two = self.selection.len() == 2;
                     ui.add_enabled_ui(two, |ui| {
                         if ui.button(format!("{}  Union", icons::UNITE)).clicked() {
                             self.apply_bool(BoolOp::Union);
@@ -470,8 +584,72 @@ impl ContourApp {
                         }
                     });
                     if !two {
-                        ui.weak("Shift-click a 2nd shape");
+                        ui.weak("Boolean: select exactly 2");
                     }
+
+                    ui.separator();
+                    ui.menu_button("Align", |ui| {
+                        let can_align =
+                            self.selection.len() >= 2 || self.align_to == AlignTo::Artboard;
+                        ui.add_enabled_ui(can_align, |ui| {
+                            for (icon, label, op) in [
+                                (icons::ALIGN_LEFT, "Align Left", Align::Left),
+                                (icons::ALIGN_CENTER_H, "Align Center H", Align::CenterH),
+                                (icons::ALIGN_RIGHT, "Align Right", Align::Right),
+                                (icons::ALIGN_TOP, "Align Top", Align::Top),
+                                (icons::ALIGN_CENTER_V, "Align Center V", Align::CenterV),
+                                (icons::ALIGN_BOTTOM, "Align Bottom", Align::Bottom),
+                            ] {
+                                if ui.button(format!("{icon}  {label}")).clicked() {
+                                    self.align_selection(op);
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                    });
+                    ui.menu_button("Distribute", |ui| {
+                        ui.add_enabled_ui(self.selection.len() >= 3, |ui| {
+                            for (icon, label, op) in [
+                                (icons::DISTRIBUTE_H, "Left Edges", Distribute::LeftEdges),
+                                (
+                                    icons::DISTRIBUTE_H,
+                                    "Horizontal Centers",
+                                    Distribute::CentersH,
+                                ),
+                                (icons::DISTRIBUTE_H, "Right Edges", Distribute::RightEdges),
+                                (
+                                    icons::DISTRIBUTE_H,
+                                    "Horizontal Gaps",
+                                    Distribute::HorizontalGap,
+                                ),
+                            ] {
+                                if ui.button(format!("{icon}  {label}")).clicked() {
+                                    self.distribute_selection(op);
+                                    ui.close_menu();
+                                }
+                            }
+                            ui.separator();
+                            for (icon, label, op) in [
+                                (icons::DISTRIBUTE_V, "Top Edges", Distribute::TopEdges),
+                                (
+                                    icons::DISTRIBUTE_V,
+                                    "Vertical Centers",
+                                    Distribute::CentersV,
+                                ),
+                                (icons::DISTRIBUTE_V, "Bottom Edges", Distribute::BottomEdges),
+                                (
+                                    icons::DISTRIBUTE_V,
+                                    "Vertical Gaps",
+                                    Distribute::VerticalGap,
+                                ),
+                            ] {
+                                if ui.button(format!("{icon}  {label}")).clicked() {
+                                    self.distribute_selection(op);
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                    });
                 });
                 ui.separator();
                 ui.label(egui::RichText::new("Contour").strong());
@@ -532,6 +710,7 @@ impl ContourApp {
                 });
 
                 self.stroke_section(ui);
+                self.align_section(ui);
 
                 // Direct-select hint when a path is the active selection.
                 if self.tool == Tool::Select && self.selected_is_path() {
@@ -556,9 +735,9 @@ impl ContourApp {
         ui.separator();
         ui.label(egui::RichText::new("Stroke options").strong());
 
-        // Edit a working copy seeded from the selected shape (so the panel
-        // reflects what's selected), falling back to the app default.
-        let mut s = match self.selected.and_then(|i| self.doc.shapes.get(i)) {
+        // Edit a working copy seeded from the primary selected shape (so the
+        // panel reflects what's selected), falling back to the app default.
+        let mut s = match self.primary().and_then(|i| self.doc.shapes.get(i)) {
             Some(shape) => shape.stroke_style().clone(),
             None => self.stroke_style.clone(),
         };
@@ -642,7 +821,7 @@ impl ContourApp {
         if changed {
             let style = s.clone();
             self.stroke_style = style.clone();
-            if let Some(i) = self.selected {
+            if let Some(i) = self.primary() {
                 self.checkpoint();
                 if let Some(shape) = self.doc.shapes.get_mut(i) {
                     *shape.stroke_style_mut() = style;
@@ -651,8 +830,110 @@ impl ContourApp {
         }
     }
 
+    /// Align & distribute controls. Align snaps the selection's edges/centres to
+    /// a reference frame (selection bounds or the artboard); distribute spreads
+    /// three-or-more shapes evenly. Each click is a single undo step. Disabled
+    /// rows guide the user toward a usable selection size.
+    fn align_section(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Align").strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                egui::ComboBox::from_id_salt("align_to")
+                    .selected_text(match self.align_to {
+                        AlignTo::Selection => "To selection",
+                        AlignTo::Artboard => "To artboard",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.align_to, AlignTo::Selection, "To selection");
+                        ui.selectable_value(&mut self.align_to, AlignTo::Artboard, "To artboard");
+                    });
+            });
+        });
+
+        let can_align = self.selection.len() >= 2 || self.align_to == AlignTo::Artboard;
+        let mut align_op: Option<Align> = None;
+        ui.add_enabled_ui(can_align, |ui| {
+            ui.horizontal(|ui| {
+                for (icon, tip, op) in [
+                    (icons::ALIGN_LEFT, "Align left edges", Align::Left),
+                    (
+                        icons::ALIGN_CENTER_H,
+                        "Align horizontal centers",
+                        Align::CenterH,
+                    ),
+                    (icons::ALIGN_RIGHT, "Align right edges", Align::Right),
+                ] {
+                    if align_button(ui, icon).on_hover_text(tip).clicked() {
+                        align_op = Some(op);
+                    }
+                }
+                ui.add_space(6.0);
+                for (icon, tip, op) in [
+                    (icons::ALIGN_TOP, "Align top edges", Align::Top),
+                    (
+                        icons::ALIGN_CENTER_V,
+                        "Align vertical centers",
+                        Align::CenterV,
+                    ),
+                    (icons::ALIGN_BOTTOM, "Align bottom edges", Align::Bottom),
+                ] {
+                    if align_button(ui, icon).on_hover_text(tip).clicked() {
+                        align_op = Some(op);
+                    }
+                }
+            });
+        });
+        if let Some(op) = align_op {
+            self.align_selection(op);
+        }
+
+        let mut dist_op: Option<Distribute> = None;
+        ui.add_enabled_ui(self.selection.len() >= 3, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Distribute");
+                for (icon, tip, op) in [
+                    (
+                        icons::DISTRIBUTE_H,
+                        "Distribute horizontal centers",
+                        Distribute::CentersH,
+                    ),
+                    (
+                        icons::DISTRIBUTE_V,
+                        "Distribute vertical centers",
+                        Distribute::CentersV,
+                    ),
+                ] {
+                    if align_button(ui, icon).on_hover_text(tip).clicked() {
+                        dist_op = Some(op);
+                    }
+                }
+                if align_button(ui, icons::DISTRIBUTE_H)
+                    .on_hover_text("Distribute horizontal gaps")
+                    .clicked()
+                {
+                    dist_op = Some(Distribute::HorizontalGap);
+                }
+                if align_button(ui, icons::DISTRIBUTE_V)
+                    .on_hover_text("Distribute vertical gaps")
+                    .clicked()
+                {
+                    dist_op = Some(Distribute::VerticalGap);
+                }
+            });
+        });
+        if let Some(op) = dist_op {
+            self.distribute_selection(op);
+        }
+
+        if !can_align {
+            ui.weak("Select 2+ shapes (3+ to distribute).");
+        }
+    }
+
     /// The Layers list: newest on top, with visibility toggle, reorder up/down,
-    /// delete, and click-to-select (shift-click sets the secondary selection).
+    /// delete, and click-to-select (shift-click toggles the shape in the
+    /// multi-selection set).
     fn layers_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Layers");
@@ -676,8 +957,9 @@ impl ContourApp {
             // Paint order: index 0 painted first (bottom). "Newest on top" =>
             // iterate indices in reverse so the last (topmost) is listed first.
             for idx in (0..n).rev() {
-                let primary = self.selected == Some(idx);
-                let secondary = self.selected2 == Some(idx);
+                let primary = self.primary() == Some(idx);
+                // A non-primary member of a multi-selection.
+                let secondary = !primary && self.is_selected(idx);
                 let visible = self.doc.shapes[idx].visible();
                 let label = self.doc.shapes[idx].label();
 
@@ -751,15 +1033,9 @@ impl ContourApp {
         }
         if let Some((i, shift)) = to_select {
             if shift {
-                // Toggle secondary; don't let it equal primary.
-                self.selected2 = if self.selected2 == Some(i) || self.selected == Some(i) {
-                    None
-                } else {
-                    Some(i)
-                };
+                self.toggle_selection(i);
             } else {
-                self.selected = Some(i);
-                self.selected2 = None;
+                self.select_only(Some(i));
             }
         }
         if let Some(i) = to_delete {
@@ -787,14 +1063,13 @@ impl ContourApp {
                 if !s.visible() {
                     continue;
                 }
-                let sel = self.selected == Some(i) || self.selected2 == Some(i);
-                canvas::paint_shape(&painter, &self.view, s, sel);
+                canvas::paint_shape(&painter, &self.view, s, self.is_selected(i));
             }
 
             self.handle_input(&response, &ctx);
 
-            // Editable anchors/handles for a selected path.
-            if let Some(i) = self.selected {
+            // Editable anchors/handles for the primary selected path.
+            if let Some(i) = self.primary() {
                 if let Some(Shape::Path {
                     points, handles, ..
                 }) = self.doc.shapes.get(i)
@@ -850,33 +1125,29 @@ impl ContourApp {
 
         if response.drag_started() {
             if let Some((x, y)) = doc_pos {
-                // First: grabbing an anchor/handle of the already-selected path.
+                // First: grabbing an anchor/handle of the primary path.
                 if let Some(edit) = self.hit_path_edit(x, y) {
                     self.begin_interaction();
                     self.inter.path_edit = Some(edit);
                     self.inter.move_last = None;
                     return;
                 }
-                // Else: pick topmost shape under cursor to begin a move.
+                // Else: pick the topmost shape under the cursor to begin a move.
+                // If it is already part of the selection, keep the whole set so
+                // we drag everything together; otherwise it becomes the single
+                // selection.
                 let hit = self
                     .doc
                     .shapes
                     .iter()
                     .enumerate()
                     .rev()
-                    .find(|(i, s)| s.visible() && (Some(*i) == self.selected || s.hit(x, y, tol)))
-                    .map(|(i, _)| i)
-                    .or_else(|| {
-                        self.doc
-                            .shapes
-                            .iter()
-                            .enumerate()
-                            .rev()
-                            .find(|(_, s)| s.visible() && s.hit(x, y, tol))
-                            .map(|(i, _)| i)
-                    });
+                    .find(|(_, s)| s.visible() && s.hit(x, y, tol))
+                    .map(|(i, _)| i);
                 if let Some(i) = hit {
-                    self.selected = Some(i);
+                    if !self.is_selected(i) {
+                        self.select_only(Some(i));
+                    }
                     self.inter.move_last = Some((x, y));
                     // Snapshot the start of a move so the whole drag is one undo.
                     self.begin_interaction();
@@ -888,16 +1159,19 @@ impl ContourApp {
 
         if response.dragged() {
             if let (Some(edit), Some((x, y)), Some(i)) =
-                (self.inter.path_edit, doc_pos, self.selected)
+                (self.inter.path_edit, doc_pos, self.primary())
             {
                 self.drag_path_edit(i, edit, x, y);
-            } else if let (Some(i), Some((x, y)), Some((lx, ly))) =
-                (self.selected, doc_pos, self.inter.move_last)
-            {
-                if i < self.doc.shapes.len() {
-                    self.doc.shapes[i].translate(x - lx, y - ly);
-                    self.inter.move_last = Some((x, y));
+            } else if let (Some((x, y)), Some((lx, ly))) = (doc_pos, self.inter.move_last) {
+                // Move every selected shape by the same delta.
+                let (dx, dy) = (x - lx, y - ly);
+                let n = self.doc.shapes.len();
+                for &i in &self.selection {
+                    if i < n {
+                        self.doc.shapes[i].translate(dx, dy);
+                    }
                 }
+                self.inter.move_last = Some((x, y));
             } else {
                 // No shape grabbed: drag pans the canvas.
                 self.view.pan += response.drag_delta();
@@ -923,14 +1197,12 @@ impl ContourApp {
                     .map(|(i, _)| i);
                 let shift = response.ctx.input(|inp| inp.modifiers.shift);
                 if shift {
-                    // Shift-click sets/clears the secondary (clip) selection.
-                    self.selected2 = match hit {
-                        Some(i) if Some(i) != self.selected => Some(i),
-                        _ => None,
-                    };
+                    // Shift-click toggles the hit shape in the multi-selection.
+                    if let Some(i) = hit {
+                        self.toggle_selection(i);
+                    }
                 } else {
-                    self.selected = hit;
-                    self.selected2 = None;
+                    self.select_only(hit);
                 }
             }
         }
@@ -973,7 +1245,7 @@ impl ContourApp {
                 if let Some(shape) = self.shape_from_drag(a, b) {
                     self.checkpoint();
                     self.doc.shapes.push(shape);
-                    self.selected = Some(self.doc.shapes.len() - 1);
+                    self.select_only(Some(self.doc.shapes.len() - 1));
                 }
             }
             self.inter.drag_start = None;
@@ -1064,10 +1336,10 @@ impl ContourApp {
         }
     }
 
-    /// Find an editable element (anchor or handle) of the selected path near the
+    /// Find an editable element (anchor or handle) of the primary path near the
     /// document-space cursor. Handles take priority over anchors.
     fn hit_path_edit(&self, x: f32, y: f32) -> Option<PathEdit> {
-        let i = self.selected?;
+        let i = self.primary()?;
         let Some(Shape::Path {
             points, handles, ..
         }) = self.doc.shapes.get(i)
@@ -1097,15 +1369,15 @@ impl ContourApp {
     /// shape type).
     fn selected_is_path(&self) -> bool {
         matches!(
-            self.selected.and_then(|i| self.doc.shapes.get(i)),
+            self.primary().and_then(|i| self.doc.shapes.get(i)),
             Some(Shape::Path { .. })
         )
     }
 
-    /// Index of the anchor of the selected path nearest `(x, y)` within the
+    /// Index of the anchor of the primary path nearest `(x, y)` within the
     /// anchor pick tolerance, if any.
     fn hit_anchor(&self, x: f32, y: f32) -> Option<usize> {
-        let i = self.selected?;
+        let i = self.primary()?;
         let Some(Shape::Path { points, .. }) = self.doc.shapes.get(i) else {
             return None;
         };
@@ -1125,7 +1397,7 @@ impl ContourApp {
     /// Delete the anchor under `(x, y)` on the selected path. Returns `true` if
     /// one was removed (undoable). Refuses to drop below two anchors.
     fn try_delete_anchor(&mut self, x: f32, y: f32) -> bool {
-        let Some(i) = self.selected else {
+        let Some(i) = self.primary() else {
             return false;
         };
         let Some(k) = self.hit_anchor(x, y) else {
@@ -1152,7 +1424,7 @@ impl ContourApp {
     /// Insert an anchor on the path segment under `(x, y)`. Returns `true` if an
     /// anchor was added (undoable).
     fn try_insert_anchor(&mut self, x: f32, y: f32) -> bool {
-        let Some(i) = self.selected else {
+        let Some(i) = self.primary() else {
             return false;
         };
         let Some(Shape::Path { points, closed, .. }) = self.doc.shapes.get(i) else {
@@ -1175,7 +1447,7 @@ impl ContourApp {
     /// Toggle the anchor under `(x, y)` between smooth and corner. Returns `true`
     /// if an anchor was hit and converted (undoable).
     fn try_convert_anchor(&mut self, x: f32, y: f32) -> bool {
-        let Some(i) = self.selected else {
+        let Some(i) = self.primary() else {
             return false;
         };
         let Some(k) = self.hit_anchor(x, y) else {
@@ -1223,6 +1495,11 @@ impl ContourApp {
             );
         }
     }
+}
+
+/// A small square icon button for the align/distribute row.
+fn align_button(ui: &mut egui::Ui, icon: &str) -> egui::Response {
+    ui.add(egui::Button::new(egui::RichText::new(icon).size(16.0)).min_size(Vec2::new(26.0, 26.0)))
 }
 
 fn color_row(ui: &mut egui::Ui, label: &str, rgba: &mut [f32; 4]) {

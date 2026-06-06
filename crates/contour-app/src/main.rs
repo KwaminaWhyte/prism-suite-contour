@@ -4,6 +4,7 @@
 // egui 0.34 deprecates several menu/panel aliases mid-cycle; silence the churn.
 #![allow(deprecated)]
 
+mod align;
 mod app;
 mod boolean;
 mod canvas;
