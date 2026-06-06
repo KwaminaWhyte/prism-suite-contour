@@ -213,6 +213,27 @@ impl ContourApp {
         }
     }
 
+    fn open_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Contour document", &["contour", "json"])
+            .pick_file()
+        {
+            match std::fs::read_to_string(&path) {
+                Ok(json) => match serde_json::from_str(&json) {
+                    Ok(doc) => {
+                        self.doc = doc;
+                        self.history = crate::history::History::default();
+                        self.selected = None;
+                        self.selected2 = None;
+                        log::info!("opened {} from {}", path.display(), path.display());
+                    }
+                    Err(e) => log::error!("parse failed: {e}"),
+                },
+                Err(e) => log::error!("open failed: {e}"),
+            }
+        }
+    }
+
     fn save_dialog(&self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Contour document", &["contour", "json"])
@@ -380,6 +401,10 @@ impl ContourApp {
                 ui.menu_button("File", |ui| {
                     if ui.button("New").clicked() {
                         self.new_document();
+                        ui.close_menu();
+                    }
+                    if ui.button("Open .contour…").clicked() {
+                        self.open_dialog();
                         ui.close_menu();
                     }
                     if ui.button("Save .contour…").clicked() {

@@ -311,8 +311,7 @@ fn fill_then_stroke(
         let mut paint = Paint::default();
         paint.set_color(ts_color(stroke));
         paint.anti_alias = true;
-        let mut s = Stroke::default();
-        s.width = stroke_w;
+        let s = Stroke { width: stroke_w, ..Stroke::default() };
         pixmap.stroke_path(path, &paint, &s, transform, None);
     }
 }
