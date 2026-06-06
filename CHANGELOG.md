@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Snapping, guides, grid & rulers** — a new pure `snap` module (unit-tested
+  nearest-target snapping over per-axis candidate coordinates) wired into the
+  canvas and a new **View** menu:
+  - **Rulers** (on by default) frame the canvas with top and left strips showing
+    document-unit ticks at a zoom-aware "nice" step (1 / 2 / 5 × 10ⁿ), plus an
+    accent cursor read-out tracking the pointer on both rulers.
+  - **Ruler guides** — drag out of the left ruler for a vertical guide, the top
+    ruler for a horizontal one; drag an in-progress guide back onto a ruler to
+    discard it. Guides persist on the `Document` (additive
+    `#[serde(default)]`, so older `.contour` files load with none) and are a
+    single undo step. **View → Clear guides** removes them all.
+  - **Grid** — an optional document grid at the configurable grid size (every
+    fifth line emphasised), auto-hidden when it would be too dense to read.
+  - **Snapping** — moving a selection, creating a shape, or dropping a guide
+    snaps to any combination of the **grid**, **guides**, and **other objects'**
+    edges/centres (each toggled independently in View → Snap to). The closest of
+    the moving box's left/centre/right and top/middle/bottom features wins per
+    axis, à la Illustrator's smart guides; the active snap lines draw in magenta.
+    Snap tolerance is a fixed pixel distance pulled into document units, so it
+    feels identical at every zoom. A dragged shape never snaps to itself.
+
 - **Transform box (rotate / scale / reflect)** — a new pure `transform` module
   (a 2×3 `Affine` matrix with `scale_about` / `rotate_about` / `flip_*` pivot
   constructors, plus handle-drag → scale-factor and rotate-angle helpers; all

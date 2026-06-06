@@ -891,10 +891,26 @@ fn point_in_polygon(px: f32, py: f32, pts: &[(f32, f32)]) -> bool {
     inside
 }
 
-/// The whole vector document: an ordered list of shapes.
+/// A ruler guide: an infinite straight line at a fixed document coordinate,
+/// either vertical (constant `x`) or horizontal (constant `y`). Dragged out of
+/// the rulers and used as a snap target. Stored on the [`Document`] so guides
+/// persist in `.contour` files.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Guide {
+    /// A vertical line at this `x` (in document units).
+    Vertical(f32),
+    /// A horizontal line at this `y` (in document units).
+    Horizontal(f32),
+}
+
+/// The whole vector document: an ordered list of shapes plus any ruler guides.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Document {
     pub shapes: Vec<Shape>,
+    /// User-placed ruler guides. Additive (`#[serde(default)]`) so pre-existing
+    /// `.contour` files — which have no `guides` key — load with none.
+    #[serde(default)]
+    pub guides: Vec<Guide>,
 }
 
 impl Document {
@@ -919,11 +935,27 @@ mod tests {
         assert_eq!(doc.shapes.len(), 2);
         assert!(doc.shapes[0].visible());
         assert!(doc.shapes[1].visible());
+        // A pre-guides document loads with no guides.
+        assert!(doc.guides.is_empty());
         if let Shape::Path { handles, .. } = &doc.shapes[1] {
             assert!(handles.is_empty());
         } else {
             panic!("expected Path");
         }
+    }
+
+    /// Guides round-trip through serde and load back as the same variant.
+    #[test]
+    fn guides_round_trip() {
+        let mut doc = Document::new();
+        doc.guides.push(Guide::Vertical(100.0));
+        doc.guides.push(Guide::Horizontal(42.5));
+        let json = serde_json::to_string(&doc).unwrap();
+        let back: Document = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.guides,
+            vec![Guide::Vertical(100.0), Guide::Horizontal(42.5)]
+        );
     }
 
     /// A path with no handles flattens to its raw points (polyline).

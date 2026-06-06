@@ -12,6 +12,7 @@ mod document;
 mod export;
 mod history;
 mod icons;
+mod snap;
 mod theme;
 mod transform;
 

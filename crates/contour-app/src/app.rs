@@ -4,8 +4,9 @@
 use crate::align::{self, Align, AlignTo, Distribute};
 use crate::boolean::{self, BoolOp};
 use crate::canvas::{self, View};
-use crate::document::{self, Document, LineCap, LineJoin, Shape, StrokeStyle};
+use crate::document::{self, Document, Guide, LineCap, LineJoin, Shape, StrokeStyle};
 use crate::history::History;
+use crate::snap::{self, SnapConfig, SnapFeatures, SnapResult, SnapTargets};
 use crate::transform::{self, Affine, Handle};
 use crate::{export, icons, theme};
 use egui::{Color32, Sense, Vec2};
@@ -101,6 +102,20 @@ struct Interaction {
     path_edit: Option<PathEdit>,
     /// Active free-transform of the selection (scale/rotate via the box handles).
     transform: Option<TransformDrag>,
+    /// A guide being dragged out of (or moved along) a ruler.
+    guide_drag: Option<GuideDrag>,
+    /// Snap lines that fired on the latest drag frame, drawn as smart guides.
+    snap_lines: SnapResult,
+}
+
+/// A ruler guide being created or moved: which orientation, and whether it is a
+/// brand-new pull (so dropping it back on the ruler cancels) or an existing
+/// guide at `existing` being repositioned.
+struct GuideDrag {
+    vertical: bool,
+    /// Index into `doc.guides` of the guide being moved, or `None` while pulling
+    /// a fresh one from the ruler.
+    existing: Option<usize>,
 }
 
 pub struct ContourApp {
@@ -125,6 +140,14 @@ pub struct ContourApp {
     align_to: AlignTo,
     /// Angle (degrees) for the inspector's numeric "Rotate by" control.
     transform_angle: f32,
+    /// Which snapping sources (grid / guides / objects) are active + grid size.
+    snap: SnapConfig,
+    /// Whether to paint the document grid.
+    show_grid: bool,
+    /// Whether to paint the ruler strips (and allow pulling guides from them).
+    show_rulers: bool,
+    /// Whether ruler guides are drawn (independent of whether they snap).
+    show_guides: bool,
     inter: Interaction,
     /// Undo / redo snapshot stack over the whole document.
     history: History,
@@ -148,6 +171,10 @@ impl ContourApp {
             artboard: Size::new(1000, 700),
             align_to: AlignTo::Selection,
             transform_angle: 45.0,
+            snap: SnapConfig::default(),
+            show_grid: false,
+            show_rulers: true,
+            show_guides: true,
             inter: Interaction::default(),
             history: History::new(),
             status: String::new(),
@@ -661,6 +688,99 @@ impl ContourApp {
         }
     }
 
+    // --- Snapping ------------------------------------------------------------
+
+    /// Document-space snap tolerance: a fixed ~6px pulled into document units so
+    /// the snap feels identical at every zoom level.
+    fn snap_tol(&self) -> f32 {
+        6.0 / self.view.zoom
+    }
+
+    /// Gather the candidate snap-target coordinates from the active sources,
+    /// excluding the shapes in `exclude` (the ones being dragged, so a shape
+    /// never snaps to itself). Grid lines are added per-feature by the caller via
+    /// [`snap::grid_targets_near`], so only guides and objects are collected here.
+    fn snap_targets(&self, exclude: &[usize]) -> SnapTargets {
+        let mut t = SnapTargets::default();
+        if self.snap.to_guides {
+            for g in &self.doc.guides {
+                match *g {
+                    Guide::Vertical(x) => t.xs.push(x),
+                    Guide::Horizontal(y) => t.ys.push(y),
+                }
+            }
+        }
+        if self.snap.to_objects {
+            for (i, s) in self.doc.shapes.iter().enumerate() {
+                if exclude.contains(&i) || !s.visible() {
+                    continue;
+                }
+                if let Some(b) = s.bounds() {
+                    // Edges + centre of each other object are snap candidates.
+                    t.xs.push(b.x);
+                    t.xs.push(b.x + b.w * 0.5);
+                    t.xs.push(b.x + b.w);
+                    t.ys.push(b.y);
+                    t.ys.push(b.y + b.h * 0.5);
+                    t.ys.push(b.y + b.h);
+                }
+            }
+        }
+        t
+    }
+
+    /// Compute the snap adjustment for moving the box `bbox` (already offset by
+    /// the raw drag) given the dragged shape indices `exclude`. Folds grid lines
+    /// in per box-feature. Returns a [`SnapResult`] with the delta + fired lines.
+    fn snap_box(&self, bbox: &[f32; 4], exclude: &[usize]) -> SnapResult {
+        if !self.snap.any() {
+            return SnapResult::default();
+        }
+        let tol = self.snap_tol();
+        let features = SnapFeatures::bbox(bbox);
+        let mut targets = self.snap_targets(exclude);
+        if self.snap.to_grid {
+            for &fx in &features.xs {
+                targets
+                    .xs
+                    .extend(snap::grid_targets_near(fx, self.snap.grid));
+            }
+            for &fy in &features.ys {
+                targets
+                    .ys
+                    .extend(snap::grid_targets_near(fy, self.snap.grid));
+            }
+        }
+        if targets.is_empty() {
+            return SnapResult::default();
+        }
+        snap::snap_delta(&features, &targets, tol)
+    }
+
+    /// Snap a single point (e.g. a fresh anchor or a create-drag corner) to the
+    /// active sources, returning the adjusted point.
+    fn snap_point(&self, x: f32, y: f32, exclude: &[usize]) -> (f32, f32) {
+        if !self.snap.any() {
+            return (x, y);
+        }
+        let tol = self.snap_tol();
+        let features = SnapFeatures::point(x, y);
+        let mut targets = self.snap_targets(exclude);
+        if self.snap.to_grid {
+            targets
+                .xs
+                .extend(snap::grid_targets_near(x, self.snap.grid));
+            targets
+                .ys
+                .extend(snap::grid_targets_near(y, self.snap.grid));
+        }
+        if targets.is_empty() {
+            return (x, y);
+        }
+        let r = snap::snap_delta(&features, &targets, tol);
+        (x + r.dx, y + r.dy)
+    }
+
     /// Distribute the selected shapes evenly along the operation's axis as one
     /// undo step. Needs ≥3 selected shapes.
     fn distribute_selection(&mut self, op: Distribute) {
@@ -898,6 +1018,33 @@ impl ContourApp {
                                 ui.close_menu();
                             }
                         });
+                    });
+                });
+                ui.menu_button("View", |ui| {
+                    ui.checkbox(&mut self.show_rulers, "Rulers");
+                    ui.checkbox(&mut self.show_grid, "Grid");
+                    ui.checkbox(&mut self.show_guides, "Guides");
+                    ui.separator();
+                    ui.label(egui::RichText::new("Snap to").weak());
+                    ui.checkbox(&mut self.snap.to_grid, "Grid");
+                    ui.checkbox(&mut self.snap.to_guides, "Guides");
+                    ui.checkbox(&mut self.snap.to_objects, "Objects");
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("Grid size");
+                        ui.add(
+                            egui::DragValue::new(&mut self.snap.grid)
+                                .speed(1.0)
+                                .range(2.0..=500.0)
+                                .suffix(" px"),
+                        );
+                    });
+                    ui.add_enabled_ui(!self.doc.guides.is_empty(), |ui| {
+                        if ui.button("Clear guides").clicked() {
+                            self.checkpoint();
+                            self.doc.guides.clear();
+                            ui.close_menu();
+                        }
                     });
                 });
                 ui.separator();
@@ -1361,6 +1508,27 @@ impl ContourApp {
 
             canvas::handle_zoom(&mut self.view, &response, &ctx);
 
+            let full = response.rect;
+            let cursor = response.hover_pos();
+
+            // The content rectangle excludes the ruler strips when rulers show.
+            let content = if self.show_rulers {
+                egui::Rect::from_min_max(
+                    egui::Pos2::new(
+                        full.left() + canvas::RULER_PX,
+                        full.top() + canvas::RULER_PX,
+                    ),
+                    full.right_bottom(),
+                )
+            } else {
+                full
+            };
+
+            // Grid behind the artboard.
+            if self.show_grid {
+                canvas::paint_grid(&painter, &self.view, content, self.snap.grid);
+            }
+
             // Artboard + all shapes (bottom-up paint order).
             canvas::paint_artboard(
                 &painter,
@@ -1375,7 +1543,18 @@ impl ContourApp {
                 canvas::paint_shape(&painter, &self.view, s, self.is_selected(i));
             }
 
-            self.handle_input(&response, &ctx);
+            // Ruler guides (under handles/overlays, over shapes).
+            if self.show_guides {
+                canvas::paint_guides(&painter, &self.view, content, &self.doc.guides);
+            }
+
+            // Pull / move a guide when the drag began on a ruler strip; otherwise
+            // run the active tool's input as usual.
+            let handled_guide =
+                self.show_rulers && self.handle_ruler_guides(&response, full, content);
+            if !handled_guide {
+                self.handle_input(&response, &ctx);
+            }
 
             // Free-transform box around the selection (Select tool). Drawn under
             // the per-path anchor handles so the anchors stay clickable on top.
@@ -1396,7 +1575,101 @@ impl ContourApp {
             }
 
             self.draw_preview(&painter);
+
+            // Active smart-guide snap lines over everything.
+            canvas::paint_snap_lines(
+                &painter,
+                content,
+                self.inter.snap_lines.line_x,
+                self.inter.snap_lines.line_y,
+                &self.view,
+            );
+
+            // Rulers last so the strips sit on top of any overscrolled content.
+            if self.show_rulers {
+                canvas::paint_rulers(&painter, &self.view, full, cursor);
+            }
         });
+    }
+
+    /// Handle dragging guides out of (or along) the ruler strips. Returns `true`
+    /// when a guide drag is active this frame, so the caller skips tool input.
+    ///
+    /// A drag that *starts* on a ruler strip pulls a new guide (vertical from the
+    /// left ruler, horizontal from the top ruler). Dragging carries it; releasing
+    /// over the rulers cancels (removes a fresh guide / deletes a moved one),
+    /// otherwise it commits at the snapped coordinate. Each guide edit is one
+    /// undo step.
+    fn handle_ruler_guides(
+        &mut self,
+        response: &egui::Response,
+        full: egui::Rect,
+        content: egui::Rect,
+    ) -> bool {
+        let pointer = response.hover_pos();
+        let in_top =
+            pointer.is_some_and(|p| p.y < full.top() + canvas::RULER_PX && p.x >= full.left());
+        let in_left =
+            pointer.is_some_and(|p| p.x < full.left() + canvas::RULER_PX && p.y >= full.top());
+
+        if response.drag_started() && self.inter.guide_drag.is_none() {
+            // A fresh pull only begins inside a ruler strip. Left strip → vertical
+            // guide; top strip → horizontal guide. (The top-left corner counts as
+            // the top strip.)
+            if in_top {
+                self.begin_interaction();
+                self.doc.guides.push(Guide::Horizontal(0.0));
+                self.inter.guide_drag = Some(GuideDrag {
+                    vertical: false,
+                    existing: Some(self.doc.guides.len() - 1),
+                });
+            } else if in_left {
+                self.begin_interaction();
+                self.doc.guides.push(Guide::Vertical(0.0));
+                self.inter.guide_drag = Some(GuideDrag {
+                    vertical: true,
+                    existing: Some(self.doc.guides.len() - 1),
+                });
+            }
+        }
+
+        let (vertical, existing) = match &self.inter.guide_drag {
+            Some(gd) => (gd.vertical, gd.existing),
+            None => return false,
+        };
+
+        if response.dragged() {
+            if let (Some(p), Some(idx)) = (pointer, existing) {
+                let (dx, dy) = self.view.screen_to_doc(p);
+                let snapped = if self.snap.to_grid {
+                    snap::snap_point_to_grid(dx, dy, self.snap.grid, self.snap_tol())
+                } else {
+                    (dx, dy)
+                };
+                if let Some(g) = self.doc.guides.get_mut(idx) {
+                    *g = if vertical {
+                        Guide::Vertical(snapped.0)
+                    } else {
+                        Guide::Horizontal(snapped.1)
+                    };
+                }
+            }
+        }
+
+        if response.drag_stopped() {
+            let over_ruler =
+                in_top || in_left || !content.contains(pointer.unwrap_or(full.center()));
+            if let Some(idx) = existing {
+                if over_ruler && idx < self.doc.guides.len() {
+                    // Dropped back on the ruler: discard this guide.
+                    self.doc.guides.remove(idx);
+                }
+            }
+            self.inter.guide_drag = None;
+            self.commit_interaction();
+        }
+
+        true
     }
 
     fn handle_input(&mut self, response: &egui::Response, ctx: &egui::Context) {
@@ -1492,9 +1765,19 @@ impl ContourApp {
             {
                 self.drag_path_edit(i, edit, x, y);
             } else if let (Some((x, y)), Some((lx, ly))) = (doc_pos, self.inter.move_last) {
-                // Move every selected shape by the same delta.
-                let (dx, dy) = (x - lx, y - ly);
+                // Move every selected shape by the same delta, then snap the
+                // selection's bounding box to grid / guides / other objects.
+                let (mut dx, mut dy) = (x - lx, y - ly);
                 let n = self.doc.shapes.len();
+                let exclude: Vec<usize> = self.selection.clone();
+                self.inter.snap_lines = SnapResult::default();
+                if let Some(b) = self.selection_bbox() {
+                    let moved = [b[0] + dx, b[1] + dy, b[2], b[3]];
+                    let r = self.snap_box(&moved, &exclude);
+                    dx += r.dx;
+                    dy += r.dy;
+                    self.inter.snap_lines = r;
+                }
                 for &i in &self.selection {
                     if i < n {
                         self.doc.shapes[i].translate(dx, dy);
@@ -1511,6 +1794,7 @@ impl ContourApp {
             self.inter.move_last = None;
             self.inter.path_edit = None;
             self.inter.transform = None;
+            self.inter.snap_lines = SnapResult::default();
             // Finalize a coalesced move / anchor-edit / transform (no-op drags
             // are dropped).
             self.commit_interaction();
@@ -1569,12 +1853,29 @@ impl ContourApp {
     }
 
     fn handle_create_drag(&mut self, response: &egui::Response, doc_pos: Option<(f32, f32)>) {
+        // Snap both the start corner and the live corner so a fresh shape lands
+        // on the grid / guides / other objects.
         if response.drag_started() {
-            self.inter.drag_start = doc_pos;
-            self.inter.drag_now = doc_pos;
+            let snapped = doc_pos.map(|(x, y)| self.snap_point(x, y, &[]));
+            self.inter.drag_start = snapped;
+            self.inter.drag_now = snapped;
         }
         if response.dragged() {
-            self.inter.drag_now = doc_pos;
+            if let Some((x, y)) = doc_pos {
+                let (sx, sy) = self.snap_point(x, y, &[]);
+                self.inter.snap_lines = if self.snap.any() {
+                    let f = SnapFeatures::point(x, y);
+                    let mut t = self.snap_targets(&[]);
+                    if self.snap.to_grid {
+                        t.xs.extend(snap::grid_targets_near(x, self.snap.grid));
+                        t.ys.extend(snap::grid_targets_near(y, self.snap.grid));
+                    }
+                    snap::snap_delta(&f, &t, self.snap_tol())
+                } else {
+                    SnapResult::default()
+                };
+                self.inter.drag_now = Some((sx, sy));
+            }
         }
         if response.drag_stopped() {
             if let (Some(a), Some(b)) = (self.inter.drag_start, self.inter.drag_now) {
@@ -1586,6 +1887,7 @@ impl ContourApp {
             }
             self.inter.drag_start = None;
             self.inter.drag_now = None;
+            self.inter.snap_lines = SnapResult::default();
         }
     }
 

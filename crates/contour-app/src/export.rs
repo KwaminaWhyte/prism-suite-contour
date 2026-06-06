@@ -407,6 +407,7 @@ mod tests {
                     visible: true,
                 },
             ],
+            ..Default::default()
         }
     }
 
@@ -458,6 +459,7 @@ mod tests {
                 },
                 visible: true,
             }],
+            ..Default::default()
         }
     }
 

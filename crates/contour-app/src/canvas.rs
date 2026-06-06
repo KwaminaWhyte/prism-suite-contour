@@ -405,6 +405,232 @@ pub fn paint_artboard(painter: &egui::Painter, view: &View, w: f32, h: f32) {
     );
 }
 
+/// Width of the ruler strips (top and left), in screen pixels.
+pub const RULER_PX: f32 = 18.0;
+
+/// Document-space coordinate of a guide, classified by orientation, for drawing.
+use crate::document::Guide;
+
+/// Paint the document grid across `clip`, every `spacing` document units. Skips
+/// drawing when the on-screen spacing would be too dense to read.
+pub fn paint_grid(painter: &egui::Painter, view: &View, clip: Rect, spacing: f32) {
+    if spacing <= 0.0 {
+        return;
+    }
+    let step_px = spacing * view.zoom;
+    if step_px < 4.0 {
+        return; // too dense — would just be a grey wash
+    }
+    let minor = Stroke::new(1.0, Color32::from_rgba_unmultiplied(0x4a, 0x52, 0x5c, 90));
+    let major = Stroke::new(1.0, Color32::from_rgba_unmultiplied(0x5a, 0x64, 0x70, 130));
+
+    // Document-space extent currently visible.
+    let (dx0, dy0) = view.screen_to_doc(clip.left_top());
+    let (dx1, dy1) = view.screen_to_doc(clip.right_bottom());
+
+    let start_i = (dx0 / spacing).floor() as i64;
+    let end_i = (dx1 / spacing).ceil() as i64;
+    for i in start_i..=end_i {
+        let x = i as f32 * spacing;
+        let sx = view.doc_to_screen((x, 0.0)).x;
+        let stroke = if i % 5 == 0 { major } else { minor };
+        painter.line_segment(
+            [Pos2::new(sx, clip.top()), Pos2::new(sx, clip.bottom())],
+            stroke,
+        );
+    }
+    let start_j = (dy0 / spacing).floor() as i64;
+    let end_j = (dy1 / spacing).ceil() as i64;
+    for j in start_j..=end_j {
+        let y = j as f32 * spacing;
+        let sy = view.doc_to_screen((0.0, y)).y;
+        let stroke = if j % 5 == 0 { major } else { minor };
+        painter.line_segment(
+            [Pos2::new(clip.left(), sy), Pos2::new(clip.right(), sy)],
+            stroke,
+        );
+    }
+}
+
+/// Paint the document's ruler guides (full-canvas cyan lines) clipped to `clip`.
+pub fn paint_guides(painter: &egui::Painter, view: &View, clip: Rect, guides: &[Guide]) {
+    let stroke = Stroke::new(1.0, Color32::from_rgb(0x2d, 0xc6, 0xd6));
+    for g in guides {
+        match *g {
+            Guide::Vertical(x) => {
+                let sx = view.doc_to_screen((x, 0.0)).x;
+                if sx >= clip.left() && sx <= clip.right() {
+                    painter.line_segment(
+                        [Pos2::new(sx, clip.top()), Pos2::new(sx, clip.bottom())],
+                        stroke,
+                    );
+                }
+            }
+            Guide::Horizontal(y) => {
+                let sy = view.doc_to_screen((0.0, y)).y;
+                if sy >= clip.top() && sy <= clip.bottom() {
+                    painter.line_segment(
+                        [Pos2::new(clip.left(), sy), Pos2::new(clip.right(), sy)],
+                        stroke,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Paint a transient snap line (magenta, full-canvas) where the active drag is
+/// snapping, like Illustrator's smart guides.
+pub fn paint_snap_lines(
+    painter: &egui::Painter,
+    clip: Rect,
+    line_x: Option<f32>,
+    line_y: Option<f32>,
+    view: &View,
+) {
+    let stroke = Stroke::new(1.0, Color32::from_rgb(0xff, 0x3d, 0xb5));
+    if let Some(x) = line_x {
+        let sx = view.doc_to_screen((x, 0.0)).x;
+        painter.line_segment(
+            [Pos2::new(sx, clip.top()), Pos2::new(sx, clip.bottom())],
+            stroke,
+        );
+    }
+    if let Some(y) = line_y {
+        let sy = view.doc_to_screen((0.0, y)).y;
+        painter.line_segment(
+            [Pos2::new(clip.left(), sy), Pos2::new(clip.right(), sy)],
+            stroke,
+        );
+    }
+}
+
+/// Paint the top + left ruler strips with document-unit tick labels, plus a
+/// position read-out tracking `cursor` (when present). The caller derives the
+/// inner content rectangle (the canvas minus the [`RULER_PX`] strips) itself.
+pub fn paint_rulers(painter: &egui::Painter, view: &View, full: Rect, cursor: Option<Pos2>) {
+    let bg = Color32::from_rgb(0x20, 0x23, 0x28);
+    let tick = Color32::from_rgb(0x6a, 0x72, 0x7c);
+    let text_col = Color32::from_rgb(0x9a, 0xa1, 0xab);
+    let font = egui::FontId::monospace(9.0);
+
+    let top = Rect::from_min_max(
+        full.left_top(),
+        Pos2::new(full.right(), full.top() + RULER_PX),
+    );
+    let left = Rect::from_min_max(
+        full.left_top(),
+        Pos2::new(full.left() + RULER_PX, full.bottom()),
+    );
+    painter.rect_filled(top, 0.0, bg);
+    painter.rect_filled(left, 0.0, bg);
+
+    // Choose a "nice" label step so labels never overlap (~50px apart minimum).
+    let step = nice_ruler_step(view.zoom);
+    let content = Rect::from_min_max(
+        Pos2::new(full.left() + RULER_PX, full.top() + RULER_PX),
+        full.right_bottom(),
+    );
+
+    // Top ruler ticks (vertical lines + x labels).
+    let (dx0, _) = view.screen_to_doc(content.left_top());
+    let (dx1, _) = view.screen_to_doc(content.right_bottom());
+    let mut i = (dx0 / step).floor() as i64;
+    let end_i = (dx1 / step).ceil() as i64;
+    while i <= end_i {
+        let x = i as f32 * step;
+        let sx = view.doc_to_screen((x, 0.0)).x;
+        if sx >= content.left() {
+            painter.line_segment(
+                [
+                    Pos2::new(sx, top.bottom() - 5.0),
+                    Pos2::new(sx, top.bottom()),
+                ],
+                Stroke::new(1.0, tick),
+            );
+            painter.text(
+                Pos2::new(sx + 2.0, top.top() + 1.0),
+                egui::Align2::LEFT_TOP,
+                format!("{}", x as i64),
+                font.clone(),
+                text_col,
+            );
+        }
+        i += 1;
+    }
+
+    // Left ruler ticks (horizontal lines + y labels, rotated read as plain text).
+    let (_, dy0) = view.screen_to_doc(content.left_top());
+    let (_, dy1) = view.screen_to_doc(content.right_bottom());
+    let mut j = (dy0 / step).floor() as i64;
+    let end_j = (dy1 / step).ceil() as i64;
+    while j <= end_j {
+        let y = j as f32 * step;
+        let sy = view.doc_to_screen((0.0, y)).y;
+        if sy >= content.top() {
+            painter.line_segment(
+                [
+                    Pos2::new(left.right() - 5.0, sy),
+                    Pos2::new(left.right(), sy),
+                ],
+                Stroke::new(1.0, tick),
+            );
+            painter.text(
+                Pos2::new(left.left() + 1.0, sy + 1.0),
+                egui::Align2::LEFT_TOP,
+                format!("{}", y as i64),
+                font.clone(),
+                text_col,
+            );
+        }
+        j += 1;
+    }
+
+    // Cursor position markers on each ruler.
+    if let Some(c) = cursor {
+        if content.contains(c) {
+            let marker = Stroke::new(1.0, theme::accent());
+            painter.line_segment(
+                [Pos2::new(c.x, top.top()), Pos2::new(c.x, top.bottom())],
+                marker,
+            );
+            painter.line_segment(
+                [Pos2::new(left.left(), c.y), Pos2::new(left.right(), c.y)],
+                marker,
+            );
+        }
+    }
+
+    // Corner square.
+    painter.rect_filled(
+        Rect::from_min_max(
+            full.left_top(),
+            Pos2::new(full.left() + RULER_PX, full.top() + RULER_PX),
+        ),
+        0.0,
+        Color32::from_rgb(0x2a, 0x2e, 0x34),
+    );
+}
+
+/// Pick a human-friendly ruler label step (1/2/5 × 10^k document units) so that
+/// labels are at least ~50 screen pixels apart at the current zoom.
+pub fn nice_ruler_step(zoom: f32) -> f32 {
+    let target_px = 50.0;
+    let raw = target_px / zoom.max(1e-3); // document units per ~50px
+    let mag = 10f32.powf(raw.max(1.0).log10().floor());
+    let norm = raw / mag;
+    let mult = if norm <= 1.0 {
+        1.0
+    } else if norm <= 2.0 {
+        2.0
+    } else if norm <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    (mult * mag).max(1.0)
+}
+
 /// Handle scroll-to-zoom anchored at the cursor. Mutates `view`.
 pub fn handle_zoom(view: &mut View, response: &egui::Response, ctx: &egui::Context) {
     let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
@@ -420,4 +646,29 @@ pub fn handle_zoom(view: &mut View, response: &egui::Response, ctx: &egui::Conte
     // Re-anchor so the doc point under the cursor stays put.
     view.pan.x = cursor.x - before.0 * view.zoom;
     view.pan.y = cursor.y - before.1 * view.zoom;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ruler_step_is_nice_and_scales_with_zoom() {
+        // At 1× zoom, ~50px target ≈ 50 doc units → snaps to 50.
+        assert_eq!(nice_ruler_step(1.0), 50.0);
+        // Zoomed in (4×), each doc unit is wider, so fewer units per label.
+        assert!(nice_ruler_step(4.0) < nice_ruler_step(1.0));
+        // Zoomed way out, the step grows.
+        assert!(nice_ruler_step(0.1) > nice_ruler_step(1.0));
+        // Step is always a 1/2/5 × 10^k value (mantissa in {1,2,5,10}).
+        for z in [0.05_f32, 0.3, 1.0, 2.5, 9.0, 30.0] {
+            let s = nice_ruler_step(z);
+            let mag = 10f32.powf(s.log10().floor());
+            let m = (s / mag).round();
+            assert!(
+                [1.0, 2.0, 5.0, 10.0].contains(&m),
+                "step {s} (mantissa {m}) at zoom {z} is not 1/2/5"
+            );
+        }
+    }
 }

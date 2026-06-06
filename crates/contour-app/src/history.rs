@@ -140,6 +140,7 @@ mod tests {
     fn doc_with(n: usize) -> Document {
         Document {
             shapes: (0..n).map(|i| rect(i as f32)).collect(),
+            ..Default::default()
         }
     }
 
