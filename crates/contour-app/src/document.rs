@@ -7,7 +7,7 @@
 //! through the color pickers and JSON.
 
 use kurbo::{BezPath, PathEl, Point, Shape as KurboShape};
-use pigment_core::geometry::Rect as CoreRect;
+use prism_core::geometry::Rect as CoreRect;
 use serde::{Deserialize, Serialize};
 
 /// One drawable vector primitive.
@@ -53,7 +53,7 @@ impl Shape {
 
     /// Axis-aligned bounding box in document space.
     ///
-    /// Returns a `pigment_core::geometry::Rect` to exercise the shared suite
+    /// Returns a `prism_core::geometry::Rect` to exercise the shared suite
     /// primitive. Returns `None` for empty paths.
     pub fn bounds(&self) -> Option<CoreRect> {
         let bbox = |pts: &[(f32, f32)]| -> Option<CoreRect> {

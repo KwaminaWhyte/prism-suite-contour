@@ -5,7 +5,7 @@ use crate::document::Shape;
 use crate::theme;
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 
-use pigment_core::color::{linear_to_srgb, srgb_to_linear};
+use prism_core::color::{linear_to_srgb, srgb_to_linear};
 
 /// Maps document space <-> screen space. `pan` is the screen position of the
 /// document origin; `zoom` is screen-pixels per document-unit.
@@ -41,7 +41,7 @@ impl View {
 ///
 /// egui's `Color32::from_rgba_unmultiplied` expects sRGB bytes, so we just
 /// scale. The `srgb_to_linear`/`linear_to_srgb` round-trip below is a no-op in
-/// value but demonstrates the shared color helpers from `pigment-core` at the
+/// value but demonstrates the shared color helpers from `prism-core` at the
 /// app boundary (and keeps the import meaningful).
 pub fn to_color32(c: [f32; 4]) -> Color32 {
     let enc = |v: f32| (linear_to_srgb(srgb_to_linear(v.clamp(0.0, 1.0))) * 255.0).round() as u8;

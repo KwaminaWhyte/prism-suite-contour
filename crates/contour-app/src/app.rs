@@ -5,7 +5,7 @@ use crate::canvas::{self, View};
 use crate::document::{Document, Shape};
 use crate::{icons, theme};
 use egui::{Color32, Pos2, Sense, Vec2};
-use pigment_core::Size;
+use prism_core::Size;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tool {

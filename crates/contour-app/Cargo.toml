@@ -10,7 +10,7 @@ name = "contour"
 path = "src/main.rs"
 
 [dependencies]
-pigment-core.workspace = true
+prism-core.workspace = true
 serde.workspace = true
 log.workspace = true
 env_logger.workspace = true

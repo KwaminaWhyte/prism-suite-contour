@@ -15,9 +15,9 @@ env_logger = "0.11"
 anyhow = "1"
 
 # Shared foundation crate from the sibling Pigment app (the suite's common core).
-pigment-core = { path = "../pigment/crates/pigment-core" }
+prism-core = { path = "../crates/prism-core" }
 
-# `pigment-core` declares `[lints] workspace = true`, which resolves against
+# `prism-core` declares `[lints] workspace = true`, which resolves against
 # whichever workspace builds it. Mirror Pigment's lint config so building from
 # Contour's workspace doesn't error on undefined `workspace.lints`.
 [workspace.lints.clippy]
