@@ -72,7 +72,7 @@ Sources: crates.io/crates/vtracer · lib.rs/crates/vtracer (VisionCortex)
   Graphic styles = a saved Appearance.
 
 Sources: helpx.adobe.com/illustrator (gradients, mesh objects, appearance, what's-new 2025) ·
-en.wikipedia.org/wiki/Coons_patch · ../pigment/RESEARCH.md §7–8 (prism-fx, layer-style passes)
+en.wikipedia.org/wiki/Coons_patch · [Pigment RESEARCH.md §7–8](https://github.com/KwaminaWhyte/prism-suite-pigment/blob/main/RESEARCH.md) (prism-fx, layer-style passes)
 
 ## 5. Type & fonts
 
@@ -121,4 +121,4 @@ stack. Vector-relevant uses: **subject/auto-select** and matting (BiRefNet/SAM) 
 `vtracer`). Models are not bundled — fetched on first use behind a feature flag with license surfacing;
 every AI tool degrades gracefully when models/GPU are absent. (Details: [Pigment RESEARCH.md §10](https://github.com/KwaminaWhyte/prism-suite-pigment/blob/main/RESEARCH.md).)
 
-Sources: github.com/pykeio/ort · github.com/ZhengPeng7/BiRefNet · ../pigment/RESEARCH.md §10
+Sources: github.com/pykeio/ort · github.com/ZhengPeng7/BiRefNet · [Pigment RESEARCH.md §10](https://github.com/KwaminaWhyte/prism-suite-pigment/blob/main/RESEARCH.md)
