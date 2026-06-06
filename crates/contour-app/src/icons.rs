@@ -46,3 +46,23 @@ pub const PEN: &str = ph::PEN_NIB;
 
 /// Delete / trash.
 pub const TRASH: &str = ph::TRASH;
+
+// --- Layers panel -----------------------------------------------------------
+
+/// Visible (shown) layer.
+pub const EYE: &str = ph::EYE;
+/// Hidden layer.
+pub const EYE_SLASH: &str = ph::EYE_SLASH;
+/// Move layer up in paint order.
+pub const CARET_UP: &str = ph::CARET_UP;
+/// Move layer down in paint order.
+pub const CARET_DOWN: &str = ph::CARET_DOWN;
+
+// --- Boolean ops ------------------------------------------------------------
+
+/// Union of two shapes.
+pub const UNITE: &str = ph::UNITE;
+/// Intersection of two shapes.
+pub const INTERSECT: &str = ph::INTERSECT;
+/// Difference (subtract) of two shapes.
+pub const EXCLUDE: &str = ph::EXCLUDE;

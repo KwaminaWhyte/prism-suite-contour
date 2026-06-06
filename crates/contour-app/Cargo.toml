@@ -19,6 +19,13 @@ anyhow.workspace = true
 serde_json = "1"
 kurbo = "0.11"
 
+# Software rasterizer for PNG export. 0.11 matches the version already present
+# in the dependency graph (pulled transitively), avoiding a duplicate build.
+tiny-skia = "0.11"
+
+# Boolean polygon operations (Union/Intersect/Difference) for the Object menu.
+i_overlay = "7"
+
 # eframe with the default glow backend — Contour draws vectors through egui's
 # painter, so no custom GPU pass is needed.
 eframe = "0.34"

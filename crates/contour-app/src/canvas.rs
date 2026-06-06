@@ -1,8 +1,9 @@
 //! The drawing surface: pan/zoom transform, per-frame shape painting, and tool
 //! interaction (create / select / move / pen).
 
-use crate::document::Shape;
+use crate::document::{self, Shape};
 use crate::theme;
+use egui::epaint::CubicBezierShape;
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 
 use prism_core::color::{linear_to_srgb, srgb_to_linear};
@@ -61,6 +62,7 @@ pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected
             fill,
             stroke,
             stroke_w,
+            ..
         } => {
             let r = doc_rect(view, rect);
             painter.rect_filled(r, 0.0, to_color32(*fill));
@@ -78,6 +80,7 @@ pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected
             fill,
             stroke,
             stroke_w,
+            ..
         } => {
             let pts = ellipse_points(view, rect, 48);
             painter.add(egui::Shape::convex_polygon(
@@ -95,6 +98,7 @@ pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected
             p1,
             stroke,
             stroke_w,
+            ..
         } => {
             painter.line_segment(
                 [view.doc_to_screen(*p0), view.doc_to_screen(*p1)],
@@ -107,20 +111,12 @@ pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected
             fill,
             stroke,
             stroke_w,
+            handles,
+            ..
         } => {
-            let pts: Vec<Pos2> = points.iter().map(|&p| view.doc_to_screen(p)).collect();
-            if pts.len() >= 2 {
-                let stroke32 = Stroke::new(stroke_w.max(0.5) * view.zoom, to_color32(*stroke));
-                if *closed {
-                    painter.add(egui::Shape::convex_polygon(
-                        pts.clone(),
-                        to_color32(*fill),
-                        stroke32,
-                    ));
-                } else {
-                    painter.add(egui::Shape::line(pts.clone(), stroke32));
-                }
-            }
+            paint_path(
+                painter, view, points, handles, *closed, *fill, *stroke, *stroke_w,
+            );
         }
     }
 
@@ -134,6 +130,105 @@ pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected
                 egui::StrokeKind::Outside,
             );
         }
+    }
+}
+
+/// Paint a (possibly cubic-bezier) path. Straight segments use a polyline /
+/// polygon; curved segments are drawn with egui's [`CubicBezierShape`].
+#[allow(clippy::too_many_arguments)]
+pub fn paint_path(
+    painter: &egui::Painter,
+    view: &View,
+    points: &[(f32, f32)],
+    handles: &[(f32, f32)],
+    closed: bool,
+    fill: [f32; 4],
+    stroke: [f32; 4],
+    stroke_w: f32,
+) {
+    let n = points.len();
+    if n < 2 {
+        return;
+    }
+    let stroke32 = Stroke::new(stroke_w.max(0.5) * view.zoom, to_color32(stroke));
+    let any_curve = handles.iter().any(|&(hx, hy)| hx != 0.0 || hy != 0.0);
+
+    // Fill: flatten to a polygon (closed paths only).
+    if closed {
+        let flat: Vec<Pos2> = document::flatten(points, handles, true)
+            .iter()
+            .map(|&p| view.doc_to_screen(p))
+            .collect();
+        if flat.len() >= 3 {
+            painter.add(egui::Shape::convex_polygon(
+                flat,
+                to_color32(fill),
+                Stroke::NONE,
+            ));
+        }
+    }
+
+    if !any_curve {
+        // Pure polyline / polygon outline.
+        let pts: Vec<Pos2> = points.iter().map(|&p| view.doc_to_screen(p)).collect();
+        if closed {
+            let mut ring = pts.clone();
+            ring.push(pts[0]);
+            painter.add(egui::Shape::line(ring, stroke32));
+        } else {
+            painter.add(egui::Shape::line(pts, stroke32));
+        }
+        return;
+    }
+
+    // Stroke each segment, choosing line vs. cubic per segment.
+    let seg_count = if closed { n } else { n - 1 };
+    for i in 0..seg_count {
+        let a = points[i];
+        let b = points[(i + 1) % n];
+        let ha = document::handle_at(handles, i);
+        let hb = document::handle_at(handles, (i + 1) % n);
+        let a_corner = ha.0 == 0.0 && ha.1 == 0.0;
+        let b_corner = hb.0 == 0.0 && hb.1 == 0.0;
+        if a_corner && b_corner {
+            painter.line_segment([view.doc_to_screen(a), view.doc_to_screen(b)], stroke32);
+        } else {
+            let c1 = view.doc_to_screen((a.0 + ha.0, a.1 + ha.1));
+            let c2 = view.doc_to_screen((b.0 - hb.0, b.1 - hb.1));
+            let bez = CubicBezierShape::from_points_stroke(
+                [view.doc_to_screen(a), c1, c2, view.doc_to_screen(b)],
+                false,
+                Color32::TRANSPARENT,
+                stroke32,
+            );
+            painter.add(bez);
+        }
+    }
+}
+
+/// Draw editable anchor dots and tangent handles for a selected path. Returns
+/// nothing; pure overlay. Anchor radius ~4px, handle dots ~3px.
+pub fn paint_path_handles(
+    painter: &egui::Painter,
+    view: &View,
+    points: &[(f32, f32)],
+    handles: &[(f32, f32)],
+) {
+    for (i, &p) in points.iter().enumerate() {
+        let anchor = view.doc_to_screen(p);
+        let h = document::handle_at(handles, i);
+        if h.0 != 0.0 || h.1 != 0.0 {
+            let out = view.doc_to_screen((p.0 + h.0, p.1 + h.1));
+            let inp = view.doc_to_screen((p.0 - h.0, p.1 - h.1));
+            let line = Stroke::new(1.0, theme::accent());
+            painter.line_segment([anchor, out], line);
+            painter.line_segment([anchor, inp], line);
+            painter.circle_filled(out, 3.5, theme::accent());
+            painter.circle_filled(inp, 3.5, theme::accent());
+        }
+        // Anchor: filled white square-ish dot with accent ring.
+        painter.circle_filled(anchor, 4.0, Color32::WHITE);
+        painter.circle_stroke(anchor, 4.0, Stroke::new(1.5, theme::accent()));
     }
 }
 

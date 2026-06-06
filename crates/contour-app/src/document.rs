@@ -10,7 +10,17 @@ use kurbo::{BezPath, PathEl, Point, Shape as KurboShape};
 use prism_core::geometry::Rect as CoreRect;
 use serde::{Deserialize, Serialize};
 
+/// Default for the additive `visible` field so pre-existing `.contour` files
+/// (which lack it) deserialize as visible.
+fn default_true() -> bool {
+    true
+}
+
 /// One drawable vector primitive.
+///
+/// Every variant carries an additive `visible` flag (`#[serde(default)]`) so
+/// older documents keep loading. The `Path` variant additionally carries an
+/// additive `handles` list describing per-anchor cubic-bezier tangents.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Shape {
     Rect {
@@ -18,18 +28,24 @@ pub enum Shape {
         fill: [f32; 4],
         stroke: [f32; 4],
         stroke_w: f32,
+        #[serde(default = "default_true")]
+        visible: bool,
     },
     Ellipse {
         rect: [f32; 4],
         fill: [f32; 4],
         stroke: [f32; 4],
         stroke_w: f32,
+        #[serde(default = "default_true")]
+        visible: bool,
     },
     Line {
         p0: (f32, f32),
         p1: (f32, f32),
         stroke: [f32; 4],
         stroke_w: f32,
+        #[serde(default = "default_true")]
+        visible: bool,
     },
     Path {
         points: Vec<(f32, f32)>,
@@ -37,6 +53,17 @@ pub enum Shape {
         fill: [f32; 4],
         stroke: [f32; 4],
         stroke_w: f32,
+        /// Per-anchor *out-tangent* handle, stored as an offset (delta) from the
+        /// anchor in document space. The in-tangent is the mirror (`-offset`),
+        /// giving a smooth symmetric handle. `(0.0, 0.0)` means a corner anchor
+        /// (the adjacent segments are straight lines).
+        ///
+        /// Additive: defaults to empty, in which case the path is a polyline and
+        /// loads identically to the v0 model.
+        #[serde(default)]
+        handles: Vec<(f32, f32)>,
+        #[serde(default = "default_true")]
+        visible: bool,
     },
 }
 
@@ -48,6 +75,26 @@ impl Shape {
             Shape::Ellipse { .. } => "Ellipse",
             Shape::Line { .. } => "Line",
             Shape::Path { .. } => "Path",
+        }
+    }
+
+    /// Whether the shape is drawn / exported. Hidden shapes are skipped.
+    pub fn visible(&self) -> bool {
+        match self {
+            Shape::Rect { visible, .. }
+            | Shape::Ellipse { visible, .. }
+            | Shape::Line { visible, .. }
+            | Shape::Path { visible, .. } => *visible,
+        }
+    }
+
+    /// Flip the visibility flag.
+    pub fn toggle_visible(&mut self) {
+        match self {
+            Shape::Rect { visible, .. }
+            | Shape::Ellipse { visible, .. }
+            | Shape::Line { visible, .. }
+            | Shape::Path { visible, .. } => *visible = !*visible,
         }
     }
 
@@ -73,14 +120,18 @@ impl Shape {
                 Some(CoreRect::new(rect[0], rect[1], rect[2], rect[3]))
             }
             Shape::Line { p0, p1, .. } => bbox(&[*p0, *p1]),
-            Shape::Path { points, closed, .. } => {
+            Shape::Path {
+                points,
+                closed,
+                handles,
+                ..
+            } => {
                 if points.is_empty() {
                     return None;
                 }
-                // Build a kurbo BezPath (the pen-tool path model) and let kurbo
-                // compute the tight bounding box. Lays groundwork for real bezier
-                // segments later.
-                let bp = bez_path(points, *closed);
+                // Build the kurbo BezPath (honoring any bezier handles) and let
+                // kurbo compute the tight bounding box.
+                let bp = bez_path(points, handles, *closed);
                 let r = bp.bounding_box();
                 Some(CoreRect::new(
                     r.x0 as f32,
@@ -92,7 +143,8 @@ impl Shape {
         }
     }
 
-    /// Translate every coordinate by `(dx, dy)` in document space.
+    /// Translate every coordinate by `(dx, dy)` in document space. Handles are
+    /// offsets, so they are unaffected by translation.
     pub fn translate(&mut self, dx: f32, dy: f32) {
         match self {
             Shape::Rect { rect, .. } | Shape::Ellipse { rect, .. } => {
@@ -129,18 +181,25 @@ impl Shape {
                 nx * nx + ny * ny <= 1.0
             }
             Shape::Line { p0, p1, .. } => dist_to_segment(x, y, *p0, *p1) <= tol.max(2.0),
-            Shape::Path { points, closed, .. } => {
-                if *closed && points.len() >= 3 && point_in_polygon(x, y, points) {
+            Shape::Path {
+                points,
+                closed,
+                handles,
+                ..
+            } => {
+                // Hit-test against the flattened polyline so curves are clickable.
+                let flat = flatten(points, handles, *closed);
+                if *closed && flat.len() >= 3 && point_in_polygon(x, y, &flat) {
                     return true;
                 }
-                let n = points.len();
+                let n = flat.len();
                 if n < 2 {
-                    return n == 1 && (x - points[0].0).hypot(y - points[0].1) <= tol.max(2.0);
+                    return n == 1 && (x - flat[0].0).hypot(y - flat[0].1) <= tol.max(2.0);
                 }
                 let last = if *closed { n } else { n - 1 };
                 for i in 0..last {
-                    let a = points[i];
-                    let b = points[(i + 1) % n];
+                    let a = flat[i];
+                    let b = flat[(i + 1) % n];
                     if dist_to_segment(x, y, a, b) <= tol.max(2.0) {
                         return true;
                     }
@@ -151,21 +210,67 @@ impl Shape {
     }
 }
 
-/// Build a kurbo [`BezPath`] from polyline points (the v0 pen model uses
-/// straight segments; this is the seam where bezier control points slot in).
-fn bez_path(points: &[(f32, f32)], closed: bool) -> BezPath {
+/// The out-tangent handle offset for anchor `i`, or `(0, 0)` (a corner) when no
+/// handle is stored.
+pub fn handle_at(handles: &[(f32, f32)], i: usize) -> (f32, f32) {
+    handles.get(i).copied().unwrap_or((0.0, 0.0))
+}
+
+/// Build a kurbo [`BezPath`] from anchor points and per-anchor out-tangent
+/// handle offsets. A segment between anchors `a` and `b` is a `CurveTo` when
+/// either endpoint carries a non-zero handle, otherwise a straight `LineTo`.
+///
+/// The out-handle of `a` is `a + handle[a]`; the in-handle of `b` is
+/// `b - handle[b]` (mirror), producing smooth symmetric tangents.
+pub fn bez_path(points: &[(f32, f32)], handles: &[(f32, f32)], closed: bool) -> BezPath {
     let mut els: Vec<PathEl> = Vec::with_capacity(points.len() + 2);
-    let mut it = points.iter();
-    if let Some(&(x, y)) = it.next() {
-        els.push(PathEl::MoveTo(Point::new(x as f64, y as f64)));
-        for &(x, y) in it {
-            els.push(PathEl::LineTo(Point::new(x as f64, y as f64)));
-        }
-        if closed {
-            els.push(PathEl::ClosePath);
+    let n = points.len();
+    if n == 0 {
+        return BezPath::from_vec(els);
+    }
+    let pt = |p: (f32, f32)| Point::new(p.0 as f64, p.1 as f64);
+    els.push(PathEl::MoveTo(pt(points[0])));
+
+    let seg_count = if closed { n } else { n - 1 };
+    for i in 0..seg_count {
+        let a = points[i];
+        let b = points[(i + 1) % n];
+        let ha = handle_at(handles, i);
+        let hb = handle_at(handles, (i + 1) % n);
+        let a_corner = ha.0 == 0.0 && ha.1 == 0.0;
+        let b_corner = hb.0 == 0.0 && hb.1 == 0.0;
+        if a_corner && b_corner {
+            els.push(PathEl::LineTo(pt(b)));
+        } else {
+            let c1 = (a.0 + ha.0, a.1 + ha.1); // out-handle of a
+            let c2 = (b.0 - hb.0, b.1 - hb.1); // in-handle of b (mirror)
+            els.push(PathEl::CurveTo(pt(c1), pt(c2), pt(b)));
         }
     }
+    if closed {
+        els.push(PathEl::ClosePath);
+    }
     BezPath::from_vec(els)
+}
+
+/// Flatten a (possibly bezier) path into a polyline of document-space points.
+/// Used for hit-testing, polygon fills, and boolean-op input.
+pub fn flatten(points: &[(f32, f32)], handles: &[(f32, f32)], closed: bool) -> Vec<(f32, f32)> {
+    let any_curve = handles.iter().any(|&(hx, hy)| hx != 0.0 || hy != 0.0);
+    if !any_curve {
+        return points.to_vec();
+    }
+    let bp = bez_path(points, handles, closed);
+    let mut out: Vec<(f32, f32)> = Vec::new();
+    // kurbo flattens to line segments at the given tolerance (document units).
+    bp.flatten(0.25, |el| match el {
+        PathEl::MoveTo(p) => out.push((p.x as f32, p.y as f32)),
+        PathEl::LineTo(p) => out.push((p.x as f32, p.y as f32)),
+        PathEl::ClosePath => {}
+        // flatten only emits MoveTo/LineTo/ClosePath.
+        _ => {}
+    });
+    out
 }
 
 fn point_in_rect(x: f32, y: f32, rect: &[f32; 4], tol: f32) -> bool {
@@ -222,5 +327,46 @@ pub struct Document {
 impl Document {
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Old `.contour` JSON (pre-`visible`/`handles`) must still deserialize,
+    /// defaulting `visible = true` and `handles = []`.
+    #[test]
+    fn loads_legacy_document() {
+        let json = r#"{"shapes":[
+            {"Rect":{"rect":[0,0,10,10],"fill":[1,0,0,1],"stroke":[0,0,0,1],"stroke_w":2}},
+            {"Path":{"points":[[0,0],[10,0],[10,10]],"closed":true,"fill":[0,1,0,1],"stroke":[0,0,0,1],"stroke_w":1}}
+        ]}"#;
+        let doc: Document = serde_json::from_str(json).unwrap();
+        assert_eq!(doc.shapes.len(), 2);
+        assert!(doc.shapes[0].visible());
+        assert!(doc.shapes[1].visible());
+        if let Shape::Path { handles, .. } = &doc.shapes[1] {
+            assert!(handles.is_empty());
+        } else {
+            panic!("expected Path");
+        }
+    }
+
+    /// A path with no handles flattens to its raw points (polyline).
+    #[test]
+    fn flatten_polyline_is_identity() {
+        let pts = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)];
+        let out = flatten(&pts, &[], false);
+        assert_eq!(out, pts);
+    }
+
+    /// A path with a non-zero handle flattens into more segments (a curve).
+    #[test]
+    fn flatten_curve_subdivides() {
+        let pts = vec![(0.0, 0.0), (100.0, 0.0)];
+        let handles = vec![(0.0, 50.0), (0.0, 50.0)];
+        let out = flatten(&pts, &handles, false);
+        assert!(out.len() > 2, "curve should subdivide, got {}", out.len());
     }
 }

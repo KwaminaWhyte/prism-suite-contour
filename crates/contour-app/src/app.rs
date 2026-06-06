@@ -1,10 +1,11 @@
 //! The Contour application: tool state, panels, menus, and the per-frame draw
 //! loop that ties the document model to the canvas.
 
+use crate::boolean::{self, BoolOp};
 use crate::canvas::{self, View};
-use crate::document::{Document, Shape};
-use crate::{icons, theme};
-use egui::{Color32, Pos2, Sense, Vec2};
+use crate::document::{self, Document, Shape};
+use crate::{export, icons, theme};
+use egui::{Color32, Sense, Vec2};
 use prism_core::Size;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -37,6 +38,23 @@ impl Tool {
     }
 }
 
+/// While building a pen path, which part of the freshest anchor is being
+/// dragged to set its tangent handle.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PenDrag {
+    /// Setting the out-handle of the anchor at the given index.
+    Handle(usize),
+}
+
+/// On a selected path, which editable element is being dragged.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PathEdit {
+    /// Dragging anchor `i` (moves the point).
+    Anchor(usize),
+    /// Dragging the out-handle of anchor `i` (the in-handle mirrors).
+    Handle(usize),
+}
+
 /// In-progress interaction state (drag-to-create, pen point list, dragging).
 #[derive(Default)]
 struct Interaction {
@@ -44,10 +62,16 @@ struct Interaction {
     drag_start: Option<(f32, f32)>,
     /// Current document-space point of an in-progress create-drag.
     drag_now: Option<(f32, f32)>,
-    /// Points of the path being built with the pen tool.
+    /// Anchor points of the path being built with the pen tool.
     pen_points: Vec<(f32, f32)>,
+    /// Per-anchor out-tangent handle offsets for the in-progress pen path.
+    pen_handles: Vec<(f32, f32)>,
+    /// Active handle-drag on the in-progress pen path (after click-press).
+    pen_drag: Option<PenDrag>,
     /// When moving a selected shape: last cursor position in document space.
     move_last: Option<(f32, f32)>,
+    /// Active edit on the currently selected path (anchor/handle drag).
+    path_edit: Option<PathEdit>,
 }
 
 pub struct ContourApp {
@@ -55,12 +79,17 @@ pub struct ContourApp {
     view: View,
     tool: Tool,
     selected: Option<usize>,
+    /// Secondary selection (shift-click) — used as the *clip* operand for the
+    /// boolean Object menu.
+    selected2: Option<usize>,
     fill: [f32; 4],
     stroke: [f32; 4],
     stroke_w: f32,
     /// Logical artboard size (document units); from the shared `Size` type.
     artboard: Size,
     inter: Interaction,
+    /// Transient status line shown in the menu bar (e.g. export results).
+    status: String,
 }
 
 impl ContourApp {
@@ -72,25 +101,58 @@ impl ContourApp {
             view: View::default(),
             tool: Tool::Select,
             selected: None,
+            selected2: None,
             fill: [0.27, 0.55, 0.85, 1.0],
             stroke: [0.10, 0.12, 0.15, 1.0],
             stroke_w: 2.0,
             artboard: Size::new(1000, 700),
             inter: Interaction::default(),
+            status: String::new(),
         }
     }
 
     fn new_document(&mut self) {
         self.doc = Document::new();
         self.selected = None;
+        self.selected2 = None;
         self.inter = Interaction::default();
+        self.status.clear();
+    }
+
+    /// Remove shape `i`, fixing up both selection indices.
+    fn remove_shape(&mut self, i: usize) {
+        if i >= self.doc.shapes.len() {
+            return;
+        }
+        self.doc.shapes.remove(i);
+        let fix = |sel: &mut Option<usize>| {
+            *sel = match *sel {
+                Some(s) if s == i => None,
+                Some(s) if s > i => Some(s - 1),
+                other => other,
+            };
+        };
+        fix(&mut self.selected);
+        fix(&mut self.selected2);
     }
 
     fn delete_selected(&mut self) {
         if let Some(i) = self.selected.take() {
-            if i < self.doc.shapes.len() {
-                self.doc.shapes.remove(i);
-            }
+            self.remove_shape(i);
+        }
+    }
+
+    /// Swap shapes `a` and `b`, keeping selection pinned to the moved shape.
+    fn swap_shapes(&mut self, a: usize, b: usize) {
+        let n = self.doc.shapes.len();
+        if a >= n || b >= n || a == b {
+            return;
+        }
+        self.doc.shapes.swap(a, b);
+        if self.selected == Some(a) {
+            self.selected = Some(b);
+        } else if self.selected == Some(b) {
+            self.selected = Some(a);
         }
     }
 
@@ -119,16 +181,97 @@ impl ContourApp {
 
     fn commit_pen(&mut self, closed: bool) {
         if self.inter.pen_points.len() >= 2 {
+            let mut handles = std::mem::take(&mut self.inter.pen_handles);
+            let points = std::mem::take(&mut self.inter.pen_points);
+            handles.resize(points.len(), (0.0, 0.0));
             self.doc.shapes.push(Shape::Path {
-                points: std::mem::take(&mut self.inter.pen_points),
+                points,
                 closed,
                 fill: self.fill,
                 stroke: self.stroke,
                 stroke_w: self.stroke_w,
+                handles,
+                visible: true,
             });
             self.selected = Some(self.doc.shapes.len() - 1);
         } else {
             self.inter.pen_points.clear();
+            self.inter.pen_handles.clear();
+        }
+        self.inter.pen_drag = None;
+    }
+
+    fn export_svg_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("SVG image", &["svg"])
+            .set_file_name("untitled.svg")
+            .save_file()
+        {
+            let svg = export::to_svg(
+                &self.doc,
+                self.artboard.width as f32,
+                self.artboard.height as f32,
+            );
+            match std::fs::write(&path, svg) {
+                Ok(()) => self.status = format!("Exported SVG → {}", path.display()),
+                Err(e) => {
+                    log::error!("SVG export failed: {e}");
+                    self.status = format!("SVG export failed: {e}");
+                }
+            }
+        }
+    }
+
+    fn export_png_dialog(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("PNG image", &["png"])
+            .set_file_name("untitled.png")
+            .save_file()
+        {
+            match export::to_png(
+                &self.doc,
+                self.artboard.width as f32,
+                self.artboard.height as f32,
+            ) {
+                Some(bytes) => match std::fs::write(&path, bytes) {
+                    Ok(()) => self.status = format!("Exported PNG → {}", path.display()),
+                    Err(e) => {
+                        log::error!("PNG export failed: {e}");
+                        self.status = format!("PNG export failed: {e}");
+                    }
+                },
+                None => {
+                    log::error!("PNG rasterization failed");
+                    self.status = "PNG rasterization failed".into();
+                }
+            }
+        }
+    }
+
+    /// Apply a boolean op to the two selected shapes (subject = primary,
+    /// clip = secondary), replacing both with the single result path.
+    fn apply_bool(&mut self, op: BoolOp) {
+        let (Some(a), Some(b)) = (self.selected, self.selected2) else {
+            self.status = "Boolean op needs two selected shapes".into();
+            return;
+        };
+        if a == b || a >= self.doc.shapes.len() || b >= self.doc.shapes.len() {
+            return;
+        }
+        let subj = self.doc.shapes[a].clone();
+        let clip = self.doc.shapes[b].clone();
+        match boolean::apply(&subj, &clip, op) {
+            Some(result) => {
+                // Remove the higher index first so the lower stays valid.
+                let (hi, lo) = if a > b { (a, b) } else { (b, a) };
+                self.doc.shapes.remove(hi);
+                self.doc.shapes.remove(lo);
+                self.doc.shapes.push(result);
+                self.selected = Some(self.doc.shapes.len() - 1);
+                self.selected2 = None;
+                self.status = "Boolean op applied".into();
+            }
+            None => self.status = "Boolean op produced no geometry".into(),
         }
     }
 }
@@ -171,6 +314,15 @@ impl ContourApp {
                         self.save_dialog();
                         ui.close_menu();
                     }
+                    ui.separator();
+                    if ui.button("Export SVG…").clicked() {
+                        self.export_svg_dialog();
+                        ui.close_menu();
+                    }
+                    if ui.button("Export PNG…").clicked() {
+                        self.export_png_dialog();
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("Edit", |ui| {
                     ui.add_enabled_ui(self.selected.is_some(), |ui| {
@@ -180,9 +332,40 @@ impl ContourApp {
                         }
                     });
                 });
+                ui.menu_button("Object", |ui| {
+                    let two = self.selected.is_some() && self.selected2.is_some();
+                    ui.add_enabled_ui(two, |ui| {
+                        if ui.button(format!("{}  Union", icons::UNITE)).clicked() {
+                            self.apply_bool(BoolOp::Union);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .button(format!("{}  Intersect", icons::INTERSECT))
+                            .clicked()
+                        {
+                            self.apply_bool(BoolOp::Intersect);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .button(format!("{}  Difference", icons::EXCLUDE))
+                            .clicked()
+                        {
+                            self.apply_bool(BoolOp::Difference);
+                            ui.close_menu();
+                        }
+                    });
+                    if !two {
+                        ui.weak("Shift-click a 2nd shape");
+                    }
+                });
                 ui.separator();
                 ui.label(egui::RichText::new("Contour").strong());
                 ui.weak("vector editor · Prism");
+                if !self.status.is_empty() {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.weak(&self.status);
+                    });
+                }
             });
         });
     }
@@ -220,7 +403,7 @@ impl ContourApp {
 
     fn right_panel(&mut self, root: &mut egui::Ui) {
         egui::SidePanel::right("inspector")
-            .default_width(240.0)
+            .default_width(248.0)
             .show_inside(root, |ui| {
                 ui.add_space(4.0);
                 ui.heading("Style");
@@ -234,44 +417,121 @@ impl ContourApp {
                 });
 
                 ui.separator();
-                ui.heading("Shapes");
-                ui.add_space(2.0);
-
-                let mut to_delete: Option<usize> = None;
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    // Newest on top: iterate indices in reverse.
-                    let n = self.doc.shapes.len();
-                    for idx in (0..n).rev() {
-                        let selected = self.selected == Some(idx);
-                        ui.horizontal(|ui| {
-                            let label = format!("{}  {}", n - idx, self.doc.shapes[idx].label());
-                            if ui.selectable_label(selected, label).clicked() {
-                                self.selected = Some(idx);
-                            }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui.button(icons::TRASH).on_hover_text("Delete").clicked() {
-                                        to_delete = Some(idx);
-                                    }
-                                },
-                            );
-                        });
-                    }
-                    if n == 0 {
-                        ui.weak("No shapes yet. Pick a tool and draw.");
-                    }
-                });
-
-                if let Some(i) = to_delete {
-                    self.doc.shapes.remove(i);
-                    self.selected = match self.selected {
-                        Some(s) if s == i => None,
-                        Some(s) if s > i => Some(s - 1),
-                        other => other,
-                    };
-                }
+                self.layers_panel(ui);
             });
+    }
+
+    /// The Layers list: newest on top, with visibility toggle, reorder up/down,
+    /// delete, and click-to-select (shift-click sets the secondary selection).
+    fn layers_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Layers");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.weak(format!("{}", self.doc.shapes.len()));
+            });
+        });
+        ui.add_space(2.0);
+
+        // Deferred mutations so we don't borrow `self.doc` while iterating.
+        let mut to_delete: Option<usize> = None;
+        let mut to_toggle: Option<usize> = None;
+        let mut to_raise: Option<usize> = None; // swap with idx+1 (towards top)
+        let mut to_lower: Option<usize> = None; // swap with idx-1 (towards bottom)
+        let mut to_select: Option<(usize, bool)> = None; // (idx, shift held)
+
+        let shift = ui.input(|i| i.modifiers.shift);
+        let n = self.doc.shapes.len();
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // Paint order: index 0 painted first (bottom). "Newest on top" =>
+            // iterate indices in reverse so the last (topmost) is listed first.
+            for idx in (0..n).rev() {
+                let primary = self.selected == Some(idx);
+                let secondary = self.selected2 == Some(idx);
+                let visible = self.doc.shapes[idx].visible();
+                let label = self.doc.shapes[idx].label();
+
+                ui.horizontal(|ui| {
+                    // Visibility toggle.
+                    let eye = if visible {
+                        icons::EYE
+                    } else {
+                        icons::EYE_SLASH
+                    };
+                    if ui
+                        .add(egui::Button::new(eye).frame(false))
+                        .on_hover_text("Toggle visibility")
+                        .clicked()
+                    {
+                        to_toggle = Some(idx);
+                    }
+
+                    let mut text = egui::RichText::new(format!("{}  {}", n - idx, label));
+                    if !visible {
+                        text = text.weak();
+                    }
+                    if secondary {
+                        text = text.color(theme::accent());
+                    }
+                    if ui.selectable_label(primary, text).clicked() {
+                        to_select = Some((idx, shift));
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(icons::TRASH).on_hover_text("Delete").clicked() {
+                            to_delete = Some(idx);
+                        }
+                        ui.add_enabled_ui(idx > 0, |ui| {
+                            if ui
+                                .button(icons::CARET_DOWN)
+                                .on_hover_text("Move down")
+                                .clicked()
+                            {
+                                to_lower = Some(idx);
+                            }
+                        });
+                        ui.add_enabled_ui(idx + 1 < n, |ui| {
+                            if ui
+                                .button(icons::CARET_UP)
+                                .on_hover_text("Move up")
+                                .clicked()
+                            {
+                                to_raise = Some(idx);
+                            }
+                        });
+                    });
+                });
+            }
+            if n == 0 {
+                ui.weak("No shapes yet. Pick a tool and draw.");
+            }
+        });
+
+        if let Some(i) = to_toggle {
+            self.doc.shapes[i].toggle_visible();
+        }
+        if let Some(i) = to_raise {
+            self.swap_shapes(i, i + 1);
+        }
+        if let Some(i) = to_lower {
+            self.swap_shapes(i, i - 1);
+        }
+        if let Some((i, shift)) = to_select {
+            if shift {
+                // Toggle secondary; don't let it equal primary.
+                self.selected2 = if self.selected2 == Some(i) || self.selected == Some(i) {
+                    None
+                } else {
+                    Some(i)
+                };
+            } else {
+                self.selected = Some(i);
+                self.selected2 = None;
+            }
+        }
+        if let Some(i) = to_delete {
+            self.remove_shape(i);
+        }
     }
 
     fn central_canvas(&mut self, root: &mut egui::Ui) {
@@ -290,10 +550,25 @@ impl ContourApp {
                 self.artboard.height as f32,
             );
             for (i, s) in self.doc.shapes.iter().enumerate() {
-                canvas::paint_shape(&painter, &self.view, s, self.selected == Some(i));
+                if !s.visible() {
+                    continue;
+                }
+                let sel = self.selected == Some(i) || self.selected2 == Some(i);
+                canvas::paint_shape(&painter, &self.view, s, sel);
             }
 
             self.handle_input(&response, &ctx);
+
+            // Editable anchors/handles for a selected path.
+            if let Some(i) = self.selected {
+                if let Some(Shape::Path {
+                    points, handles, ..
+                }) = self.doc.shapes.get(i)
+                {
+                    canvas::paint_path_handles(&painter, &self.view, points, handles);
+                }
+            }
+
             self.draw_preview(&painter);
         });
     }
@@ -321,15 +596,30 @@ impl ContourApp {
 
         if response.drag_started() {
             if let Some((x, y)) = doc_pos {
-                // Pick topmost shape under cursor to begin a move; else pan.
+                // First: grabbing an anchor/handle of the already-selected path.
+                if let Some(edit) = self.hit_path_edit(x, y) {
+                    self.inter.path_edit = Some(edit);
+                    self.inter.move_last = None;
+                    return;
+                }
+                // Else: pick topmost shape under cursor to begin a move.
                 let hit = self
                     .doc
                     .shapes
                     .iter()
                     .enumerate()
                     .rev()
-                    .find(|(_, s)| s.hit(x, y, tol))
-                    .map(|(i, _)| i);
+                    .find(|(i, s)| s.visible() && (Some(*i) == self.selected || s.hit(x, y, tol)))
+                    .map(|(i, _)| i)
+                    .or_else(|| {
+                        self.doc
+                            .shapes
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .find(|(_, s)| s.visible() && s.hit(x, y, tol))
+                            .map(|(i, _)| i)
+                    });
                 if let Some(i) = hit {
                     self.selected = Some(i);
                     self.inter.move_last = Some((x, y));
@@ -340,7 +630,11 @@ impl ContourApp {
         }
 
         if response.dragged() {
-            if let (Some(i), Some((x, y)), Some((lx, ly))) =
+            if let (Some(edit), Some((x, y)), Some(i)) =
+                (self.inter.path_edit, doc_pos, self.selected)
+            {
+                self.drag_path_edit(i, edit, x, y);
+            } else if let (Some(i), Some((x, y)), Some((lx, ly))) =
                 (self.selected, doc_pos, self.inter.move_last)
             {
                 if i < self.doc.shapes.len() {
@@ -355,18 +649,54 @@ impl ContourApp {
 
         if response.drag_stopped() {
             self.inter.move_last = None;
+            self.inter.path_edit = None;
         }
 
         if response.clicked() {
             if let Some((x, y)) = doc_pos {
-                self.selected = self
+                let hit = self
                     .doc
                     .shapes
                     .iter()
                     .enumerate()
                     .rev()
-                    .find(|(_, s)| s.hit(x, y, tol))
+                    .find(|(_, s)| s.visible() && s.hit(x, y, tol))
                     .map(|(i, _)| i);
+                let shift = response.ctx.input(|inp| inp.modifiers.shift);
+                if shift {
+                    // Shift-click sets/clears the secondary (clip) selection.
+                    self.selected2 = match hit {
+                        Some(i) if Some(i) != self.selected => Some(i),
+                        _ => None,
+                    };
+                } else {
+                    self.selected = hit;
+                    self.selected2 = None;
+                }
+            }
+        }
+    }
+
+    /// Mutate a selected path while dragging one of its anchors or handles.
+    fn drag_path_edit(&mut self, i: usize, edit: PathEdit, x: f32, y: f32) {
+        if let Some(Shape::Path {
+            points, handles, ..
+        }) = self.doc.shapes.get_mut(i)
+        {
+            if handles.len() < points.len() {
+                handles.resize(points.len(), (0.0, 0.0));
+            }
+            match edit {
+                PathEdit::Anchor(k) => {
+                    if let Some(p) = points.get_mut(k) {
+                        *p = (x, y);
+                    }
+                }
+                PathEdit::Handle(k) => {
+                    if let (Some(&(ax, ay)), Some(h)) = (points.get(k), handles.get_mut(k)) {
+                        *h = (x - ax, y - ay);
+                    }
+                }
             }
         }
     }
@@ -408,6 +738,7 @@ impl ContourApp {
                         fill: self.fill,
                         stroke: self.stroke,
                         stroke_w: self.stroke_w,
+                        visible: true,
                     }
                 } else {
                     Shape::Ellipse {
@@ -415,6 +746,7 @@ impl ContourApp {
                         fill: self.fill,
                         stroke: self.stroke,
                         stroke_w: self.stroke_w,
+                        visible: true,
                     }
                 })
             }
@@ -427,6 +759,7 @@ impl ContourApp {
                     p1: b,
                     stroke: self.stroke,
                     stroke_w: self.stroke_w.max(1.0),
+                    visible: true,
                 })
             }
             _ => None,
@@ -434,15 +767,67 @@ impl ContourApp {
     }
 
     fn handle_pen(&mut self, response: &egui::Response, doc_pos: Option<(f32, f32)>) {
+        // Double-click closes the path.
         if response.double_clicked() {
             self.commit_pen(true);
             return;
         }
-        if response.clicked() {
+
+        // Press: place a new anchor (with a zeroed handle) and arm a handle-drag
+        // on it. A plain click that doesn't drag leaves the handle at zero (a
+        // corner); dragging sets the out-tangent.
+        if response.drag_started() || (response.clicked() && self.inter.pen_drag.is_none()) {
             if let Some(p) = doc_pos {
                 self.inter.pen_points.push(p);
+                self.inter.pen_handles.push((0.0, 0.0));
+                let i = self.inter.pen_points.len() - 1;
+                self.inter.pen_drag = Some(PenDrag::Handle(i));
             }
         }
+
+        // Drag: set the out-handle of the freshest anchor (offset from anchor).
+        if response.dragged() {
+            if let (Some(PenDrag::Handle(i)), Some((x, y))) = (self.inter.pen_drag, doc_pos) {
+                if let Some(&(ax, ay)) = self.inter.pen_points.get(i) {
+                    if i < self.inter.pen_handles.len() {
+                        self.inter.pen_handles[i] = (x - ax, y - ay);
+                    }
+                }
+            }
+        }
+
+        if response.drag_stopped() || response.clicked() {
+            self.inter.pen_drag = None;
+        }
+    }
+
+    /// Find an editable element (anchor or handle) of the selected path near the
+    /// document-space cursor. Handles take priority over anchors.
+    fn hit_path_edit(&self, x: f32, y: f32) -> Option<PathEdit> {
+        let i = self.selected?;
+        let Some(Shape::Path {
+            points, handles, ..
+        }) = self.doc.shapes.get(i)
+        else {
+            return None;
+        };
+        let tol = 6.0 / self.view.zoom;
+        for (k, &p) in points.iter().enumerate() {
+            let h = document::handle_at(handles, k);
+            if h.0 != 0.0 || h.1 != 0.0 {
+                let out = (p.0 + h.0, p.1 + h.1);
+                let inp = (p.0 - h.0, p.1 - h.1);
+                if (x - out.0).hypot(y - out.1) <= tol || (x - inp.0).hypot(y - inp.1) <= tol {
+                    return Some(PathEdit::Handle(k));
+                }
+            }
+        }
+        for (k, &p) in points.iter().enumerate() {
+            if (x - p.0).hypot(y - p.1) <= tol {
+                return Some(PathEdit::Anchor(k));
+            }
+        }
+        None
     }
 
     fn draw_preview(&self, painter: &egui::Painter) {
@@ -452,26 +837,26 @@ impl ContourApp {
                 canvas::paint_shape(painter, &self.view, &shape, false);
             }
         }
-        // Pen in-progress polyline + vertices.
+        // Pen in-progress curve preview (honors handles) + anchors/handles.
         if !self.inter.pen_points.is_empty() {
-            let pts: Vec<Pos2> = self
-                .inter
-                .pen_points
-                .iter()
-                .map(|&p| self.view.doc_to_screen(p))
-                .collect();
-            if pts.len() >= 2 {
-                painter.add(egui::Shape::line(
-                    pts.clone(),
-                    egui::Stroke::new(
-                        self.stroke_w.max(1.0) * self.view.zoom,
-                        canvas::to_color32(self.stroke),
-                    ),
-                ));
+            if self.inter.pen_points.len() >= 2 {
+                canvas::paint_path(
+                    painter,
+                    &self.view,
+                    &self.inter.pen_points,
+                    &self.inter.pen_handles,
+                    false,
+                    [0.0, 0.0, 0.0, 0.0],
+                    self.stroke,
+                    self.stroke_w.max(1.0),
+                );
             }
-            for p in &pts {
-                painter.circle_filled(*p, 3.0, theme::accent());
-            }
+            canvas::paint_path_handles(
+                painter,
+                &self.view,
+                &self.inter.pen_points,
+                &self.inter.pen_handles,
+            );
         }
     }
 }
