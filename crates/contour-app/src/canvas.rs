@@ -217,7 +217,8 @@ pub fn paint_path_handles(
     for (i, &p) in points.iter().enumerate() {
         let anchor = view.doc_to_screen(p);
         let h = document::handle_at(handles, i);
-        if h.0 != 0.0 || h.1 != 0.0 {
+        let smooth = h.0 != 0.0 || h.1 != 0.0;
+        if smooth {
             let out = view.doc_to_screen((p.0 + h.0, p.1 + h.1));
             let inp = view.doc_to_screen((p.0 - h.0, p.1 - h.1));
             let line = Stroke::new(1.0, theme::accent());
@@ -226,9 +227,17 @@ pub fn paint_path_handles(
             painter.circle_filled(out, 3.5, theme::accent());
             painter.circle_filled(inp, 3.5, theme::accent());
         }
-        // Anchor: filled white square-ish dot with accent ring.
-        painter.circle_filled(anchor, 4.0, Color32::WHITE);
-        painter.circle_stroke(anchor, 4.0, Stroke::new(1.5, theme::accent()));
+        // Anchor glyph: smooth anchors are round, corner anchors are square,
+        // matching the Illustrator convention. Both are white with an accent ring.
+        let ring = Stroke::new(1.5, theme::accent());
+        if smooth {
+            painter.circle_filled(anchor, 4.0, Color32::WHITE);
+            painter.circle_stroke(anchor, 4.0, ring);
+        } else {
+            let sq = Rect::from_center_size(anchor, Vec2::splat(7.0));
+            painter.rect_filled(sq, 0.0, Color32::WHITE);
+            painter.rect_stroke(sq, 0.0, ring, egui::StrokeKind::Outside);
+        }
     }
 }
 

@@ -501,6 +501,16 @@ impl ContourApp {
                     ui.add(egui::Slider::new(&mut self.stroke_w, 0.0..=40.0).suffix(" px"));
                 });
 
+                // Direct-select hint when a path is the active selection.
+                if self.tool == Tool::Select && self.selected_is_path() {
+                    ui.separator();
+                    ui.label(egui::RichText::new("Edit path").strong());
+                    ui.weak("Drag an anchor or handle to reshape.");
+                    ui.weak("Dbl-click a segment to add an anchor.");
+                    ui.weak("Dbl-click an anchor to delete it.");
+                    ui.weak("Alt-click an anchor: smooth ⇄ corner.");
+                }
+
                 ui.separator();
                 self.layers_panel(ui);
             });
@@ -682,6 +692,26 @@ impl ContourApp {
 
     fn handle_select(&mut self, response: &egui::Response, doc_pos: Option<(f32, f32)>) {
         let tol = 4.0 / self.view.zoom;
+        let alt = response.ctx.input(|i| i.modifiers.alt);
+
+        // Direct-select editing gestures on the selected path:
+        //  · Alt-click an anchor  -> toggle smooth/corner (convert)
+        //  · double-click an anchor -> delete it
+        //  · double-click a segment -> insert an anchor there
+        if response.double_clicked() {
+            if let Some((x, y)) = doc_pos {
+                if self.try_delete_anchor(x, y) || self.try_insert_anchor(x, y) {
+                    return;
+                }
+            }
+        }
+        if alt && response.clicked() {
+            if let Some((x, y)) = doc_pos {
+                if self.try_convert_anchor(x, y) {
+                    return;
+                }
+            }
+        }
 
         if response.drag_started() {
             if let Some((x, y)) = doc_pos {
@@ -923,6 +953,106 @@ impl ContourApp {
             }
         }
         None
+    }
+
+    /// Whether the primary selection is a `Path` (the only directly-editable
+    /// shape type).
+    fn selected_is_path(&self) -> bool {
+        matches!(
+            self.selected.and_then(|i| self.doc.shapes.get(i)),
+            Some(Shape::Path { .. })
+        )
+    }
+
+    /// Index of the anchor of the selected path nearest `(x, y)` within the
+    /// anchor pick tolerance, if any.
+    fn hit_anchor(&self, x: f32, y: f32) -> Option<usize> {
+        let i = self.selected?;
+        let Some(Shape::Path { points, .. }) = self.doc.shapes.get(i) else {
+            return None;
+        };
+        let tol = 6.0 / self.view.zoom;
+        points
+            .iter()
+            .enumerate()
+            .filter(|(_, &p)| (x - p.0).hypot(y - p.1) <= tol)
+            .min_by(|(_, &a), (_, &b)| {
+                let da = (x - a.0).hypot(y - a.1);
+                let db = (x - b.0).hypot(y - b.1);
+                da.total_cmp(&db)
+            })
+            .map(|(k, _)| k)
+    }
+
+    /// Delete the anchor under `(x, y)` on the selected path. Returns `true` if
+    /// one was removed (undoable). Refuses to drop below two anchors.
+    fn try_delete_anchor(&mut self, x: f32, y: f32) -> bool {
+        let Some(i) = self.selected else {
+            return false;
+        };
+        let Some(k) = self.hit_anchor(x, y) else {
+            return false;
+        };
+        // Only checkpoint if the delete will actually happen (≥3 points).
+        let deletable = matches!(
+            self.doc.shapes.get(i),
+            Some(Shape::Path { points, .. }) if points.len() > 2
+        );
+        if !deletable {
+            return false;
+        }
+        self.checkpoint();
+        if let Some(shape) = self.doc.shapes.get_mut(i) {
+            if shape.delete_anchor(k) {
+                self.status = "Deleted anchor".into();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Insert an anchor on the path segment under `(x, y)`. Returns `true` if an
+    /// anchor was added (undoable).
+    fn try_insert_anchor(&mut self, x: f32, y: f32) -> bool {
+        let Some(i) = self.selected else {
+            return false;
+        };
+        let Some(Shape::Path { points, closed, .. }) = self.doc.shapes.get(i) else {
+            return false;
+        };
+        let tol = 8.0 / self.view.zoom;
+        let Some((seg, t)) = document::nearest_segment(points, *closed, x, y, tol) else {
+            return false;
+        };
+        self.checkpoint();
+        if let Some(shape) = self.doc.shapes.get_mut(i) {
+            if shape.insert_anchor(seg, t).is_some() {
+                self.status = "Added anchor".into();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Toggle the anchor under `(x, y)` between smooth and corner. Returns `true`
+    /// if an anchor was hit and converted (undoable).
+    fn try_convert_anchor(&mut self, x: f32, y: f32) -> bool {
+        let Some(i) = self.selected else {
+            return false;
+        };
+        let Some(k) = self.hit_anchor(x, y) else {
+            return false;
+        };
+        self.checkpoint();
+        if let Some(shape) = self.doc.shapes.get_mut(i) {
+            let smooth = shape.toggle_anchor_smooth(k);
+            self.status = if smooth {
+                "Converted to smooth".into()
+            } else {
+                "Converted to corner".into()
+            };
+        }
+        true
     }
 
     fn draw_preview(&self, painter: &egui::Painter) {
