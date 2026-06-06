@@ -294,14 +294,14 @@ this list is the road to a workspace that scales. Effort tags **S/M/L**.
 - [x] **Collapsible property groups** (S) — inspector sections grouped under `CollapsingHeader` with sensible default-open/closed. *(Done.)*
 - [ ] **Dockable / floating panels** (L) — drag panels out, redock, split; tear-off windows. (egui has no native docking; needs `egui_dock` or a custom dock tree.)
 - [ ] **Saveable workspaces** (M) — named layouts (panel positions/visibility/sizes) saved to prefs and switchable; ship Essentials/Layout/Typography presets like Illustrator.
-- [ ] **Window menu — panel show/hide** (S) — a `Window` menu listing every panel with a checkbox to toggle visibility; reset-workspace command.
+- [x] **Window menu — panel show/hide** (S) — a `Window` menu lists every panel (Tools / Inspector / Status bar) with a checkbox to toggle visibility, plus a reset-panels command; the canvas always fills the remaining space. *(Done.)*
 - [ ] **Contextual tool-options bar** (M) — a top strip under the menu that shows the active tool's options (e.g. corner radius for Rect, anchor controls for Pen, stroke for shape tools) — Illustrator's Control bar / Affinity's context toolbar.
 - [ ] **Customizable tool palette** (M) — reorderable/groupable tools, flyout groups (e.g. shape tools share a slot), show/hide tools, single vs double column.
 - [ ] **Tabbed panel groups** (M) — stack multiple panels into one frame with tabs (Affinity Studio); drag a tab between groups.
 - [ ] **Keyboard-shortcut map** (M) — a viewable/remappable shortcut table + a command palette; per-tool single-key activation (V/M/L/P…); export/import shortcut sets. *(Overlaps Phase 8 "keyboard shortcuts".)*
 - [ ] **Dark / light theme toggle** (S) — switch the Prism theme between dark and light (and follow-OS) at runtime; persist in prefs.
 - [ ] **Panel resize + min/max + scroll-on-overflow polish** (S) — consistent resize grips, remembered widths, density (compact/comfortable) option.
-- [ ] **Status / context bar** (S) — bottom bar: zoom %, cursor coords, selection count, active artboard, units.
+- [x] **Status / context bar** (S) — bottom bar: cursor coords (px), selection count, active artboard, zoom % + quick 1:1 / fit-zoom buttons; toggleable from the Window menu. *(Done.)*
 
 ---
 

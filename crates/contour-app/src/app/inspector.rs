@@ -7,6 +7,7 @@ use crate::arrange::{self, Arrange};
 use crate::boolean::BoolOp;
 use crate::document::{LineCap, LineJoin};
 use crate::gradient::{Gradient, GradientKind};
+use crate::workspace::{self, Panel};
 use crate::{icons, theme};
 use egui::{Color32, Vec2};
 
@@ -263,6 +264,21 @@ impl ContourApp {
                         }
                     });
                 });
+                ui.menu_button("Window", |ui| {
+                    // A checkbox per panel toggles its visibility; the canvas is
+                    // always shown so it is not listed. Bound straight to the
+                    // workspace flags so the menu reflects (and drives) state.
+                    for panel in Panel::ALL {
+                        ui.checkbox(self.workspace.flag_mut(panel), panel.label());
+                    }
+                    ui.separator();
+                    ui.add_enabled_ui(!self.workspace.is_default(), |ui| {
+                        if ui.button("Reset panels").clicked() {
+                            self.workspace.reset();
+                            ui.close_menu();
+                        }
+                    });
+                });
                 ui.separator();
                 ui.label(egui::RichText::new("Contour").strong());
                 ui.weak("vector editor · Prism");
@@ -271,6 +287,52 @@ impl ContourApp {
                         ui.weak(&self.status);
                     });
                 }
+            });
+        });
+    }
+
+    /// The bottom status / context bar: cursor coordinates, selection count, the
+    /// active artboard, and the zoom percentage. A right-aligned "fit zoom"
+    /// reset (and `1:1`) make the zoom read-out interactive, à la Illustrator's
+    /// bottom-left zoom field. Toggled from the Window menu.
+    pub(super) fn status_bar(&mut self, root: &mut egui::Ui) {
+        egui::TopBottomPanel::bottom("status_bar").show_inside(root, |ui| {
+            ui.horizontal(|ui| {
+                let active = self
+                    .doc
+                    .active_artboard
+                    .min(self.doc.artboards.len().saturating_sub(1));
+                let artboard = self
+                    .doc
+                    .artboards
+                    .get(active)
+                    .map(|a| a.name.as_str())
+                    .unwrap_or("");
+                let line = workspace::status_line(
+                    self.cursor_doc,
+                    self.selection.len(),
+                    artboard,
+                    self.view.zoom,
+                );
+                ui.add(egui::Label::new(egui::RichText::new(line).weak()).truncate());
+
+                // Right side: a quick reset-to-100% button on the zoom read-out.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button("1:1")
+                        .on_hover_text("Reset zoom to 100%")
+                        .clicked()
+                    {
+                        self.view.zoom = 1.0;
+                    }
+                    if ui
+                        .small_button(format!("{}  Fit", icons::ARTBOARD))
+                        .on_hover_text("Fit all artboards in view")
+                        .clicked()
+                    {
+                        self.fit_artboards_requested = true;
+                    }
+                });
             });
         });
     }

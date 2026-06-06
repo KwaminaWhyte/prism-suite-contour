@@ -13,6 +13,7 @@ use crate::gradient::{Gradient, GradientKind, GradientStop, SpreadMode};
 use crate::history::History;
 use crate::snap::{SnapConfig, SnapResult};
 use crate::transform::Handle;
+use crate::workspace::Workspace;
 use crate::{icons, theme};
 use egui::{Color32, Vec2};
 
@@ -182,6 +183,12 @@ pub struct ContourApp {
     /// Set by "View → Fit artboards"; consumed next frame by the canvas (which
     /// knows the real content rectangle) to zoom/pan so every artboard fits.
     fit_artboards_requested: bool,
+    /// Which dockable panels are shown (Window menu) — tool column, inspector,
+    /// and the bottom status bar.
+    workspace: Workspace,
+    /// Latest document-space cursor over the canvas, or `None` when the pointer
+    /// is off canvas. Feeds the status bar's coordinate read-out.
+    cursor_doc: Option<(f32, f32)>,
 }
 
 impl ContourApp {
@@ -208,6 +215,8 @@ impl ContourApp {
             history: History::new(),
             status: String::new(),
             fit_artboards_requested: false,
+            workspace: Workspace::default(),
+            cursor_doc: None,
         }
     }
 
@@ -281,8 +290,19 @@ impl eframe::App for ContourApp {
         }
 
         self.menu_bar(root);
-        self.tool_palette(root);
-        self.right_panel(root);
+        // Side panels are shown only when the Window menu enables them; the
+        // central canvas always fills whatever space is left.
+        if self.workspace.visible(crate::workspace::Panel::Tools) {
+            self.tool_palette(root);
+        }
+        if self.workspace.visible(crate::workspace::Panel::Inspector) {
+            self.right_panel(root);
+        }
+        // The status bar docks to the bottom, between the side panels and the
+        // canvas, so it spans the full window width under the artwork.
+        if self.workspace.visible(crate::workspace::Panel::StatusBar) {
+            self.status_bar(root);
+        }
         self.central_canvas(root);
     }
 }

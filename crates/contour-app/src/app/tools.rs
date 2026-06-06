@@ -73,6 +73,9 @@ impl ContourApp {
 
             let full = response.rect;
             let cursor = response.hover_pos();
+            // Record the document-space cursor for the status bar (None when the
+            // pointer leaves the canvas).
+            self.cursor_doc = cursor.map(|p| self.view.screen_to_doc(p));
 
             // The content rectangle excludes the ruler strips when rulers show.
             let content = if self.show_rulers {

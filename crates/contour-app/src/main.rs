@@ -19,6 +19,7 @@ mod icons;
 mod snap;
 mod theme;
 mod transform;
+mod workspace;
 
 use app::ContourApp;
 

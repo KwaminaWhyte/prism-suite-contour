@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Window menu (show/hide panels) + status bar** — a new pure, unit-tested
+  `workspace` module and a `Workspace` panel-visibility state on the app, giving
+  the editor's shell the workspace controls a pro vector app needs:
+  - A **Window** menu in the menu bar lists every dockable panel (Tools,
+    Inspector, Status bar) with a checkbox to toggle its visibility — the central
+    canvas always fills whatever space is left — plus a **Reset panels** command
+    (disabled when the layout already matches the default) that restores the
+    everything-shown layout. The checkboxes bind straight to the workspace flags
+    (`Workspace::flag_mut`), so hiding the inspector or tool column reclaims the
+    space for the canvas, à la Illustrator's Window menu.
+  - A **bottom status / context bar** spanning the window under the artwork:
+    live document-space cursor coordinates (`X / Y px`, a `–` placeholder when
+    the pointer leaves the canvas), the selection count (`No selection` /
+    `1 selected` / `N selected`), the active artboard name, and the zoom
+    percentage. The right side carries quick **1:1** (reset zoom to 100%) and
+    **Fit** (fit all artboards) buttons, mirroring Illustrator's bottom-left zoom
+    field. The bar itself is toggleable from the Window menu.
+  - The status-line wording and zoom-percentage formatting are pure functions
+    (`workspace::status_line` / `workspace::zoom_percent`) so the exact text is
+    pinned by unit tests; the `Workspace` struct's visibility bookkeeping
+    (default-all-shown, per-panel flags, reset, is-default) is likewise tested
+    without an egui context, and is `#[serde(default)]`-friendly for a future
+    saved-workspaces feature.
+
 - **Multiple artboards** — a new pure, unit-tested `artboard` module and an
   additive `artboards: Vec<Artboard>` + `active_artboard: usize` on the
   `Document` (both `#[serde(default)]`), promoting the editor's former single
