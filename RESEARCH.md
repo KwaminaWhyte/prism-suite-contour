@@ -2,7 +2,7 @@
 
 Cited findings backing [PLAN.md](./PLAN.md). Verify all crate versions against crates.io at build time
 — third-party version metadata is sometimes stale. Contour is **app #2 of the Prism suite**; shared
-infrastructure decisions live in [../SUITE.md](https://github.com/KwaminaWhyte/prism-suite-prism/blob/main/SUITE.md) and mirror [Pigment's research](https://github.com/KwaminaWhyte/prism-suite-pigment/blob/main/RESEARCH.md).
+infrastructure decisions live in [SUITE.md](https://github.com/KwaminaWhyte/prism-suite-prism/blob/main/SUITE.md) and mirror [Pigment's research](https://github.com/KwaminaWhyte/prism-suite-pigment/blob/main/RESEARCH.md).
 
 ---
 
@@ -119,6 +119,6 @@ Reuse the suite's `pigment-ai`/**`ort`** (ONNX Runtime, CoreML/DirectML/CUDA EPs
 stack. Vector-relevant uses: **subject/auto-select** and matting (BiRefNet/SAM) to seed a trace region;
 **Generative Recolor** palette synthesis; optional **vectorize-from-prompt** (cloud or local diffusion →
 `vtracer`). Models are not bundled — fetched on first use behind a feature flag with license surfacing;
-every AI tool degrades gracefully when models/GPU are absent. (Details: [../pigment/RESEARCH.md §10](https://github.com/KwaminaWhyte/prism-suite-pigment/blob/main/RESEARCH.md).)
+every AI tool degrades gracefully when models/GPU are absent. (Details: [Pigment RESEARCH.md §10](https://github.com/KwaminaWhyte/prism-suite-pigment/blob/main/RESEARCH.md).)
 
 Sources: github.com/pykeio/ort · github.com/ZhengPeng7/BiRefNet · ../pigment/RESEARCH.md §10

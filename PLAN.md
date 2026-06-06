@@ -6,7 +6,7 @@ capability** — features, reliability, and ease-of-use — in staged milestones
 engine (`prism-core` / `prism-color`), with Bézier math on `kurbo`, tessellation on `lyon`, and
 boolean ops on `i_overlay`.
 
-> Companion docs: [RESEARCH.md](./RESEARCH.md) (cited findings + crate matrix), [README.md](./README.md) (current build), [../SUITE.md](https://github.com/KwaminaWhyte/prism-suite-prism/blob/main/SUITE.md) (four-app vision + interop). This PLAN expands the README's v0 scaffold into a parity roadmap; the README still tracks what runs *today*.
+> Companion docs: [RESEARCH.md](./RESEARCH.md) (cited findings + crate matrix), [README.md](./README.md) (current build), [SUITE.md](https://github.com/KwaminaWhyte/prism-suite-prism/blob/main/SUITE.md) (four-app vision + interop). This PLAN expands the README's v0 scaffold into a parity roadmap; the README still tracks what runs *today*.
 
 ---
 
