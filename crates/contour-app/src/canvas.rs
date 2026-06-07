@@ -252,6 +252,20 @@ impl ShapeGeometry {
                     fillable: *closed,
                 }
             }
+            // Plain-painter fallback for a compound path: its outer ring. Compound
+            // paths normally route through the tiny-skia raster path (which fills
+            // holes correctly under the fill rule); this is only a degenerate
+            // fallback if rasterizing fails.
+            Shape::Compound { .. } => {
+                let ring = shape.outline_polygon().unwrap_or_default();
+                let n = ring.len();
+                Self {
+                    points: ring,
+                    handles: vec![(0.0, 0.0); n],
+                    closed: true,
+                    fillable: n >= 3,
+                }
+            }
         }
     }
 }
@@ -280,7 +294,11 @@ pub fn paint_shape_masked(
 ) {
     let appearance = shape.effective_appearance();
     if !appearance.is_empty() {
-        if appearance.needs_raster() || omask.is_some() {
+        // A compound path fills its holes via the fill rule, which egui's painter
+        // can't express, so it always routes through the tiny-skia raster path
+        // (exact even-odd / non-zero fill) alongside effects / blends / masks.
+        let is_compound = matches!(shape, Shape::Compound { .. });
+        if appearance.needs_raster() || omask.is_some() || is_compound {
             // egui's painter can neither blur, blend, nor mask: rasterize the
             // fill/stroke stack with tiny-skia at the current zoom, composite each
             // non-Normal blend layer, apply the live effects + opacity mask on that
@@ -317,6 +335,7 @@ fn paint_shape_with_effects(
     let Some((path, fillable)) = crate::export::skia_path_of(shape) else {
         return false;
     };
+    let fill_rule = crate::export::skia_fill_rule_of(shape);
     let bbox = shape
         .bounds()
         .map(|b| [b.x, b.y, b.w, b.h])
@@ -325,6 +344,7 @@ fn paint_shape_with_effects(
     let Some(layer) = crate::export::render_shape_layer_masked(
         &path,
         fillable,
+        fill_rule,
         &bbox,
         appearance,
         view.zoom,
@@ -699,6 +719,43 @@ pub fn paint_path_handles(
             painter.rect_filled(sq, 0.0, Color32::WHITE);
             painter.rect_stroke(sq, 0.0, ring, egui::StrokeKind::Outside);
         }
+    }
+}
+
+/// Highlight the Shape Builder regions the drag has crossed: fill each picked
+/// face's ring(s) with a translucent accent (red-ish for a subtract drag, accent
+/// for a unite drag) and trace the drag path so the user sees what the gesture
+/// will act on, à la Illustrator's Shape Builder shading.
+pub fn paint_shape_builder(
+    painter: &egui::Painter,
+    view: &View,
+    faces: &[crate::shapebuilder::Face],
+    picked: &[usize],
+    path: &[(f32, f32)],
+    subtract: bool,
+) {
+    let base = if subtract {
+        Color32::from_rgb(0xff, 0x4d, 0x4d)
+    } else {
+        theme::accent()
+    };
+    let fill = Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 70);
+    for &i in picked {
+        if let Some(face) = faces.get(i) {
+            // Fill the outer ring (the holes show through faintly — acceptable for
+            // a transient highlight).
+            if let Some(outer) = face.rings.first() {
+                let screen: Vec<Pos2> = outer.iter().map(|&p| view.doc_to_screen(p)).collect();
+                if screen.len() >= 3 {
+                    painter.add(egui::Shape::convex_polygon(screen, fill, Stroke::NONE));
+                }
+            }
+        }
+    }
+    // The drag path itself.
+    if path.len() >= 2 {
+        let line: Vec<Pos2> = path.iter().map(|&p| view.doc_to_screen(p)).collect();
+        painter.add(egui::Shape::line(line, Stroke::new(1.5, base)));
     }
 }
 

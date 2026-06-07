@@ -109,7 +109,7 @@ fn svg_body(doc: &Document) -> String {
                 attrs.push_str(" stroke=\"none\"");
                 attrs.push_str(&blend_style_attr(fill.blend));
                 shape_body.push_str("  ");
-                shape_body.push_str(&geom.element(&attrs));
+                shape_body.push_str(&geom.fill_element(&attrs));
                 shape_body.push('\n');
             }
         }
@@ -197,12 +197,21 @@ struct SvgGeom {
     head: String,
     /// Whether the geometry has a fillable region (closed).
     fillable: bool,
+    /// `fill-rule` attribute string for a compound path's fill layers (empty for
+    /// non-zero / single-ring geometry, so default output stays compact).
+    fill_rule_attr: &'static str,
 }
 
 impl SvgGeom {
     /// `<tag geom… {paint} />`.
     fn element(&self, paint: &str) -> String {
         format!("{}{} />", self.head, paint)
+    }
+
+    /// `<tag geom… {paint} {fill-rule} />` — for a *fill* layer, so an even-odd
+    /// compound path carves its holes in any SVG viewer.
+    fn fill_element(&self, paint: &str) -> String {
+        format!("{}{}{} />", self.head, paint, self.fill_rule_attr)
     }
 }
 
@@ -214,6 +223,7 @@ fn svg_geom(shape: &Shape) -> SvgGeom {
             SvgGeom {
                 head: format!("<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\""),
                 fillable: true,
+                fill_rule_attr: "",
             }
         }
         Shape::Ellipse { rect, .. } => {
@@ -223,6 +233,7 @@ fn svg_geom(shape: &Shape) -> SvgGeom {
             SvgGeom {
                 head: format!("<ellipse cx=\"{cx}\" cy=\"{cy}\" rx=\"{rx}\" ry=\"{ry}\""),
                 fillable: true,
+                fill_rule_attr: "",
             }
         }
         Shape::Line { p0, p1, .. } => SvgGeom {
@@ -231,6 +242,7 @@ fn svg_geom(shape: &Shape) -> SvgGeom {
                 p0.0, p0.1, p1.0, p1.1
             ),
             fillable: false,
+            fill_rule_attr: "",
         },
         Shape::Path {
             points,
@@ -242,6 +254,34 @@ fn svg_geom(shape: &Shape) -> SvgGeom {
             SvgGeom {
                 head: format!("<path d=\"{d}\""),
                 fillable: *closed,
+                fill_rule_attr: "",
+            }
+        }
+        Shape::Compound {
+            subpaths,
+            fill_rule,
+            ..
+        } => {
+            // One `<path>` whose `d` concatenates every sub-contour, with the
+            // compound fill rule so holes carve correctly.
+            let mut d = String::new();
+            for sp in subpaths {
+                if sp.points.is_empty() {
+                    continue;
+                }
+                if !d.is_empty() {
+                    d.push(' ');
+                }
+                d.push_str(&path_d(&sp.points, &sp.handles, sp.closed));
+            }
+            let fill_rule_attr = match fill_rule {
+                document::FillRule::EvenOdd => " fill-rule=\"evenodd\"",
+                document::FillRule::NonZero => " fill-rule=\"nonzero\"",
+            };
+            SvgGeom {
+                head: format!("<path d=\"{d}\""),
+                fillable: true,
+                fill_rule_attr,
             }
         }
     }
@@ -572,6 +612,62 @@ pub(crate) fn skia_path_of(shape: &Shape) -> Option<(tiny_skia::Path, bool)> {
             handles,
             ..
         } => build_skia_path(points, handles, *closed).map(|p| (p, *closed)),
+        // A compound path is one tiny-skia path with several sub-contours; the
+        // fill rule (Winding / EvenOdd) is applied at fill time via
+        // [`skia_fill_rule_of`].
+        Shape::Compound { subpaths, .. } => {
+            let mut pb = PathBuilder::new();
+            let mut any = false;
+            for sp in subpaths {
+                if sp.points.len() < 2 {
+                    continue;
+                }
+                push_subpath(&mut pb, &sp.points, &sp.handles, sp.closed);
+                any = true;
+            }
+            if !any {
+                return None;
+            }
+            pb.finish().map(|p| (p, true))
+        }
+    }
+}
+
+/// The tiny-skia fill rule a shape rasterizes with — `EvenOdd` for an even-odd
+/// compound path, `Winding` (non-zero) for everything else (single rings always
+/// fill solid).
+pub(crate) fn skia_fill_rule_of(shape: &Shape) -> TsFillRule {
+    match shape.fill_rule() {
+        Some(document::FillRule::EvenOdd) => TsFillRule::EvenOdd,
+        _ => TsFillRule::Winding,
+    }
+}
+
+/// Append one sub-contour (line / cubic segments, optionally closed) to a
+/// tiny-skia [`PathBuilder`], the multi-contour primitive a compound path is made
+/// of. Mirrors [`build_skia_path`] but does not finish the builder.
+fn push_subpath(pb: &mut PathBuilder, points: &[(f32, f32)], handles: &[(f32, f32)], closed: bool) {
+    let n = points.len();
+    if n < 2 {
+        return;
+    }
+    pb.move_to(points[0].0, points[0].1);
+    let seg_count = if closed { n } else { n - 1 };
+    for i in 0..seg_count {
+        let a = points[i];
+        let b = points[(i + 1) % n];
+        let ha = document::handle_at(handles, i);
+        let hb = document::handle_at(handles, (i + 1) % n);
+        let a_corner = ha.0 == 0.0 && ha.1 == 0.0;
+        let b_corner = hb.0 == 0.0 && hb.1 == 0.0;
+        if a_corner && b_corner {
+            pb.line_to(b.0, b.1);
+        } else {
+            pb.cubic_to(a.0 + ha.0, a.1 + ha.1, b.0 - hb.0, b.1 - hb.1, b.0, b.1);
+        }
+    }
+    if closed {
+        pb.close();
     }
 }
 
@@ -584,13 +680,14 @@ fn draw_shape_skia(pixmap: &mut Pixmap, shape: &Shape, id: Transform, omask: Opt
     let Some((path, fillable)) = skia_path_of(shape) else {
         return;
     };
+    let fill_rule = skia_fill_rule_of(shape);
     let appearance = shape.effective_appearance();
     let mask = omask.and_then(OpacityMaskInput::of);
 
     // Fast path: no live effects, no opacity mask → paint the stack straight onto
     // the page (blend layers still composite, handled inside paint_appearance_skia).
     if !appearance.has_active_effects() && mask.is_none() {
-        paint_appearance_skia(pixmap, &path, fillable, &bbox, &appearance, id);
+        paint_appearance_skia(pixmap, &path, fillable, fill_rule, &bbox, &appearance, id);
         return;
     }
 
@@ -601,7 +698,7 @@ fn draw_shape_skia(pixmap: &mut Pixmap, shape: &Shape, id: Transform, omask: Opt
     // offset. `id` is a pure `translate(-ox, -oy)` so its translation gives the
     // artboard crop offset.
     if let Some(layer) =
-        render_shape_layer_masked(&path, fillable, &bbox, &appearance, 1.0, mask.as_ref())
+        render_shape_layer_masked(&path, fillable, fill_rule, &bbox, &appearance, 1.0, mask.as_ref())
     {
         let tx = id.tx; // = -ox (artboard crop)
         let ty = id.ty;
@@ -636,6 +733,7 @@ pub(crate) struct ShapeLayer {
 pub(crate) struct OpacityMaskInput {
     pub path: tiny_skia::Path,
     pub fillable: bool,
+    pub fill_rule: TsFillRule,
     pub bbox: [f32; 4],
     pub appearance: Appearance,
     pub invert: bool,
@@ -654,6 +752,7 @@ impl OpacityMaskInput {
         Some(Self {
             path,
             fillable,
+            fill_rule: skia_fill_rule_of(mask_shape),
             bbox,
             appearance: mask_shape.effective_appearance(),
             invert: *invert,
@@ -673,7 +772,15 @@ pub(crate) fn render_shape_layer(
     appearance: &Appearance,
     scale: f32,
 ) -> Option<ShapeLayer> {
-    render_shape_layer_masked(path, fillable, bbox, appearance, scale, None)
+    render_shape_layer_masked(
+        path,
+        fillable,
+        TsFillRule::Winding,
+        bbox,
+        appearance,
+        scale,
+        None,
+    )
 }
 
 /// Rasterize a shape's effective appearance into a padded scratch pixmap, then
@@ -684,6 +791,7 @@ pub(crate) fn render_shape_layer(
 pub(crate) fn render_shape_layer_masked(
     path: &tiny_skia::Path,
     fillable: bool,
+    fill_rule: TsFillRule,
     bbox: &[f32; 4],
     appearance: &Appearance,
     scale: f32,
@@ -705,7 +813,7 @@ pub(crate) fn render_shape_layer_masked(
     // Map document space into the scratch pixmap: translate the padded origin to
     // (0,0), then scale to pixels.
     let t = Transform::from_scale(scale, scale).post_translate(-dx * scale, -dy * scale);
-    paint_appearance_skia(&mut layer, path, fillable, bbox, appearance, t);
+    paint_appearance_skia(&mut layer, path, fillable, fill_rule, bbox, appearance, t);
     crate::effects::apply_effects(&mut layer, &appearance.effects, scale);
     // Opacity mask: rasterize the mask shape's luminance into a same-size scratch
     // (same transform, so it registers pixel-for-pixel with the artwork), then
@@ -713,7 +821,15 @@ pub(crate) fn render_shape_layer_masked(
     // composited result (artwork + effects), as Illustrator does.
     if let Some(m) = mask {
         let mut mask_pm = crate::effects::transparent_pixmap(pw, ph);
-        paint_appearance_skia(&mut mask_pm, &m.path, m.fillable, &m.bbox, &m.appearance, t);
+        paint_appearance_skia(
+            &mut mask_pm,
+            &m.path,
+            m.fillable,
+            m.fill_rule,
+            &m.bbox,
+            &m.appearance,
+            t,
+        );
         crate::effects::apply_luminance_mask(&mut layer, &mask_pm, m.invert);
     }
     Some(ShapeLayer {
@@ -736,6 +852,7 @@ fn paint_appearance_skia(
     pixmap: &mut Pixmap,
     path: &tiny_skia::Path,
     fillable: bool,
+    fill_rule: TsFillRule,
     bbox: &[f32; 4],
     appearance: &Appearance,
     transform: Transform,
@@ -781,7 +898,7 @@ fn paint_appearance_skia(
             }
             paint.anti_alias = true;
             let draw = |pm: &mut Pixmap| {
-                pm.fill_path(path, &paint, TsFillRule::Winding, transform, None);
+                pm.fill_path(path, &paint, fill_rule, transform, None);
             };
             paint_layer(pixmap, fill.blend, &draw);
         }
@@ -1553,5 +1670,107 @@ mod tests {
         assert!((layer.doc_origin.1 - 28.0).abs() < 1.0, "origin y");
         // The layer is the padded shape (40 + 2·12 = 64 units) → ~64 px at 1×.
         assert!(layer.pixmap.width() >= 64);
+    }
+
+    // --- Compound paths -----------------------------------------------------
+
+    /// A compound path: a 30×30 outer ring with a 10×10 inner hole, even-odd.
+    fn donut_compound() -> Shape {
+        use crate::document::{FillRule, SubPath};
+        Shape::Compound {
+            subpaths: vec![
+                SubPath::ring(vec![(0.0, 0.0), (30.0, 0.0), (30.0, 30.0), (0.0, 30.0)]),
+                SubPath::ring(vec![
+                    (10.0, 10.0),
+                    (20.0, 10.0),
+                    (20.0, 20.0),
+                    (10.0, 20.0),
+                ]),
+            ],
+            fill_rule: FillRule::EvenOdd,
+            fill: [1.0, 0.0, 0.0, 1.0],
+            fill_gradient: None,
+            stroke: [0.0, 0.0, 0.0, 0.0],
+            stroke_w: 0.0,
+            stroke_style: StrokeStyle::default(),
+            appearance: None,
+            visible: true,
+            group: None,
+            clip: None,
+            mask: false,
+            omask: None,
+            omask_path: false,
+            omask_invert: false,
+            blend: None,
+            blend_step: false,
+        }
+    }
+
+    /// SVG export emits a compound path as one `<path>` with `fill-rule="evenodd"`
+    /// whose `d` contains both sub-contours (two `M` move commands).
+    #[test]
+    fn svg_compound_path_has_fill_rule_and_two_subpaths() {
+        let doc = Document {
+            shapes: vec![donut_compound()],
+            ..Default::default()
+        };
+        let svg = to_svg(&doc, 40.0, 40.0);
+        assert!(svg.contains("fill-rule=\"evenodd\""), "even-odd attr: {svg}");
+        assert!(svg.contains("<path"), "one path element: {svg}");
+        // Two sub-contours → two `M` commands in the single path's `d`.
+        let d_start = svg.find("d=\"").expect("has d");
+        let d_end = svg[d_start + 3..].find('"').unwrap() + d_start + 3;
+        let d = &svg[d_start + 3..d_end];
+        assert_eq!(d.matches('M').count(), 2, "two move-tos (outer + hole): {d}");
+    }
+
+    /// PNG export rasterizes the even-odd hole: the frame is filled (red) but the
+    /// centre (inside the hole) shows the white page.
+    #[test]
+    fn png_compound_path_renders_the_hole() {
+        let s = donut_compound();
+        let mut pixmap = Pixmap::new(40, 40).unwrap();
+        pixmap.fill(TsColor::WHITE);
+        draw_shape_skia(&mut pixmap, &s, Transform::identity(), None);
+        // On the frame (5,5): red fill.
+        let frame = pixmap.pixel(5, 5).unwrap();
+        assert!(
+            frame.red() > 200 && frame.green() < 80 && frame.blue() < 80,
+            "frame is red: {},{},{}",
+            frame.red(),
+            frame.green(),
+            frame.blue()
+        );
+        // In the hole centre (15,15): even-odd → empty → white page shows.
+        let hole = pixmap.pixel(15, 15).unwrap();
+        assert!(
+            hole.red() > 240 && hole.green() > 240 && hole.blue() > 240,
+            "hole shows the white page: {},{},{}",
+            hole.red(),
+            hole.green(),
+            hole.blue()
+        );
+    }
+
+    /// A non-zero compound (same-wound rings) fills the centre (no hole carved).
+    #[test]
+    fn png_compound_non_zero_fills_centre() {
+        use crate::document::FillRule;
+        let mut s = donut_compound();
+        if let Shape::Compound { fill_rule, .. } = &mut s {
+            *fill_rule = FillRule::NonZero;
+        }
+        let mut pixmap = Pixmap::new(40, 40).unwrap();
+        pixmap.fill(TsColor::WHITE);
+        draw_shape_skia(&mut pixmap, &s, Transform::identity(), None);
+        // Same-wound rings + non-zero → the centre is filled red, not a hole.
+        let centre = pixmap.pixel(15, 15).unwrap();
+        assert!(
+            centre.red() > 200 && centre.green() < 80,
+            "non-zero fills the centre: {},{},{}",
+            centre.red(),
+            centre.green(),
+            centre.blue()
+        );
     }
 }

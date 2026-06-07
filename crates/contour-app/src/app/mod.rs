@@ -31,6 +31,9 @@ enum Tool {
     /// Sample a shape's paint appearance and apply it to others (Illustrator's
     /// Eyedropper, `I`).
     Eyedropper,
+    /// Interactive merge / subtract by dragging across the selected shapes'
+    /// overlapping regions (Illustrator's Shape Builder, `M`).
+    ShapeBuilder,
 }
 
 impl Tool {
@@ -43,6 +46,7 @@ impl Tool {
             Tool::Pen => icons::PEN,
             Tool::Artboard => icons::ARTBOARD,
             Tool::Eyedropper => icons::EYEDROPPER,
+            Tool::ShapeBuilder => icons::SHAPE_BUILDER,
         }
     }
     fn name(self) -> &'static str {
@@ -54,6 +58,7 @@ impl Tool {
             Tool::Pen => "Pen",
             Tool::Artboard => "Artboard",
             Tool::Eyedropper => "Eyedropper (I)",
+            Tool::ShapeBuilder => "Shape Builder (M)",
         }
     }
 }
@@ -82,10 +87,15 @@ struct Keys {
     /// `Cmd/Ctrl+7` makes a clipping mask; `Alt+Cmd/Ctrl+7` releases one.
     make_clip: bool,
     release_clip: bool,
+    /// `Cmd/Ctrl+8` makes a compound path; `Alt+Cmd/Ctrl+8` releases one.
+    make_compound: bool,
+    release_compound: bool,
     clip: Option<ClipKey>,
     /// Single-key `I` pressed (no modifiers) — activate the Eyedropper tool, à la
     /// Illustrator's per-tool letter shortcuts.
     eyedropper: bool,
+    /// Single-key `M` pressed (no modifiers) — activate the Shape Builder tool.
+    shape_builder: bool,
 }
 
 /// While building a pen path, which part of the freshest anchor is being
@@ -161,6 +171,20 @@ struct Interaction {
     /// An in-progress artboard gesture (Artboard tool): creating a new board by
     /// drag, or moving an existing board.
     artboard_drag: Option<ArtboardDrag>,
+    /// Shape Builder: the atomic faces of the selected shapes, rebuilt when the
+    /// gesture begins, plus the sampled drag path across them.
+    sb_drag: Option<ShapeBuilderDrag>,
+}
+
+/// An in-progress Shape Builder gesture: the region graph (atomic faces) of the
+/// selected shapes, the indices of the shapes that produced them (so the result
+/// can replace exactly those), the sampled drag path in document space, and
+/// whether this is an Alt/Option (subtract) drag.
+struct ShapeBuilderDrag {
+    faces: Vec<crate::shapebuilder::Face>,
+    sources: Vec<usize>,
+    path: Vec<(f32, f32)>,
+    subtract: bool,
 }
 
 /// An in-progress artboard gesture with the Artboard tool.
@@ -300,6 +324,7 @@ impl eframe::App for ContourApp {
             let y = i.key_pressed(egui::Key::Y);
             let g = i.key_pressed(egui::Key::G);
             let seven = i.key_pressed(egui::Key::Num7);
+            let eight = i.key_pressed(egui::Key::Num8);
             let arrange = if cmd && i.key_pressed(egui::Key::CloseBracket) {
                 Some(if shift {
                     Arrange::BringToFront
@@ -344,10 +369,14 @@ impl eframe::App for ContourApp {
                 ungroup: cmd && g && shift,
                 make_clip: cmd && seven && !alt,
                 release_clip: cmd && seven && alt,
+                make_compound: cmd && eight && !alt,
+                release_compound: cmd && eight && alt,
                 clip,
                 // Plain `I` (no command) activates the eyedropper, like
                 // Illustrator's single-key tool letters.
                 eyedropper: !cmd && i.key_pressed(egui::Key::I),
+                // Plain `M` activates the Shape Builder.
+                shape_builder: !cmd && i.key_pressed(egui::Key::M),
             }
         });
         let Keys {
@@ -360,8 +389,11 @@ impl eframe::App for ContourApp {
             ungroup: ungroup_key,
             make_clip: make_clip_key,
             release_clip: release_clip_key,
+            make_compound: make_compound_key,
+            release_compound: release_compound_key,
             clip: clip_key,
             eyedropper: eyedropper_key,
+            shape_builder: shape_builder_key,
         } = keys;
         // `I` switches to the eyedropper (committing any in-progress pen path
         // first, mirroring how clicking a tool button behaves). Guarded so it is
@@ -371,6 +403,13 @@ impl eframe::App for ContourApp {
                 self.commit_pen(false);
             }
             self.tool = Tool::Eyedropper;
+        }
+        // `M` switches to the Shape Builder (same guard as the eyedropper key).
+        if shape_builder_key && self.tool != Tool::ShapeBuilder && !ctx.wants_keyboard_input() {
+            if self.tool == Tool::Pen {
+                self.commit_pen(false);
+            }
+            self.tool = Tool::ShapeBuilder;
         }
         if enter && self.tool == Tool::Pen {
             self.commit_pen(true);
@@ -398,6 +437,12 @@ impl eframe::App for ContourApp {
             self.release_clip();
         } else if make_clip_key {
             self.make_clip();
+        }
+        // Release before make so an Alt+Cmd+8 frame isn't misread as make.
+        if release_compound_key {
+            self.release_compound();
+        } else if make_compound_key {
+            self.make_compound();
         }
         if let Some(c) = clip_key {
             match c {

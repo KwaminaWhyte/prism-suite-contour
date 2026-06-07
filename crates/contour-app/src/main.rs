@@ -23,6 +23,7 @@ mod group;
 mod history;
 mod icons;
 mod opacity_mask;
+mod shapebuilder;
 mod snap;
 mod swatches;
 mod theme;

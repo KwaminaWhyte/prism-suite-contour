@@ -533,6 +533,241 @@ impl ContourApp {
         self.status = "Expanded blend".into();
     }
 
+    // --- Compound paths ------------------------------------------------------
+
+    /// Whether the selection can be made into a compound path: at least two
+    /// distinct shapes that each contribute a closed sub-contour. (One shape that
+    /// is already a compound, or a single shape, has nothing to combine.)
+    pub(super) fn can_make_compound(&self) -> bool {
+        let mut sel: Vec<usize> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|&i| i < self.doc.shapes.len())
+            .collect();
+        sel.sort_unstable();
+        sel.dedup();
+        if sel.len() < 2 {
+            return false;
+        }
+        // Every selected shape must contribute at least one closed contour.
+        sel.iter()
+            .filter(|&&i| compound_subpaths(&self.doc.shapes[i]).is_some())
+            .count()
+            >= 2
+    }
+
+    /// Whether the selection touches any compound path (so Release is meaningful).
+    pub(super) fn can_release_compound(&self) -> bool {
+        self.selection
+            .iter()
+            .filter_map(|&i| self.doc.shapes.get(i))
+            .any(|s| matches!(s, Shape::Compound { .. }))
+    }
+
+    /// Make a compound path from the selection (Illustrator's
+    /// `Object ▸ Compound Path ▸ Make`, `Cmd/Ctrl+8`): gather every selected
+    /// shape's closed contour(s) into one [`Shape::Compound`] with the app's
+    /// current fill rule, anchored where the topmost selected shape was, taking
+    /// the *bottom* (back-most) selected shape's paint — matching Illustrator,
+    /// where a compound path adopts the back object's appearance. One undo step;
+    /// the new compound is selected.
+    pub(super) fn make_compound(&mut self) {
+        if !self.can_make_compound() {
+            self.status = "Compound path: select two or more closed shapes".into();
+            return;
+        }
+        let mut sel: Vec<usize> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|&i| i < self.doc.shapes.len())
+            .collect();
+        sel.sort_unstable();
+        sel.dedup();
+
+        // Collect every contributing sub-contour in paint order; the back-most
+        // (lowest index) contributing shape supplies the compound's paint.
+        let mut subpaths: Vec<crate::document::SubPath> = Vec::new();
+        let mut style: Option<Shape> = None;
+        for &i in &sel {
+            if let Some(subs) = compound_subpaths(&self.doc.shapes[i]) {
+                if style.is_none() {
+                    style = Some(self.doc.shapes[i].clone());
+                }
+                subpaths.extend(subs);
+            }
+        }
+        let Some(style) = style else {
+            return;
+        };
+
+        self.checkpoint();
+        let top = *sel.last().expect("non-empty");
+        let insert_at = (0..=top).filter(|i| !sel.contains(i)).count();
+        // Remove the members (highest first), then insert the compound.
+        for &i in sel.iter().rev() {
+            self.doc.shapes.remove(i);
+        }
+        let compound = Shape::Compound {
+            subpaths,
+            fill_rule: self.compound_fill_rule_doc(),
+            fill: style.fill_color().unwrap_or([0.5, 0.5, 0.5, 1.0]),
+            fill_gradient: style.fill_gradient().cloned(),
+            stroke: style.stroke_color().unwrap_or([0.0, 0.0, 0.0, 1.0]),
+            stroke_w: style.stroke_width(),
+            stroke_style: style.stroke_style().clone(),
+            appearance: style.appearance().cloned(),
+            visible: true,
+            group: None,
+            clip: None,
+            mask: false,
+            omask: None,
+            omask_path: false,
+            omask_invert: false,
+            blend: None,
+            blend_step: false,
+        };
+        self.doc.shapes.insert(insert_at, compound);
+        self.select_only(Some(insert_at));
+        self.status = "Made compound path".into();
+    }
+
+    /// Release every compound path the selection touches (Illustrator's
+    /// `Object ▸ Compound Path ▸ Release`): split each back into one closed
+    /// [`Shape::Path`] per sub-contour, all inheriting the compound's paint. One
+    /// undo step; the released paths are selected.
+    pub(super) fn release_compound(&mut self) {
+        if !self.can_release_compound() {
+            return;
+        }
+        self.checkpoint();
+        // Indices of selected compounds, highest first so removals stay valid.
+        let mut idx: Vec<usize> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|&i| matches!(self.doc.shapes.get(i), Some(Shape::Compound { .. })))
+            .collect();
+        idx.sort_unstable();
+        idx.dedup();
+        let mut new_selection: Vec<usize> = Vec::new();
+        // Process highest first; track produced indices by re-scanning after.
+        for &i in idx.iter().rev() {
+            let compound = self.doc.shapes.remove(i);
+            let paths = release_compound_to_paths(&compound);
+            let n = paths.len();
+            for (k, p) in paths.into_iter().enumerate() {
+                self.doc.shapes.insert(i + k, p);
+            }
+            // The released run occupies i..i+n.
+            for k in 0..n {
+                new_selection.push(i + k);
+            }
+            // Shift previously-recorded indices that sit above this insertion.
+            // (We process descending, so earlier-recorded ones are at higher
+            // indices and unaffected; nothing to fix up.)
+        }
+        new_selection.sort_unstable();
+        self.selection = new_selection;
+        self.status = "Released compound path".into();
+    }
+
+    /// The app's compound fill rule as the document-model [`FillRule`].
+    fn compound_fill_rule_doc(&self) -> crate::document::FillRule {
+        match self.bool_fill_rule {
+            crate::boolean::BoolFillRule::EvenOdd => crate::document::FillRule::EvenOdd,
+            crate::boolean::BoolFillRule::NonZero => crate::document::FillRule::NonZero,
+        }
+    }
+
+    /// Set the fill rule of every selected compound path (one undo step). Returns
+    /// whether anything changed.
+    pub(super) fn set_compound_fill_rule(&mut self, rule: crate::document::FillRule) -> bool {
+        let targets: Vec<usize> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|&i| matches!(self.doc.shapes.get(i), Some(Shape::Compound { .. })))
+            .collect();
+        if targets.is_empty() {
+            return false;
+        }
+        // Skip if nothing would change.
+        let already = targets
+            .iter()
+            .all(|&i| self.doc.shapes[i].fill_rule() == Some(rule));
+        if already {
+            return false;
+        }
+        self.checkpoint();
+        for i in targets {
+            if let Some(Shape::Compound { fill_rule, .. }) = self.doc.shapes.get_mut(i) {
+                *fill_rule = rule;
+            }
+        }
+        self.status = "Set compound fill rule".into();
+        true
+    }
+
+    // --- Shape Builder -------------------------------------------------------
+
+    /// Commit a Shape Builder gesture: pick the faces the drag `path` crossed,
+    /// merge (or subtract) them, and replace the `sources` shapes with the result.
+    /// One undo step. Picking nothing (a click that hit no face, or a drag that
+    /// stayed off the artwork) does nothing.
+    pub(super) fn finish_shape_builder(
+        &mut self,
+        faces: Vec<crate::shapebuilder::Face>,
+        sources: Vec<usize>,
+        path: Vec<(f32, f32)>,
+        subtract: bool,
+    ) {
+        let picked = crate::shapebuilder::faces_along(&faces, &path);
+        if picked.is_empty() {
+            self.status = "Shape Builder: drag across the regions".into();
+            return;
+        }
+        let shapes: Vec<Shape> = sources
+            .iter()
+            .filter(|&&i| i < self.doc.shapes.len())
+            .map(|&i| self.doc.shapes[i].clone())
+            .collect();
+        let mode = if subtract {
+            crate::shapebuilder::BuildMode::Subtract
+        } else {
+            crate::shapebuilder::BuildMode::Unite
+        };
+        let result = crate::shapebuilder::apply_build(&shapes, &faces, &picked, mode);
+
+        self.checkpoint();
+        // Replace the source shapes (highest index first so the rest stay valid)
+        // with the result block, anchored where the back-most source was.
+        let mut srcs = sources.clone();
+        srcs.sort_unstable();
+        srcs.dedup();
+        let insert_at = srcs.first().copied().unwrap_or(self.doc.shapes.len());
+        let insert_at = insert_at.min(self.doc.shapes.len());
+        for &i in srcs.iter().rev() {
+            if i < self.doc.shapes.len() {
+                self.doc.shapes.remove(i);
+            }
+        }
+        // Count shapes removed below the insertion point to keep it valid.
+        let removed_below = srcs.iter().filter(|&&i| i < insert_at).count();
+        let at = insert_at - removed_below;
+        let n = result.len();
+        for (k, s) in result.into_iter().enumerate() {
+            self.doc.shapes.insert(at + k, s);
+        }
+        self.selection = (at..at + n).collect();
+        self.status = if subtract {
+            format!("Shape Builder: deleted {} region(s)", picked.len())
+        } else {
+            format!("Shape Builder: united {} region(s)", picked.len())
+        };
+    }
+
     // --- Undo / redo ---------------------------------------------------------
 
     /// Record the current document as an undo checkpoint *before* applying a
@@ -1437,4 +1672,109 @@ impl ContourApp {
         }
         self.status = "Distributed".into();
     }
+}
+
+/// The closed sub-contours a shape contributes to a compound path, or `None` for
+/// a shape with no closed fillable region (an open path / line). A `Rect` /
+/// `Ellipse` / closed `Path` contributes one sub-contour; an existing `Compound`
+/// contributes all of its sub-contours (so combining a compound flattens it).
+fn compound_subpaths(shape: &Shape) -> Option<Vec<crate::document::SubPath>> {
+    match shape {
+        Shape::Compound { subpaths, .. } => {
+            (!subpaths.is_empty()).then(|| subpaths.clone())
+        }
+        Shape::Path {
+            points,
+            handles,
+            closed,
+            ..
+        } => {
+            if !*closed || points.len() < 3 {
+                return None;
+            }
+            let mut h = handles.clone();
+            h.resize(points.len(), (0.0, 0.0));
+            Some(vec![crate::document::SubPath {
+                points: points.clone(),
+                handles: h,
+                closed: true,
+            }])
+        }
+        Shape::Rect { .. } | Shape::Ellipse { .. } => {
+            // Convert the primitive to a path and take its (single closed) ring.
+            if let Shape::Path {
+                points,
+                handles,
+                closed,
+                ..
+            } = shape.to_path()
+            {
+                (closed && points.len() >= 3).then(|| {
+                    vec![crate::document::SubPath {
+                        points,
+                        handles,
+                        closed: true,
+                    }]
+                })
+            } else {
+                None
+            }
+        }
+        Shape::Line { .. } => None,
+    }
+}
+
+/// Split a compound path into one closed [`Shape::Path`] per sub-contour, each
+/// inheriting the compound's paint (fill / gradient / stroke / appearance / tags).
+fn release_compound_to_paths(compound: &Shape) -> Vec<Shape> {
+    let Shape::Compound {
+        subpaths,
+        fill,
+        fill_gradient,
+        stroke,
+        stroke_w,
+        stroke_style,
+        appearance,
+        visible,
+        group,
+        clip,
+        mask,
+        omask,
+        omask_path,
+        omask_invert,
+        blend,
+        blend_step,
+        ..
+    } = compound
+    else {
+        return vec![compound.clone()];
+    };
+    subpaths
+        .iter()
+        .filter(|sp| sp.points.len() >= 2)
+        .map(|sp| {
+            let mut h = sp.handles.clone();
+            h.resize(sp.points.len(), (0.0, 0.0));
+            Shape::Path {
+                points: sp.points.clone(),
+                closed: sp.closed,
+                fill: *fill,
+                fill_gradient: fill_gradient.clone(),
+                stroke: *stroke,
+                stroke_w: *stroke_w,
+                stroke_style: stroke_style.clone(),
+                appearance: appearance.clone(),
+                handles: h,
+                visible: *visible,
+                group: *group,
+                clip: *clip,
+                mask: *mask,
+                omask: *omask,
+                omask_path: *omask_path,
+                omask_invert: *omask_invert,
+                blend: *blend,
+                blend_step: *blend_step,
+            }
+        })
+        .collect()
 }

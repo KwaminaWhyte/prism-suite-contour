@@ -11,7 +11,10 @@ mod style;
 #[cfg(test)]
 mod tests;
 
-pub use path::{bez_path, flatten, handle_at, nearest_segment, rects_intersect};
+pub use path::{
+    bez_path, flatten, handle_at, nearest_segment, point_in_rings, rects_intersect, FillRule,
+    SubPath,
+};
 pub use style::{LineCap, LineJoin, StrokeStyle};
 
 use crate::appearance::Appearance;
@@ -192,6 +195,46 @@ pub enum Shape {
         #[serde(default)]
         blend_step: bool,
     },
+    /// A **compound path**: one object that keeps several sub-contours (an outer
+    /// ring plus inner holes, or several disjoint regions) together, filled as a
+    /// unit under a [`FillRule`] (even-odd carves holes, non-zero absorbs same-
+    /// wound nesting). This is the document model's real answer to a Pathfinder
+    /// result that has holes — instead of expanding it into separate ring shapes,
+    /// the holes stay sub-contours of one path. Renders / hit-tests / serializes
+    /// as one object, and an `appearance` stack (when present) paints over the
+    /// whole compound outline.
+    Compound {
+        subpaths: Vec<SubPath>,
+        #[serde(default)]
+        fill_rule: FillRule,
+        fill: [f32; 4],
+        #[serde(default)]
+        fill_gradient: Option<Gradient>,
+        stroke: [f32; 4],
+        stroke_w: f32,
+        #[serde(default)]
+        stroke_style: StrokeStyle,
+        #[serde(default)]
+        appearance: Option<Appearance>,
+        #[serde(default = "default_true")]
+        visible: bool,
+        #[serde(default)]
+        group: Option<u64>,
+        #[serde(default)]
+        clip: Option<u64>,
+        #[serde(default)]
+        mask: bool,
+        #[serde(default)]
+        omask: Option<u64>,
+        #[serde(default)]
+        omask_path: bool,
+        #[serde(default)]
+        omask_invert: bool,
+        #[serde(default)]
+        blend: Option<u64>,
+        #[serde(default)]
+        blend_step: bool,
+    },
 }
 
 impl Shape {
@@ -202,6 +245,7 @@ impl Shape {
             Shape::Ellipse { .. } => "Ellipse",
             Shape::Line { .. } => "Line",
             Shape::Path { .. } => "Path",
+            Shape::Compound { .. } => "Compound Path",
         }
     }
 
@@ -211,7 +255,8 @@ impl Shape {
             Shape::Rect { visible, .. }
             | Shape::Ellipse { visible, .. }
             | Shape::Line { visible, .. }
-            | Shape::Path { visible, .. } => *visible,
+            | Shape::Path { visible, .. }
+            | Shape::Compound { visible, .. } => *visible,
         }
     }
 
@@ -221,7 +266,8 @@ impl Shape {
             Shape::Rect { visible, .. }
             | Shape::Ellipse { visible, .. }
             | Shape::Line { visible, .. }
-            | Shape::Path { visible, .. } => *visible = !*visible,
+            | Shape::Path { visible, .. }
+            | Shape::Compound { visible, .. } => *visible = !*visible,
         }
     }
 
@@ -232,7 +278,8 @@ impl Shape {
             Shape::Rect { group, .. }
             | Shape::Ellipse { group, .. }
             | Shape::Line { group, .. }
-            | Shape::Path { group, .. } => *group,
+            | Shape::Path { group, .. }
+            | Shape::Compound { group, .. } => *group,
         }
     }
 
@@ -242,7 +289,8 @@ impl Shape {
             Shape::Rect { group, .. }
             | Shape::Ellipse { group, .. }
             | Shape::Line { group, .. }
-            | Shape::Path { group, .. } => *group = g,
+            | Shape::Path { group, .. }
+            | Shape::Compound { group, .. } => *group = g,
         }
     }
 
@@ -254,7 +302,8 @@ impl Shape {
             Shape::Rect { clip, .. }
             | Shape::Ellipse { clip, .. }
             | Shape::Line { clip, .. }
-            | Shape::Path { clip, .. } => *clip,
+            | Shape::Path { clip, .. }
+            | Shape::Compound { clip, .. } => *clip,
         }
     }
 
@@ -264,7 +313,8 @@ impl Shape {
             Shape::Rect { clip, .. }
             | Shape::Ellipse { clip, .. }
             | Shape::Line { clip, .. }
-            | Shape::Path { clip, .. } => *clip = c,
+            | Shape::Path { clip, .. }
+            | Shape::Compound { clip, .. } => *clip = c,
         }
     }
 
@@ -274,7 +324,8 @@ impl Shape {
             Shape::Rect { mask, .. }
             | Shape::Ellipse { mask, .. }
             | Shape::Line { mask, .. }
-            | Shape::Path { mask, .. } => *mask,
+            | Shape::Path { mask, .. }
+            | Shape::Compound { mask, .. } => *mask,
         }
     }
 
@@ -284,7 +335,8 @@ impl Shape {
             Shape::Rect { mask, .. }
             | Shape::Ellipse { mask, .. }
             | Shape::Line { mask, .. }
-            | Shape::Path { mask, .. } => *mask = m,
+            | Shape::Path { mask, .. }
+            | Shape::Compound { mask, .. } => *mask = m,
         }
     }
 
@@ -303,7 +355,8 @@ impl Shape {
             Shape::Rect { omask, .. }
             | Shape::Ellipse { omask, .. }
             | Shape::Line { omask, .. }
-            | Shape::Path { omask, .. } => *omask,
+            | Shape::Path { omask, .. }
+            | Shape::Compound { omask, .. } => *omask,
         }
     }
 
@@ -313,7 +366,8 @@ impl Shape {
             Shape::Rect { omask, .. }
             | Shape::Ellipse { omask, .. }
             | Shape::Line { omask, .. }
-            | Shape::Path { omask, .. } => *omask = m,
+            | Shape::Path { omask, .. }
+            | Shape::Compound { omask, .. } => *omask = m,
         }
     }
 
@@ -323,7 +377,8 @@ impl Shape {
             Shape::Rect { omask_path, .. }
             | Shape::Ellipse { omask_path, .. }
             | Shape::Line { omask_path, .. }
-            | Shape::Path { omask_path, .. } => *omask_path,
+            | Shape::Path { omask_path, .. }
+            | Shape::Compound { omask_path, .. } => *omask_path,
         }
     }
 
@@ -333,7 +388,8 @@ impl Shape {
             Shape::Rect { omask_path, .. }
             | Shape::Ellipse { omask_path, .. }
             | Shape::Line { omask_path, .. }
-            | Shape::Path { omask_path, .. } => *omask_path = m,
+            | Shape::Path { omask_path, .. }
+            | Shape::Compound { omask_path, .. } => *omask_path = m,
         }
     }
 
@@ -343,7 +399,8 @@ impl Shape {
             Shape::Rect { omask_invert, .. }
             | Shape::Ellipse { omask_invert, .. }
             | Shape::Line { omask_invert, .. }
-            | Shape::Path { omask_invert, .. } => *omask_invert,
+            | Shape::Path { omask_invert, .. }
+            | Shape::Compound { omask_invert, .. } => *omask_invert,
         }
     }
 
@@ -353,7 +410,8 @@ impl Shape {
             Shape::Rect { omask_invert, .. }
             | Shape::Ellipse { omask_invert, .. }
             | Shape::Line { omask_invert, .. }
-            | Shape::Path { omask_invert, .. } => *omask_invert = v,
+            | Shape::Path { omask_invert, .. }
+            | Shape::Compound { omask_invert, .. } => *omask_invert = v,
         }
     }
 
@@ -372,7 +430,8 @@ impl Shape {
             Shape::Rect { blend, .. }
             | Shape::Ellipse { blend, .. }
             | Shape::Line { blend, .. }
-            | Shape::Path { blend, .. } => *blend,
+            | Shape::Path { blend, .. }
+            | Shape::Compound { blend, .. } => *blend,
         }
     }
 
@@ -382,7 +441,8 @@ impl Shape {
             Shape::Rect { blend, .. }
             | Shape::Ellipse { blend, .. }
             | Shape::Line { blend, .. }
-            | Shape::Path { blend, .. } => *blend = b,
+            | Shape::Path { blend, .. }
+            | Shape::Compound { blend, .. } => *blend = b,
         }
     }
 
@@ -393,7 +453,8 @@ impl Shape {
             Shape::Rect { blend_step, .. }
             | Shape::Ellipse { blend_step, .. }
             | Shape::Line { blend_step, .. }
-            | Shape::Path { blend_step, .. } => *blend_step,
+            | Shape::Path { blend_step, .. }
+            | Shape::Compound { blend_step, .. } => *blend_step,
         }
     }
 
@@ -403,7 +464,8 @@ impl Shape {
             Shape::Rect { blend_step, .. }
             | Shape::Ellipse { blend_step, .. }
             | Shape::Line { blend_step, .. }
-            | Shape::Path { blend_step, .. } => *blend_step = s,
+            | Shape::Path { blend_step, .. }
+            | Shape::Compound { blend_step, .. } => *blend_step = s,
         }
     }
 
@@ -453,9 +515,31 @@ impl Shape {
                 }
                 path::flatten(points, handles, true)
             }
+            Shape::Compound { subpaths, .. } => {
+                // The outline polygon is the compound's *outer* ring — the
+                // largest-area closed sub-contour — so boolean ops / clip masks
+                // that consume a single ring treat the compound by its outer
+                // boundary. (Hit-testing / rendering use every sub-contour under
+                // the fill rule where holes matter.)
+                let outer = subpaths
+                    .iter()
+                    .filter(|s| s.closed)
+                    .map(|s| (s.signed_area().abs(), s))
+                    .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(_, s)| s)?;
+                outer.flatten()
+            }
             Shape::Line { .. } => return None,
         };
         (pts.len() >= 3).then_some(pts)
+    }
+
+    /// The compound path's [`FillRule`], if this is a compound path.
+    pub fn fill_rule(&self) -> Option<FillRule> {
+        match self {
+            Shape::Compound { fill_rule, .. } => Some(*fill_rule),
+            _ => None,
+        }
     }
 
     /// The shape's stroke colour (straight sRGB RGBA). Every variant has a
@@ -466,7 +550,8 @@ impl Shape {
             Shape::Rect { stroke, .. }
             | Shape::Ellipse { stroke, .. }
             | Shape::Line { stroke, .. }
-            | Shape::Path { stroke, .. } => Some(*stroke),
+            | Shape::Path { stroke, .. }
+            | Shape::Compound { stroke, .. } => Some(*stroke),
         }
     }
 
@@ -476,7 +561,8 @@ impl Shape {
             Shape::Rect { stroke, .. }
             | Shape::Ellipse { stroke, .. }
             | Shape::Line { stroke, .. }
-            | Shape::Path { stroke, .. } => *stroke = c,
+            | Shape::Path { stroke, .. }
+            | Shape::Compound { stroke, .. } => *stroke = c,
         }
     }
 
@@ -486,7 +572,8 @@ impl Shape {
             Shape::Rect { stroke_w, .. }
             | Shape::Ellipse { stroke_w, .. }
             | Shape::Line { stroke_w, .. }
-            | Shape::Path { stroke_w, .. } => *stroke_w,
+            | Shape::Path { stroke_w, .. }
+            | Shape::Compound { stroke_w, .. } => *stroke_w,
         }
     }
 
@@ -496,7 +583,8 @@ impl Shape {
             Shape::Rect { stroke_w, .. }
             | Shape::Ellipse { stroke_w, .. }
             | Shape::Line { stroke_w, .. }
-            | Shape::Path { stroke_w, .. } => *stroke_w = w,
+            | Shape::Path { stroke_w, .. }
+            | Shape::Compound { stroke_w, .. } => *stroke_w = w,
         }
     }
 
@@ -506,7 +594,8 @@ impl Shape {
             Shape::Rect { stroke_style, .. }
             | Shape::Ellipse { stroke_style, .. }
             | Shape::Line { stroke_style, .. }
-            | Shape::Path { stroke_style, .. } => stroke_style,
+            | Shape::Path { stroke_style, .. }
+            | Shape::Compound { stroke_style, .. } => stroke_style,
         }
     }
 
@@ -516,7 +605,8 @@ impl Shape {
             Shape::Rect { stroke_style, .. }
             | Shape::Ellipse { stroke_style, .. }
             | Shape::Line { stroke_style, .. }
-            | Shape::Path { stroke_style, .. } => stroke_style,
+            | Shape::Path { stroke_style, .. }
+            | Shape::Compound { stroke_style, .. } => stroke_style,
         }
     }
 
@@ -529,7 +619,8 @@ impl Shape {
             Shape::Rect { appearance, .. }
             | Shape::Ellipse { appearance, .. }
             | Shape::Line { appearance, .. }
-            | Shape::Path { appearance, .. } => appearance.as_ref(),
+            | Shape::Path { appearance, .. }
+            | Shape::Compound { appearance, .. } => appearance.as_ref(),
         }
     }
 
@@ -539,7 +630,8 @@ impl Shape {
             Shape::Rect { appearance, .. }
             | Shape::Ellipse { appearance, .. }
             | Shape::Line { appearance, .. }
-            | Shape::Path { appearance, .. } => appearance,
+            | Shape::Path { appearance, .. }
+            | Shape::Compound { appearance, .. } => appearance,
         }
     }
 
@@ -572,7 +664,8 @@ impl Shape {
         match self {
             Shape::Rect { fill_gradient, .. }
             | Shape::Ellipse { fill_gradient, .. }
-            | Shape::Path { fill_gradient, .. } => fill_gradient.as_ref(),
+            | Shape::Path { fill_gradient, .. }
+            | Shape::Compound { fill_gradient, .. } => fill_gradient.as_ref(),
             Shape::Line { .. } => None,
         }
     }
@@ -583,7 +676,8 @@ impl Shape {
         match self {
             Shape::Rect { fill_gradient, .. }
             | Shape::Ellipse { fill_gradient, .. }
-            | Shape::Path { fill_gradient, .. } => *fill_gradient = g,
+            | Shape::Path { fill_gradient, .. }
+            | Shape::Compound { fill_gradient, .. } => *fill_gradient = g,
             Shape::Line { .. } => {}
         }
     }
@@ -593,9 +687,10 @@ impl Shape {
     /// gradient's fallback.
     pub fn fill_color(&self) -> Option<[f32; 4]> {
         match self {
-            Shape::Rect { fill, .. } | Shape::Ellipse { fill, .. } | Shape::Path { fill, .. } => {
-                Some(*fill)
-            }
+            Shape::Rect { fill, .. }
+            | Shape::Ellipse { fill, .. }
+            | Shape::Path { fill, .. }
+            | Shape::Compound { fill, .. } => Some(*fill),
             Shape::Line { .. } => None,
         }
     }
@@ -603,9 +698,10 @@ impl Shape {
     /// Set the shape's solid fill colour. No-op on `Line`.
     pub fn set_fill_color(&mut self, c: [f32; 4]) {
         match self {
-            Shape::Rect { fill, .. } | Shape::Ellipse { fill, .. } | Shape::Path { fill, .. } => {
-                *fill = c
-            }
+            Shape::Rect { fill, .. }
+            | Shape::Ellipse { fill, .. }
+            | Shape::Path { fill, .. }
+            | Shape::Compound { fill, .. } => *fill = c,
             Shape::Line { .. } => {}
         }
     }
@@ -664,7 +760,8 @@ impl Shape {
         let grad_changed = match self {
             Shape::Rect { fill_gradient, .. }
             | Shape::Ellipse { fill_gradient, .. }
-            | Shape::Path { fill_gradient, .. } => fill_gradient
+            | Shape::Path { fill_gradient, .. }
+            | Shape::Compound { fill_gradient, .. } => fill_gradient
                 .as_mut()
                 .map(|g| {
                     let mut any = false;
@@ -724,6 +821,23 @@ impl Shape {
                     r.height() as f32,
                 ))
             }
+            Shape::Compound { subpaths, .. } => {
+                // Union of every sub-contour's tight (bezier-aware) bounds.
+                let mut union: Option<kurbo::Rect> = None;
+                for sp in subpaths {
+                    if sp.points.is_empty() {
+                        continue;
+                    }
+                    let r = path::bez_path(&sp.points, &sp.handles, sp.closed).bounding_box();
+                    union = Some(match union {
+                        Some(u) => u.union(r),
+                        None => r,
+                    });
+                }
+                union.map(|r| {
+                    CoreRect::new(r.x0 as f32, r.y0 as f32, r.width() as f32, r.height() as f32)
+                })
+            }
         }
     }
 
@@ -745,6 +859,14 @@ impl Shape {
                 for p in points.iter_mut() {
                     p.0 += dx;
                     p.1 += dy;
+                }
+            }
+            Shape::Compound { subpaths, .. } => {
+                for sp in subpaths.iter_mut() {
+                    for p in sp.points.iter_mut() {
+                        p.0 += dx;
+                        p.1 += dy;
+                    }
                 }
             }
         }
@@ -794,6 +916,19 @@ impl Shape {
                     *h = m.apply_vector(h.0, h.1);
                 }
             }
+            Shape::Compound { subpaths, .. } => {
+                // Transform every sub-contour in place (anchors by the full
+                // matrix, handle offsets by its linear part). A compound path has
+                // no axis-aligned fast path — it is already an editable path.
+                for sp in subpaths.iter_mut() {
+                    for p in sp.points.iter_mut() {
+                        *p = m.apply_point(p.0, p.1);
+                    }
+                    for h in sp.handles.iter_mut() {
+                        *h = m.apply_vector(h.0, h.1);
+                    }
+                }
+            }
         }
     }
 
@@ -837,7 +972,10 @@ impl Shape {
     /// path; an existing `Path` is returned unchanged.
     pub fn to_path(&self) -> Shape {
         match self {
-            Shape::Path { .. } => self.clone(),
+            // A compound path is already an editable path object; there is no
+            // single-ring `Path` it reduces to without losing its holes, so it is
+            // returned unchanged (transform / Pathfinder handle it as a compound).
+            Shape::Path { .. } | Shape::Compound { .. } => self.clone(),
             Shape::Rect {
                 rect,
                 fill,
@@ -1063,6 +1201,37 @@ impl Shape {
                     let b = flat[(i + 1) % n];
                     if path::dist_to_segment(x, y, a, b) <= tol.max(2.0) {
                         return true;
+                    }
+                }
+                false
+            }
+            Shape::Compound {
+                subpaths,
+                fill_rule,
+                ..
+            } => {
+                // Fill hit-test against all sub-contours under the compound's fill
+                // rule (so a click in a hole misses, a click on solid area hits),
+                // then the stroke edges so the boundary stays clickable.
+                let rings: Vec<Vec<(f32, f32)>> = subpaths
+                    .iter()
+                    .filter(|s| s.closed)
+                    .map(|s| s.flatten())
+                    .collect();
+                if path::point_in_rings(x, y, &rings, *fill_rule) {
+                    return true;
+                }
+                for sp in subpaths {
+                    let flat = sp.flatten();
+                    let n = flat.len();
+                    if n < 2 {
+                        continue;
+                    }
+                    let last = if sp.closed { n } else { n - 1 };
+                    for i in 0..last {
+                        if path::dist_to_segment(x, y, flat[i], flat[(i + 1) % n]) <= tol.max(2.0) {
+                            return true;
+                        }
                     }
                 }
                 false

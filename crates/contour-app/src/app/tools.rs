@@ -173,6 +173,20 @@ impl ContourApp {
 
             self.draw_preview(&painter);
 
+            // Shape Builder gesture preview: highlight the regions the drag has
+            // crossed and trace the drag path.
+            if let Some(sb) = &self.inter.sb_drag {
+                let picked = crate::shapebuilder::faces_along(&sb.faces, &sb.path);
+                canvas::paint_shape_builder(
+                    &painter,
+                    &self.view,
+                    &sb.faces,
+                    &picked,
+                    &sb.path,
+                    sb.subtract,
+                );
+            }
+
             // Rubber-band marquee box (Select tool, drag on empty canvas).
             if let Some(bbox) = self.marquee_rect() {
                 canvas::paint_marquee(&painter, &self.view, &bbox);
@@ -291,6 +305,59 @@ impl ContourApp {
             Tool::Pen => self.handle_pen(response, doc_pos),
             Tool::Artboard => self.handle_artboard(response, doc_pos),
             Tool::Eyedropper => self.handle_eyedropper(response, doc_pos),
+            Tool::ShapeBuilder => self.handle_shape_builder(response, doc_pos),
+        }
+    }
+
+    /// Shape Builder input: drag across the selected shapes' overlapping regions
+    /// to **unite** them into one path, or **Alt/Option-drag** to **delete** the
+    /// regions dragged over.
+    ///
+    /// On drag start the region graph (atomic faces) of the selected shapes is
+    /// built once; each dragged frame samples the pointer into the gesture path;
+    /// on release the faces the path crossed are merged (or subtracted) and the
+    /// selected shapes are replaced with the result (one undo step). Needs two or
+    /// more selected shapes with a usable closed outline.
+    fn handle_shape_builder(&mut self, response: &egui::Response, doc_pos: Option<(f32, f32)>) {
+        use super::ShapeBuilderDrag;
+        if response.drag_started() {
+            // Gather the selected source shapes in paint order.
+            let mut sources: Vec<usize> = self
+                .selection
+                .iter()
+                .copied()
+                .filter(|&i| i < self.doc.shapes.len())
+                .collect();
+            sources.sort_unstable();
+            sources.dedup();
+            let shapes: Vec<crate::document::Shape> =
+                sources.iter().map(|&i| self.doc.shapes[i].clone()).collect();
+            let faces = crate::shapebuilder::build_faces(&shapes);
+            if sources.len() < 2 || faces.is_empty() {
+                self.status = "Shape Builder: select two or more overlapping shapes".into();
+                return;
+            }
+            let subtract = response.ctx.input(|i| i.modifiers.alt);
+            let mut path = Vec::new();
+            if let Some(p) = doc_pos {
+                path.push(p);
+            }
+            self.inter.sb_drag = Some(ShapeBuilderDrag {
+                faces,
+                sources,
+                path,
+                subtract,
+            });
+        }
+        if response.dragged() {
+            if let (Some(sb), Some(p)) = (self.inter.sb_drag.as_mut(), doc_pos) {
+                sb.path.push(p);
+            }
+        }
+        if response.drag_stopped() {
+            if let Some(sb) = self.inter.sb_drag.take() {
+                self.finish_shape_builder(sb.faces, sb.sources, sb.path, sb.subtract);
+            }
         }
     }
 

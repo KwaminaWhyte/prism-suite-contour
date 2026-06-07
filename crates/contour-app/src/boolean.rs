@@ -14,7 +14,7 @@
 //! or nested input is interpreted — **non-zero** vs **even-odd** — matching the
 //! two compound-path fill rules in Illustrator.
 
-use crate::document::Shape;
+use crate::document::{FillRule as DocFillRule, Shape, SubPath};
 use i_overlay::core::fill_rule::FillRule;
 use i_overlay::core::overlay_rule::OverlayRule;
 use i_overlay::float::single::SingleFloatOverlay;
@@ -126,6 +126,110 @@ fn overlay_rings(
         .collect()
 }
 
+/// Run one overlay rule and return the result **grouped by shape**: each inner
+/// `Vec` is one filled region's contours, the first being the outer ring and any
+/// following ones its holes (the structure `i_overlay` extracts). Empty contours
+/// (< 3 points) are dropped; a shape with no usable outer ring is dropped.
+fn overlay_grouped(
+    subj: &Vec<[f64; 2]>,
+    clip: &Vec<[f64; 2]>,
+    rule: OverlayRule,
+    fill: BoolFillRule,
+) -> Vec<Vec<Vec<(f32, f32)>>> {
+    let shapes = subj.overlay(clip, rule, fill.rule());
+    shapes
+        .into_iter()
+        .map(|shape| {
+            shape
+                .into_iter()
+                .filter(|c| c.len() >= 3)
+                .map(|c| c.iter().map(|p| (p[0] as f32, p[1] as f32)).collect())
+                .collect::<Vec<Vec<(f32, f32)>>>()
+        })
+        .filter(|contours| !contours.is_empty())
+        .collect()
+}
+
+/// Turn `i_overlay`'s grouped result into document shapes: a region with a single
+/// contour becomes a closed [`Shape::Path`]; a region with **holes** (an outer
+/// ring plus inner rings) becomes one [`Shape::Compound`] keeping its holes as
+/// sub-contours — the document model's real compound path, so a Pathfinder result
+/// with holes is one object instead of separate rings. Styled from `style`,
+/// optionally overriding the fill.
+fn grouped_to_shapes(
+    grouped: Vec<Vec<Vec<(f32, f32)>>>,
+    style: &Shape,
+    fill_override: Option<[f32; 4]>,
+    fill_rule: BoolFillRule,
+) -> Vec<Shape> {
+    grouped
+        .into_iter()
+        .filter_map(|contours| region_to_shape(contours, style, fill_override, fill_rule))
+        .collect()
+}
+
+/// One filled region (outer ring then holes) → a `Path` (no holes) or a
+/// `Compound` (with holes).
+fn region_to_shape(
+    mut contours: Vec<Vec<(f32, f32)>>,
+    style: &Shape,
+    fill_override: Option<[f32; 4]>,
+    fill_rule: BoolFillRule,
+) -> Option<Shape> {
+    if contours.is_empty() {
+        return None;
+    }
+    if contours.len() == 1 {
+        return Some(ring_to_path(contours.remove(0), style, fill_override));
+    }
+    // Holes present: build a compound path. The result is unambiguous geometry
+    // (an outer ring plus inner hole rings), so it is stored under **even-odd** —
+    // which carves the holes regardless of each ring's winding direction, the
+    // robust choice for a derived Pathfinder result. (The `fill` rule passed in
+    // governs how the *input* nesting was interpreted by `i_overlay`.)
+    let _ = fill_rule;
+    let subpaths: Vec<SubPath> = contours.into_iter().map(SubPath::ring).collect();
+    Some(compound_from_subpaths(subpaths, style, fill_override))
+}
+
+/// Build a [`Shape::Compound`] from sub-contours, inheriting `style`'s paint (or
+/// a flat `fill_override`), under the even-odd rule so holes always carve.
+fn compound_from_subpaths(
+    subpaths: Vec<SubPath>,
+    style: &Shape,
+    fill_override: Option<[f32; 4]>,
+) -> Shape {
+    let (fill, stroke, stroke_w) = subj_paint(style);
+    let fill = fill_override.unwrap_or(fill);
+    Shape::Compound {
+        subpaths,
+        fill_rule: DocFillRule::EvenOdd,
+        fill,
+        fill_gradient: if fill_override.is_some() {
+            None
+        } else {
+            style.fill_gradient().cloned()
+        },
+        stroke,
+        stroke_w,
+        stroke_style: style.stroke_style().clone(),
+        appearance: if fill_override.is_some() {
+            None
+        } else {
+            style.appearance().cloned()
+        },
+        visible: true,
+        group: None,
+        clip: None,
+        mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
+        blend: None,
+        blend_step: false,
+    }
+}
+
 /// The subject's paint (solid fill, stroke colour, stroke width). A `Line`
 /// (which has no fill region) falls back to a neutral grey fill, the way the
 /// previous single-op path did.
@@ -187,69 +291,74 @@ pub fn apply(subj_shape: &Shape, clip_shape: &Shape, op: BoolOp, fill: BoolFillR
 
     // The single-overlay ops map straight onto one `OverlayRule`; the compound
     // ops (Divide / Trim / Merge / Crop / Outline) compose a couple of overlays
-    // and re-style the resulting faces.
+    // and re-style the resulting faces. Area-conserving ops now return their
+    // regions **grouped**, so a region with holes becomes one compound path
+    // (outer ring + hole sub-contours) rather than separate rings.
     match op {
-        BoolOp::Union => overlay_rings(&subj, &clip, OverlayRule::Union, fill)
-            .into_iter()
-            .map(|r| ring_to_path(r, subj_shape, None))
-            .collect(),
-        BoolOp::Intersect => overlay_rings(&subj, &clip, OverlayRule::Intersect, fill)
-            .into_iter()
-            .map(|r| ring_to_path(r, subj_shape, None))
-            .collect(),
-        BoolOp::Difference => overlay_rings(&subj, &clip, OverlayRule::Difference, fill)
-            .into_iter()
-            .map(|r| ring_to_path(r, subj_shape, None))
-            .collect(),
-        BoolOp::Exclude => overlay_rings(&subj, &clip, OverlayRule::Xor, fill)
-            .into_iter()
-            .map(|r| ring_to_path(r, subj_shape, None))
-            .collect(),
-        BoolOp::MinusBack => overlay_rings(&subj, &clip, OverlayRule::InverseDifference, fill)
-            .into_iter()
+        BoolOp::Union => grouped_to_shapes(
+            overlay_grouped(&subj, &clip, OverlayRule::Union, fill),
+            subj_shape,
+            None,
+            fill,
+        ),
+        BoolOp::Intersect => grouped_to_shapes(
+            overlay_grouped(&subj, &clip, OverlayRule::Intersect, fill),
+            subj_shape,
+            None,
+            fill,
+        ),
+        BoolOp::Difference => grouped_to_shapes(
+            overlay_grouped(&subj, &clip, OverlayRule::Difference, fill),
+            subj_shape,
+            None,
+            fill,
+        ),
+        BoolOp::Exclude => grouped_to_shapes(
+            overlay_grouped(&subj, &clip, OverlayRule::Xor, fill),
+            subj_shape,
+            None,
+            fill,
+        ),
+        BoolOp::MinusBack => grouped_to_shapes(
+            overlay_grouped(&subj, &clip, OverlayRule::InverseDifference, fill),
             // Minus Back keeps the *front* (clip) shape, so it takes its paint.
-            .map(|r| ring_to_path(r, clip_shape, None))
-            .collect(),
-        BoolOp::Crop => overlay_rings(&subj, &clip, OverlayRule::Intersect, fill)
-            .into_iter()
-            .map(|r| ring_to_path(r, subj_shape, None))
-            .collect(),
+            clip_shape,
+            None,
+            fill,
+        ),
+        BoolOp::Crop => grouped_to_shapes(
+            overlay_grouped(&subj, &clip, OverlayRule::Intersect, fill),
+            subj_shape,
+            None,
+            fill,
+        ),
         BoolOp::Divide => {
             // Every non-overlapping region: the overlap plus each shape minus the
             // other. The overlap takes the front colour, each crescent its own.
-            let mut out = Vec::new();
-            for r in overlay_rings(&subj, &clip, OverlayRule::Intersect, fill) {
-                out.push(ring_to_path(r, clip_shape, None));
-            }
-            for r in overlay_rings(&subj, &clip, OverlayRule::Difference, fill) {
-                out.push(ring_to_path(r, subj_shape, None));
-            }
-            for r in overlay_rings(&subj, &clip, OverlayRule::InverseDifference, fill) {
-                out.push(ring_to_path(r, clip_shape, None));
-            }
+            // Each region keeps its holes as a compound (e.g. a Divide producing a
+            // ring-with-hole face).
+            let mut out = grouped_to_shapes(
+                overlay_grouped(&subj, &clip, OverlayRule::Intersect, fill),
+                clip_shape,
+                None,
+                fill,
+            );
+            out.extend(grouped_to_shapes(
+                overlay_grouped(&subj, &clip, OverlayRule::Difference, fill),
+                subj_shape,
+                None,
+                fill,
+            ));
+            out.extend(grouped_to_shapes(
+                overlay_grouped(&subj, &clip, OverlayRule::InverseDifference, fill),
+                clip_shape,
+                None,
+                fill,
+            ));
             out
         }
-        BoolOp::Trim => {
-            // Keep the whole front shape plus the back shape with its hidden part
-            // removed — two faces, each its own colour, abutting with no overlap.
-            let mut out = Vec::new();
-            for r in overlay_rings(&clip, &subj, OverlayRule::Subject, fill) {
-                out.push(ring_to_path(r, clip_shape, None));
-            }
-            for r in overlay_rings(&subj, &clip, OverlayRule::Difference, fill) {
-                out.push(ring_to_path(r, subj_shape, None));
-            }
-            out
-        }
-        BoolOp::Merge => {
-            // Like Trim, but the abutting faces are unified into one region taking
-            // the back shape's fill (the everyday "weld two same-colour shapes").
-            let bg = subj_shape.fill_color().unwrap_or([0.5, 0.5, 0.5, 1.0]);
-            overlay_rings(&subj, &clip, OverlayRule::Union, fill)
-                .into_iter()
-                .map(|r| ring_to_path(r, subj_shape, Some(bg)))
-                .collect()
-        }
+        BoolOp::Trim => merge_trim(&subj, &clip, subj_shape, clip_shape, fill, false),
+        BoolOp::Merge => merge_trim(&subj, &clip, subj_shape, clip_shape, fill, true),
         BoolOp::Outline => {
             // The combined boundary as unfilled, hairline-stroked paths: take the
             // union outline and emit each ring with a transparent fill so only the
@@ -266,6 +375,69 @@ pub fn apply(subj_shape: &Shape, clip_shape: &Shape, op: BoolOp, fill: BoolFillR
                 .collect()
         }
     }
+}
+
+/// Whether two straight-sRGB RGBA colours are equal within a small tolerance —
+/// the "same colour" test that decides whether **Merge** welds two abutting /
+/// overlapping faces (Illustrator merges adjacent *same-colour* faces).
+fn same_color(a: [f32; 4], b: [f32; 4]) -> bool {
+    a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() < 1e-3)
+}
+
+/// Illustrator's **Trim** and **Merge** pathfinders, on two operands.
+///
+/// Both *trim hidden parts*: the front (clip) shape stays whole and the back
+/// (subj) shape has the part the front covers removed, so no two faces overlap
+/// and **each face keeps its own fill** (unlike the old "weld to the back colour"
+/// approximation). The difference is `merge`:
+///
+/// - **Trim** (`merge == false`): always two trimmed faces (front + back−front),
+///   each its own colour, regardless of whether they match.
+/// - **Merge** (`merge == true`): same as Trim when the two faces differ in
+///   colour, but when they are the **same colour** the abutting faces are welded
+///   into one path (`subj ∪ clip`) under that shared colour — Illustrator's
+///   "merge adjacent same-colour faces" behaviour.
+///
+/// Each produced face keeps its holes (a face that comes out a ring-with-hole
+/// becomes a compound path).
+fn merge_trim(
+    subj: &Vec<[f64; 2]>,
+    clip: &Vec<[f64; 2]>,
+    subj_shape: &Shape,
+    clip_shape: &Shape,
+    fill: BoolFillRule,
+    merge: bool,
+) -> Vec<Shape> {
+    let subj_fill = subj_shape.fill_color().unwrap_or([0.5, 0.5, 0.5, 1.0]);
+    let clip_fill = clip_shape.fill_color().unwrap_or([0.5, 0.5, 0.5, 1.0]);
+
+    // Merge welds only when the two faces share a colour: union them into one
+    // region (still keeping any holes as a compound), taking that shared fill.
+    if merge && same_color(subj_fill, clip_fill) {
+        return grouped_to_shapes(
+            overlay_grouped(subj, clip, OverlayRule::Union, fill),
+            subj_shape,
+            Some(subj_fill),
+            fill,
+        );
+    }
+
+    // Otherwise (Trim, or Merge of differently-coloured faces): the front shape
+    // whole on top, plus the back shape with the overlapped (hidden) part removed.
+    // Two trimmed faces, each its own colour, abutting with no overlap.
+    let mut out = grouped_to_shapes(
+        overlay_grouped(clip, subj, OverlayRule::Subject, fill),
+        clip_shape,
+        None,
+        fill,
+    );
+    out.extend(grouped_to_shapes(
+        overlay_grouped(subj, clip, OverlayRule::Difference, fill),
+        subj_shape,
+        None,
+        fill,
+    ));
+    out
 }
 
 #[cfg(test)]
@@ -306,15 +478,27 @@ mod tests {
         (a * 0.5).abs()
     }
 
-    /// Total filled area across a batch of result paths.
+    /// Net filled area of a single result shape: a `Path`'s ring area, or a
+    /// compound path's outer ring minus its holes (the largest sub-contour is the
+    /// outer ring, the rest are holes that subtract).
+    fn shape_area(s: &Shape) -> f32 {
+        match s {
+            Shape::Path { points, .. } => area(points),
+            Shape::Compound { subpaths, .. } => {
+                let mut areas: Vec<f32> = subpaths.iter().map(|sp| area(&sp.flatten())).collect();
+                areas.sort_by(|x, y| y.partial_cmp(x).unwrap());
+                // outer (largest) minus the rest (holes)
+                let outer = areas.first().copied().unwrap_or(0.0);
+                let holes: f32 = areas.iter().skip(1).sum();
+                (outer - holes).max(0.0)
+            }
+            _ => 0.0,
+        }
+    }
+
+    /// Total filled area across a batch of result paths (net of holes).
     fn total_area(shapes: &[Shape]) -> f32 {
-        shapes
-            .iter()
-            .map(|s| match s {
-                Shape::Path { points, .. } => area(points),
-                _ => 0.0,
-            })
-            .sum()
+        shapes.iter().map(shape_area).sum()
     }
 
     #[test]
@@ -353,24 +537,35 @@ mod tests {
 
     #[test]
     fn difference_punches_a_hole_region() {
-        // A fully enclosing B: subj − clip leaves a frame (outer ring + hole) —
-        // two rings in the single-ring model.
+        // A fully enclosing B: subj − clip leaves a frame (outer ring + hole).
+        // The compound-path model keeps this as ONE object with two sub-contours
+        // (outer 30×30 ring + inner 10×10 hole), instead of two separate rings.
         let outer = rect(0.0, 0.0, 30.0, 30.0);
         let inner = rect(10.0, 10.0, 10.0, 10.0);
         let r = apply(&outer, &inner, BoolOp::Difference, BoolFillRule::NonZero);
-        assert_eq!(r.len(), 2, "outer ring + the hole ring");
-        // Net frame area = 900 − 100 = 800; here both rings count positive, so the
-        // larger (900) minus would be wrong — assert each ring individually.
-        let mut areas: Vec<f32> = r
-            .iter()
-            .map(|s| match s {
-                Shape::Path { points, .. } => area(points),
-                _ => 0.0,
-            })
-            .collect();
-        areas.sort_by(|x, y| x.partial_cmp(y).unwrap());
-        assert!((areas[0] - 100.0).abs() < 0.5, "hole ring is the 10×10 inner");
-        assert!((areas[1] - 900.0).abs() < 0.5, "outer ring is the 30×30");
+        assert_eq!(r.len(), 1, "one compound path (ring with a hole)");
+        match &r[0] {
+            Shape::Compound {
+                subpaths,
+                fill_rule,
+                ..
+            } => {
+                assert_eq!(subpaths.len(), 2, "outer ring + one hole sub-contour");
+                assert_eq!(
+                    *fill_rule,
+                    crate::document::FillRule::EvenOdd,
+                    "holes carve under even-odd"
+                );
+                // Sub-contour areas: a 900 outer and a 100 hole.
+                let mut areas: Vec<f32> = subpaths.iter().map(|sp| area(&sp.flatten())).collect();
+                areas.sort_by(|x, y| x.partial_cmp(y).unwrap());
+                assert!((areas[0] - 100.0).abs() < 0.5, "hole sub-contour is 10×10");
+                assert!((areas[1] - 900.0).abs() < 0.5, "outer sub-contour is 30×30");
+            }
+            other => panic!("expected a Compound path, got {other:?}"),
+        }
+        // Net filled area = 900 − 100 = 800.
+        assert!((total_area(&r) - 800.0).abs() < 0.5, "net frame area");
     }
 
     #[test]
@@ -416,13 +611,73 @@ mod tests {
         assert!((total_area(&r) - 175.0).abs() < 0.5);
     }
 
+    /// A rect with an explicit fill colour, for the Merge same-/different-colour
+    /// tests.
+    fn colored_rect(x: f32, y: f32, w: f32, h: f32, fill: [f32; 4]) -> Shape {
+        let mut s = rect(x, y, w, h);
+        s.set_fill_color(fill);
+        s
+    }
+
     #[test]
     fn merge_welds_into_one_region() {
+        // Same colour (both red from `rect`): Merge welds them into one region.
         let a = rect(0.0, 0.0, 10.0, 10.0);
         let b = rect(5.0, 5.0, 10.0, 10.0);
         let r = apply(&a, &b, BoolOp::Merge, BoolFillRule::NonZero);
         assert_eq!(r.len(), 1, "one welded region");
         assert!((total_area(&r) - 175.0).abs() < 0.5);
+    }
+
+    /// **Merge** of two *different-coloured* overlapping faces does NOT weld:
+    /// it trims the hidden part of the back face and keeps each face its own
+    /// colour (Illustrator's real Merge — merge same-colour, trim different).
+    #[test]
+    fn merge_trims_different_colored_faces() {
+        let back = colored_rect(0.0, 0.0, 10.0, 10.0, [1.0, 0.0, 0.0, 1.0]); // red
+        let front = colored_rect(5.0, 5.0, 10.0, 10.0, [0.0, 0.0, 1.0, 1.0]); // blue
+        let r = apply(&back, &front, BoolOp::Merge, BoolFillRule::NonZero);
+        // Two trimmed faces (front whole + back−front), no overlap.
+        assert_eq!(r.len(), 2, "different colours stay two trimmed faces");
+        // front (100) + (back − front) (75) = 175, no double-counted overlap.
+        assert!((total_area(&r) - 175.0).abs() < 0.5);
+        // Each face keeps its own colour: a blue (front) and a red (back) face.
+        let colors: Vec<[f32; 4]> = r.iter().filter_map(|s| s.fill_color()).collect();
+        assert!(colors.contains(&[0.0, 0.0, 1.0, 1.0]), "front blue preserved");
+        assert!(colors.contains(&[1.0, 0.0, 0.0, 1.0]), "back red preserved");
+        // No face is the welded back-colour-only union (that would be 1 region).
+        let total_front_area: f32 = r
+            .iter()
+            .filter(|s| s.fill_color() == Some([0.0, 0.0, 1.0, 1.0]))
+            .map(shape_area)
+            .sum();
+        assert!((total_front_area - 100.0).abs() < 0.5, "front face is whole");
+    }
+
+    /// **Merge** of two same-coloured faces welds them into one region under that
+    /// shared colour (the explicit same-colour weld path).
+    #[test]
+    fn merge_welds_same_colored_faces() {
+        let c = [0.2, 0.7, 0.3, 1.0];
+        let a = colored_rect(0.0, 0.0, 10.0, 10.0, c);
+        let b = colored_rect(5.0, 5.0, 10.0, 10.0, c);
+        let r = apply(&a, &b, BoolOp::Merge, BoolFillRule::NonZero);
+        assert_eq!(r.len(), 1, "same colour welds into one region");
+        assert!((total_area(&r) - 175.0).abs() < 0.5);
+        assert_eq!(r[0].fill_color(), Some(c), "welded region keeps the colour");
+    }
+
+    /// **Trim** always trims the hidden part of the back face and keeps each
+    /// face's own colour (it never welds, even when colours match).
+    #[test]
+    fn trim_preserves_each_face_color() {
+        let back = colored_rect(0.0, 0.0, 10.0, 10.0, [1.0, 0.0, 0.0, 1.0]);
+        let front = colored_rect(5.0, 5.0, 10.0, 10.0, [0.0, 0.0, 1.0, 1.0]);
+        let r = apply(&back, &front, BoolOp::Trim, BoolFillRule::NonZero);
+        assert_eq!(r.len(), 2);
+        let colors: Vec<[f32; 4]> = r.iter().filter_map(|s| s.fill_color()).collect();
+        assert!(colors.contains(&[0.0, 0.0, 1.0, 1.0]), "front blue kept");
+        assert!(colors.contains(&[1.0, 0.0, 0.0, 1.0]), "back red kept (trimmed)");
     }
 
     #[test]

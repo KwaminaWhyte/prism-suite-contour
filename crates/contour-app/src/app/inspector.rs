@@ -152,6 +152,53 @@ impl ContourApp {
                     });
 
                     ui.separator();
+                    ui.menu_button(format!("{}  Compound Path", icons::COMPOUND), |ui| {
+                        ui.add_enabled_ui(self.can_make_compound(), |ui| {
+                            if ui
+                                .button("Make")
+                                .on_hover_text(
+                                    "Combine the selected closed shapes into one \
+                                     compound path with holes (Ctrl/Cmd+8)",
+                                )
+                                .clicked()
+                            {
+                                self.make_compound();
+                                ui.close_menu();
+                            }
+                        });
+                        ui.add_enabled_ui(self.can_release_compound(), |ui| {
+                            if ui
+                                .button("Release")
+                                .on_hover_text(
+                                    "Split the compound path back into separate paths \
+                                     (Alt+Ctrl/Cmd+8)",
+                                )
+                                .clicked()
+                            {
+                                self.release_compound();
+                                ui.close_menu();
+                            }
+                        });
+                        // Fill-rule toggle for the selected compound path(s).
+                        ui.add_enabled_ui(self.can_release_compound(), |ui| {
+                            ui.separator();
+                            ui.label("Fill rule");
+                            if ui.button("Non-zero").clicked() {
+                                self.set_compound_fill_rule(crate::document::FillRule::NonZero);
+                                ui.close_menu();
+                            }
+                            if ui
+                                .button("Even-odd")
+                                .on_hover_text("A sub-contour inside another carves a hole")
+                                .clicked()
+                            {
+                                self.set_compound_fill_rule(crate::document::FillRule::EvenOdd);
+                                ui.close_menu();
+                            }
+                        });
+                    });
+
+                    ui.separator();
                     ui.add_enabled_ui(self.can_group(), |ui| {
                         if ui.button(format!("{}  Group", icons::GROUP)).clicked() {
                             self.group_selection();
@@ -724,6 +771,7 @@ impl ContourApp {
                                 Tool::Line,
                                 Tool::Pen,
                                 Tool::Eyedropper,
+                                Tool::ShapeBuilder,
                                 Tool::Artboard,
                             ] {
                                 let selected = self.tool == tool;

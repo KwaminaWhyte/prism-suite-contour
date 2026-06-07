@@ -164,7 +164,15 @@ fn shape_bezpath(shape: &Shape) -> (kurbo::BezPath, bool) {
             crate::document::bez_path(&points, &handles, closed),
             closed,
         ),
-        // to_path always yields a Path; this arm is unreachable.
+        // A compound path blends by its outer ring (a single closed contour).
+        Shape::Compound { .. } => match shape.outline_polygon() {
+            Some(ring) => {
+                let h = vec![(0.0, 0.0); ring.len()];
+                (crate::document::bez_path(&ring, &h, true), true)
+            }
+            None => (kurbo::BezPath::new(), false),
+        },
+        // to_path yields a Path or Compound; other arms are unreachable.
         _ => (kurbo::BezPath::new(), false),
     }
 }
@@ -175,6 +183,9 @@ fn first_point(shape: &Shape) -> Option<(f32, f32)> {
         Shape::Rect { rect, .. } | Shape::Ellipse { rect, .. } => Some((rect[0], rect[1])),
         Shape::Line { p0, .. } => Some(*p0),
         Shape::Path { points, .. } => points.first().copied(),
+        Shape::Compound { subpaths, .. } => {
+            subpaths.first().and_then(|s| s.points.first().copied())
+        }
     }
 }
 
@@ -184,6 +195,9 @@ fn is_closed(shape: &Shape) -> bool {
         Shape::Rect { .. } | Shape::Ellipse { .. } => true,
         Shape::Line { .. } => false,
         Shape::Path { closed, .. } => *closed,
+        // A compound path is treated as closed (it is filled area); blending uses
+        // its outer ring via `outline_polygon`.
+        Shape::Compound { .. } => true,
     }
 }
 

@@ -6,6 +6,130 @@
 //! length as `points` and are written to be unit-testable without any UI.
 
 use kurbo::{BezPath, PathEl, Point};
+use serde::{Deserialize, Serialize};
+
+/// Which fill rule a [`Shape::Compound`](super::Shape::Compound) uses to decide
+/// what is inside when its sub-contours overlap or nest — the two compound-path
+/// fill rules Illustrator exposes. Mirrors
+/// [`BoolFillRule`](crate::boolean::BoolFillRule) but lives on the document model
+/// (and serializes), so a compound path keeps its rule in `.contour`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum FillRule {
+    /// Non-zero winding: inside when the signed crossing count is non-zero.
+    /// Same-direction nested rings stay filled (solid).
+    #[default]
+    NonZero,
+    /// Even-odd: inside when an odd number of rings enclose the point, so a ring
+    /// drawn inside another carves a hole (the classic donut rule).
+    EvenOdd,
+}
+
+/// One sub-contour of a compound path: a (possibly cubic-bezier) ring with the
+/// same `(points, handles, closed)` shape that backs a single
+/// [`Shape::Path`](super::Shape::Path). A compound path is an *ordered* list of
+/// these, all painted as one object with a shared fill rule, so an outer ring
+/// plus inner hole rings live together rather than as separate shapes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubPath {
+    pub points: Vec<(f32, f32)>,
+    #[serde(default)]
+    pub handles: Vec<(f32, f32)>,
+    #[serde(default = "sub_default_closed")]
+    pub closed: bool,
+}
+
+/// Serde default for [`SubPath::closed`]: a compound sub-contour is closed by
+/// default (an outer ring / hole), so a minimal hand-written sub-path loads closed.
+fn sub_default_closed() -> bool {
+    true
+}
+
+impl SubPath {
+    /// A closed corner sub-contour from a ring of points (all corners).
+    pub fn ring(points: Vec<(f32, f32)>) -> Self {
+        let n = points.len();
+        Self {
+            points,
+            handles: vec![(0.0, 0.0); n],
+            closed: true,
+        }
+    }
+
+    /// This sub-contour flattened to a document-space polyline (curves honoured).
+    pub fn flatten(&self) -> Vec<(f32, f32)> {
+        flatten(&self.points, &self.handles, self.closed)
+    }
+
+    /// Signed area (shoelace) of this sub-contour's flattened ring. Positive for
+    /// counter-clockwise, negative for clockwise — the sign of an outer ring vs a
+    /// hole under the even-odd / non-zero rules.
+    pub fn signed_area(&self) -> f32 {
+        let pts = self.flatten();
+        let n = pts.len();
+        if n < 3 {
+            return 0.0;
+        }
+        let mut a = 0.0;
+        for i in 0..n {
+            let (x0, y0) = pts[i];
+            let (x1, y1) = pts[(i + 1) % n];
+            a += x0 * y1 - x1 * y0;
+        }
+        a * 0.5
+    }
+}
+
+/// Whether a document-space point is inside a set of (flattened) sub-contour
+/// rings under the given [`FillRule`]. Even-odd parity-counts ring crossings;
+/// non-zero sums signed winding so same-direction nested rings stay solid and a
+/// reverse-wound inner ring carves a hole. This is the compound-path fill test
+/// shared by hit-testing and any rasterizer that needs a CPU containment check.
+pub fn point_in_rings(px: f32, py: f32, rings: &[Vec<(f32, f32)>], rule: FillRule) -> bool {
+    match rule {
+        FillRule::EvenOdd => {
+            let mut inside = false;
+            for ring in rings {
+                if ring.len() >= 3 && point_in_polygon(px, py, ring) {
+                    inside = !inside;
+                }
+            }
+            inside
+        }
+        FillRule::NonZero => winding_number(px, py, rings) != 0,
+    }
+}
+
+/// Sum of the signed winding numbers of `(px, py)` against each ring (the
+/// non-zero fill test's core). A crossing where the edge goes upward counts +1,
+/// downward −1.
+fn winding_number(px: f32, py: f32, rings: &[Vec<(f32, f32)>]) -> i32 {
+    let mut wn = 0;
+    for ring in rings {
+        let n = ring.len();
+        if n < 3 {
+            continue;
+        }
+        for i in 0..n {
+            let (x0, y0) = ring[i];
+            let (x1, y1) = ring[(i + 1) % n];
+            if y0 <= py {
+                if y1 > py && is_left(x0, y0, x1, y1, px, py) > 0.0 {
+                    wn += 1;
+                }
+            } else if y1 <= py && is_left(x0, y0, x1, y1, px, py) < 0.0 {
+                wn -= 1;
+            }
+        }
+    }
+    wn
+}
+
+/// Positive if `(px, py)` is left of the directed edge `(x0,y0)→(x1,y1)`,
+/// negative if right, zero on the line — the 2D cross product the winding-number
+/// test uses to count crossings.
+fn is_left(x0: f32, y0: f32, x1: f32, y1: f32, px: f32, py: f32) -> f32 {
+    (x1 - x0) * (py - y0) - (px - x0) * (y1 - y0)
+}
 
 /// Whether two axis-aligned rectangles (each `[x, y, w, h]`, width/height
 /// assumed non-negative) overlap. Edge-touching counts as an overlap. Used by

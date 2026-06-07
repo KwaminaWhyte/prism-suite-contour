@@ -45,6 +45,8 @@ pub const PEN: &str = ph::PEN_NIB;
 pub const ARTBOARD: &str = ph::FRAME_CORNERS;
 /// Eyedropper tool (sample / apply a shape's paint appearance).
 pub const EYEDROPPER: &str = ph::EYEDROPPER;
+/// Shape Builder tool (interactive merge / subtract across regions).
+pub const SHAPE_BUILDER: &str = ph::SELECTION_PLUS;
 
 // --- Actions ----------------------------------------------------------------
 
@@ -127,6 +129,11 @@ pub const CLIP_RELEASE: &str = ph::SCISSORS;
 
 /// Make a blend (interpolate intermediate objects between two shapes).
 pub const BLEND: &str = ph::LINE_SEGMENTS;
+
+// --- Compound path ----------------------------------------------------------
+
+/// Make / release a compound path (an outer ring with holes as one object).
+pub const COMPOUND: &str = ph::CIRCLE_DASHED;
 
 // --- Boolean ops ------------------------------------------------------------
 

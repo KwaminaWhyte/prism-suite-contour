@@ -9,6 +9,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **True compound-path object — `Object ▸ Compound Path ▸ Make / Release`**
+  (closes the documented "compound-path object" gap left by the Pathfinder pass).
+  A new `Shape::Compound` document variant keeps several sub-contours (an outer
+  ring plus inner holes, or disjoint regions) as **one object** filled under a
+  per-object **fill rule** (even-odd / non-zero), rendered and hit-tested as a
+  unit:
+  - **Model.** `Shape::Compound { subpaths: Vec<SubPath>, fill_rule, … }` carries
+    the same paint / group / clip / opacity-mask / blend tags as the other
+    variants. A `SubPath` is a `(points, handles, closed)` ring (curves and all).
+    A new pure `point_in_rings` implements the **even-odd parity** and **non-zero
+    winding** containment tests; `Shape::hit` uses it so a click in a hole misses
+    and a click on the solid frame hits. `bounds` unions the sub-contours;
+    `translate` / `apply_affine` move them together; `outline_polygon` returns the
+    outer ring (so clip masks / single-ring consumers still work).
+  - **End-to-end rendering.** A compound path always routes through the shared
+    `tiny-skia` raster path on the **canvas** (egui's painter can't express a
+    fill rule) and **PNG** export, threading a `FillRule` (Winding / EvenOdd) into
+    `fill_path`; **SVG** export emits one `<path>` whose `d` concatenates every
+    sub-contour with `fill-rule="evenodd"` / `"nonzero"`, so holes carve natively
+    in any viewer. Selection / transform / snapping all treat it as one object.
+  - **Pathfinder produces compounds.** `boolean::apply` now returns its
+    area-conserving results **grouped by region**: a region with holes (e.g. a
+    Difference where the front sits fully inside the back) becomes one compound
+    path (outer ring + hole sub-contour) instead of two separate rings — the
+    document model's real "expanded" Pathfinder output.
+  - **Make / Release.** `Object ▸ Compound Path ▸ Make` (`Cmd/Ctrl+8`) combines
+    the selected closed shapes' contours into one compound (inheriting the
+    back-most shape's paint); `Release` (`Alt+Cmd/Ctrl+8`) splits it back into one
+    `Path` per sub-contour. A fill-rule toggle (Non-zero / Even-odd) on the
+    submenu sets the selected compound(s)' rule. Each is one undo step.
+  - **Back-compatible `.contour`.** The `Compound` variant is additive (`serde`
+    enum), and `SubPath`'s `closed` / `handles` default (`#[serde(default)]`), so
+    every pre-existing single-ring document loads and renders identically; a
+    compound path round-trips through serde (sub-contours + fill rule + paint).
+  - **Tests.** Pure unit tests cover the even-odd / non-zero winding correctness
+    (`point_in_rings`, `Shape::hit`), compound bounds / translate, a `.contour`
+    round-trip of a compound, SVG `fill-rule` emission + two-sub-path `d`, and PNG
+    rasterization of the hole (even-odd empties the centre, non-zero fills it).
+
+- **Shape Builder tool (`M`)** — interactive merge / subtract by dragging across
+  the selected shapes' overlapping regions, à la Illustrator (closes the
+  documented Shape Builder gap). Reuses the `i_overlay` boolean backend:
+  - **Region graph.** A new pure `shapebuilder` module builds the **atomic faces**
+    of the selected shapes (each a maximal region lying inside a fixed subset of
+    the inputs — for two overlapping shapes: `A−B`, `A∩B`, `B−A`) by iteratively
+    subdividing with `i_overlay` intersect / difference. Each face records the
+    back-most covering input shape, for paint inheritance.
+  - **Pointer interaction.** Drag across the canvas: a plain drag **unites** every
+    face the pointer crosses into one path (or a compound if the union has holes);
+    an **Alt/Option-drag** **deletes** the crossed faces. The faces under the drag
+    are picked by hit-testing the sampled path (`face_at` / `faces_along`); the
+    untouched faces stay as separate paths, so the rest of the partition is
+    preserved. On release the selected shapes are replaced with the result (one
+    undo step). A live overlay shades the crossed regions (accent for unite,
+    red for subtract) and traces the drag path.
+  - **Paint.** A merged region inherits the back-most picked face's owner shape's
+    fill / gradient / stroke / appearance (Illustrator colours a Shape-Builder
+    result with the back object's look).
+  - **Tests.** Pure unit tests cover the region-graph face count + tiling (two
+    overlapping rects → three faces summing to the union; disjoint → one each),
+    face picking (`face_at` picks the smallest covering face; outside → none),
+    drag-path face collection, the unite merge (picked faces union, leftovers
+    kept), the subtract delete, and back-owner paint inheritance.
+
+- **Exact `Merge` Pathfinder rule** — replaces the old simplified weld (union to
+  one region with the back colour) with Illustrator's real behaviour: **merge
+  adjacent same-coloured faces** into single paths, and **trim** (remove the
+  hidden parts of) **different-coloured** overlapping faces, **preserving each
+  face's own fill**:
+  - For two operands, Merge welds only when their fills match (within tolerance) —
+    `subj ∪ clip` under that shared colour — and otherwise trims: the front shape
+    stays whole on top, the back shape has its overlapped part removed, and the
+    two abutting faces keep their own colours. **Trim** always trims and keeps each
+    face's colour (it never welds), now also preserving each fill rather than
+    flattening to one. Each produced face keeps any holes as a compound path.
+  - **Tests.** New `boolean` unit tests: Merge of *different*-coloured rects keeps
+    two trimmed faces each with its own colour (front whole, back trimmed); Merge
+    of *same*-coloured rects welds to one region under that colour; Trim preserves
+    each face's colour. The pre-existing same-colour Merge / area / face-count
+    tests stay green.
+
 - **Full Pathfinder — `Object ▸ Pathfinder`** (completes Illustrator's Pathfinder
   set on `i_overlay`). The boolean layer grows from three ops to the full ten,
   plus a selectable compound-path fill rule:
