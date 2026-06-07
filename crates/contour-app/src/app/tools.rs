@@ -186,6 +186,7 @@ impl ContourApp {
             }
 
             self.draw_preview(&painter);
+            self.draw_text_edit_overlay(&painter, &ctx);
 
             // Shape Builder gesture preview: highlight the regions the drag has
             // crossed and trace the drag path.
@@ -325,6 +326,7 @@ impl ContourApp {
             Tool::Artboard => self.handle_artboard(response, doc_pos),
             Tool::Eyedropper => self.handle_eyedropper(response, doc_pos),
             Tool::ShapeBuilder => self.handle_shape_builder(response, doc_pos),
+            Tool::Type => self.handle_type(response, doc_pos),
         }
     }
 
@@ -447,6 +449,37 @@ impl ContourApp {
         } else {
             self.status = "Sampled appearance".into();
         }
+    }
+
+    /// Type tool input: click empty canvas to **place** a new point-type object
+    /// and begin editing it; click an existing text object to **edit** its string;
+    /// click anywhere else (or press Escape, handled by `handle_text_editing`) to
+    /// **end** the current edit. Each placement is one undo step; subsequent
+    /// keystrokes coalesce into the edit (committed when the edit ends).
+    fn handle_type(&mut self, response: &egui::Response, doc_pos: Option<(f32, f32)>) {
+        if !response.clicked() {
+            return;
+        }
+        let Some((x, y)) = doc_pos else { return };
+        let tol = 4.0 / self.view.zoom;
+        // Existing text object under the cursor → edit it.
+        let hit_text = self
+            .doc
+            .shapes
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, s)| {
+                s.selectable() && matches!(s, Shape::Text { .. }) && s.hit(x, y, tol)
+            })
+            .map(|(i, _)| i);
+        if let Some(i) = hit_text {
+            self.begin_text_edit(i);
+            return;
+        }
+        // Otherwise: finish any active edit, then place a fresh text object.
+        self.end_text_edit();
+        self.place_text(x, y);
     }
 
     /// Artboard tool input: drag out a new artboard from empty canvas, drag an
@@ -770,6 +803,11 @@ impl ContourApp {
     pub(super) fn set_tool(&mut self, tool: Tool) {
         if tool != self.tool {
             self.clear_ds_selection();
+            // Leaving the Type tool finalizes any in-progress text edit (dropping
+            // an empty placeholder), so the keyboard returns to tool shortcuts.
+            if self.tool == Tool::Type {
+                self.end_text_edit();
+            }
         }
         self.tool = tool;
     }
@@ -1480,6 +1518,33 @@ impl ContourApp {
                 .collect();
             canvas::paint_direct_select(&self.view, painter, points, handles, &selected);
         }
+    }
+
+    /// Draw the active text-edit affordance: a baseline caret at the editing text
+    /// object's origin (so an empty / freshly-placed text object is visible), and
+    /// keep the canvas repainting so typed characters appear immediately.
+    fn draw_text_edit_overlay(&self, painter: &egui::Painter, ctx: &egui::Context) {
+        let Some(idx) = self.editing_text else { return };
+        let Some(Shape::Text {
+            origin, params, ..
+        }) = self.doc.shapes.get(idx)
+        else {
+            return;
+        };
+        // A short vertical insertion caret just below the origin (top-left of the
+        // first em box), scaled by font size so it reads at any zoom.
+        let h = params.font_size * 0.9;
+        let top = self.view.doc_to_screen((origin.0, origin.1 + params.font_size * 0.15));
+        let bot = self
+            .view
+            .doc_to_screen((origin.0, origin.1 + params.font_size * 0.15 + h));
+        // Blink at ~1.5 Hz using the egui clock.
+        let on = (ctx.input(|i| i.time) * 1.5).fract() < 0.6;
+        if on {
+            painter.line_segment([top, bot], egui::Stroke::new(1.5, crate::theme::accent()));
+        }
+        // Live edit needs continuous repaints for the blink + immediate glyphs.
+        ctx.request_repaint();
     }
 
     fn draw_preview(&self, painter: &egui::Painter) {

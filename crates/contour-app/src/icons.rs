@@ -49,6 +49,8 @@ pub const ARTBOARD: &str = ph::FRAME_CORNERS;
 pub const EYEDROPPER: &str = ph::EYEDROPPER;
 /// Shape Builder tool (interactive merge / subtract across regions).
 pub const SHAPE_BUILDER: &str = ph::SELECTION_PLUS;
+/// Type tool (place / edit point type).
+pub const TYPE: &str = ph::TEXT_T;
 
 // --- Actions ----------------------------------------------------------------
 

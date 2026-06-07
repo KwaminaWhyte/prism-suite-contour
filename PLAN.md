@@ -176,7 +176,7 @@ app-agnostic. Phases 0–1 are largely **done** (see §1); the rest is the road 
 - [~] Tests: ~~compound-path fill rules~~ (done), ~~shape-builder region picking~~ (done), simplify error bound
 
 ### Phase 5 — Type, color, symbols, brushes  *(production features)*
-- [ ] **Type** (L): point + **area type**, **type-on-path**, threaded/overflow text, character + paragraph panels, OpenType + **variable fonts**, glyphs panel, text wrap, tabs, **convert to outlines**, character/paragraph **styles**
+- [~] **Type** (L): **point type** + **convert to outlines** — *landed* (Type tool `T`; click-to-place + inline edit with backspace/enter/esc; font-size + left/centre/right alignment; multi-line; real glyph outlines from a bundled font via `ttf-parser`, cached on `Shape::Text` and composing / exporting like a compound path through canvas + SVG + PNG; `Object ▸ Type ▸ Create Outlines` → editable `Compound`; `.contour` round-trip). *Open:* **area type**, **type-on-path**, threaded/overflow text, character + paragraph panels, **font selection** + OpenType shaping / kerning + **variable fonts**, glyphs panel, text wrap, tabs, character/paragraph **styles**.
 - [ ] **Color system** (M, shared): swatches, **global** + **spot** colors, color groups, CMYK/RGB/spot modes via `prism-color`, **Recolor Artwork** (palette remap/harmony rules), eyedropper, live-paint bucket
 - [ ] **Symbols** (M): symbol library, instances, edit-master propagation, symbol sprayer/shifter/sizer set
 - [ ] **Brushes** (L): calligraphic, art, scatter, pattern, bristle brushes along paths; brush library
@@ -229,7 +229,7 @@ app-agnostic. Phases 0–1 are largely **done** (see §1); the rest is the road 
 | Live effects | non-destructive fx | **Partial** — Drop Shadow + Gaussian Blur (canvas/SVG/PNG); rest **Planned** (via `prism-fx`) | 3 |
 | Blend modes / opacity masks | full | **Done** — 12 separable blend modes composite (canvas/PNG/SVG); opacity masks (luminance→alpha, invert); per-object/HSL/group-mask/knockout **Planned** | 3 |
 | Blends / envelope / puppet warp | full | **Planned** | 4 |
-| Type / area / on-path / variable | full | **Planned** | 5 |
+| Type / area / on-path / variable | full | **Point type + convert-to-outlines done; area / on-path / variable planned** | 5 |
 | Color: swatches/spot/CMYK/recolor | full | **Planned** (shared `prism-color`) | 5,6 |
 | Image trace | Image Trace | **Planned** (`vtracer`) | 5 |
 | Place / link / clip images | full | **Planned** (suite interop) | 5 |

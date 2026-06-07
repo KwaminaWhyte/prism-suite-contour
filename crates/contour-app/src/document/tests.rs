@@ -1771,3 +1771,191 @@ fn to_path_preserves_layer_metadata() {
     assert!(p.locked());
     assert_eq!(p.layer_color(), Some([0.1, 0.2, 0.3, 1.0]));
 }
+
+// --- Type / text objects -----------------------------------------------
+
+use crate::text::{TextAlign, TextParams};
+
+/// A point-type text object with the given string at `origin`, glyphs laid out.
+fn text_shape(text: &str, origin: (f32, f32)) -> Shape {
+    let params = TextParams {
+        text: text.to_string(),
+        font_size: 72.0,
+        align: TextAlign::Left,
+    };
+    let glyphs = crate::text::layout(&params, origin).0;
+    Shape::Text {
+        params,
+        origin,
+        glyphs,
+        fill: [0.0, 0.0, 0.0, 1.0],
+        fill_gradient: None,
+        stroke: [0.0, 0.0, 0.0, 1.0],
+        stroke_w: 0.0,
+        stroke_style: StrokeStyle::default(),
+        appearance: None,
+        visible: true,
+        group: None,
+        clip: None,
+        mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
+        blend: None,
+        blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
+    }
+}
+
+/// A freshly-built text object has a non-empty glyph cache and tight bounds, and
+/// fills under the even-odd rule (so glyph counters are holes).
+#[test]
+fn text_shape_has_glyphs_bounds_and_even_odd_fill() {
+    let s = text_shape("Hi", (10.0, 20.0));
+    match &s {
+        Shape::Text { glyphs, .. } => assert!(!glyphs.is_empty(), "glyphs laid out"),
+        _ => panic!("expected Text"),
+    }
+    let b = s.bounds().expect("text has bounds");
+    assert!(b.w > 0.0 && b.h > 0.0, "non-empty bbox");
+    assert_eq!(s.fill_rule(), Some(FillRule::EvenOdd));
+    assert_eq!(s.label(), "Type");
+    // The display name shows the string.
+    assert_eq!(s.display_name(), "Hi");
+}
+
+/// Editing the params via `set_text_params` re-lays-out the glyph cache, growing
+/// the bounds as the string lengthens.
+#[test]
+fn set_text_params_relays_out_glyphs() {
+    let mut s = text_shape("I", (0.0, 0.0));
+    let before = s.bounds().unwrap().w;
+    let ok = s.set_text_params(TextParams {
+        text: "IIIIIIII".into(),
+        font_size: 72.0,
+        align: TextAlign::Left,
+    });
+    assert!(ok, "set_text_params applies to a text object");
+    let after = s.bounds().unwrap().w;
+    assert!(after > before, "wider string widens the bbox: {before} -> {after}");
+    // A non-text shape rejects the edit.
+    let mut r = layer_rect();
+    assert!(!r.set_text_params(TextParams::default()));
+}
+
+/// Convert-to-outlines turns a text object into a `Compound` of glyph contours,
+/// preserving paint + even-odd fill rule, with non-empty geometry.
+#[test]
+fn text_to_outlines_yields_compound_paths() {
+    let mut s = text_shape("Ag", (5.0, 5.0));
+    s.set_fill_color([0.2, 0.4, 0.8, 1.0]);
+    let out = s.text_to_outlines();
+    match out {
+        Shape::Compound {
+            subpaths,
+            fill_rule,
+            fill,
+            ..
+        } => {
+            assert!(!subpaths.is_empty(), "glyph contours become sub-paths");
+            assert!(
+                subpaths.iter().any(|sp| sp.points.len() >= 3),
+                "real geometry"
+            );
+            assert_eq!(fill_rule, FillRule::EvenOdd, "counters stay holes");
+            assert_eq!(fill, [0.2, 0.4, 0.8, 1.0], "paint carried through");
+        }
+        other => panic!("expected Compound, got {other:?}"),
+    }
+}
+
+/// Translating a text object moves its origin *and* its cached glyph outlines.
+#[test]
+fn text_translate_moves_origin_and_glyphs() {
+    let mut s = text_shape("X", (0.0, 0.0));
+    let b0 = s.bounds().unwrap();
+    s.translate(100.0, 50.0);
+    let b1 = s.bounds().unwrap();
+    assert!((b1.x - (b0.x + 100.0)).abs() < 1e-2);
+    assert!((b1.y - (b0.y + 50.0)).abs() < 1e-2);
+    if let Shape::Text { origin, .. } = &s {
+        assert_eq!(*origin, (100.0, 50.0), "editable origin tracks the move");
+    } else {
+        panic!("still text");
+    }
+}
+
+/// A text object round-trips through serde (params + origin + glyph cache + the
+/// alignment field).
+#[test]
+fn text_round_trips_through_serde() {
+    let mut s = text_shape("Round\nTrip", (12.0, 34.0));
+    s.set_text_params(TextParams {
+        text: "Round\nTrip".into(),
+        font_size: 48.0,
+        align: TextAlign::Center,
+    });
+    let doc = Document {
+        shapes: vec![s],
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&doc).unwrap();
+    let back: Document = serde_json::from_str(&json).unwrap();
+    match &back.shapes[0] {
+        Shape::Text {
+            params,
+            origin,
+            glyphs,
+            ..
+        } => {
+            assert_eq!(params.text, "Round\nTrip");
+            assert_eq!(params.font_size, 48.0);
+            assert_eq!(params.align, TextAlign::Center);
+            assert_eq!(*origin, (12.0, 34.0));
+            assert!(!glyphs.is_empty(), "glyph cache survives the round-trip");
+        }
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
+
+/// A hand-written / legacy text object missing the additive `glyphs` and `align`
+/// keys deserializes with the back-compat defaults (empty cache, left align), and
+/// `relayout_text` rebuilds the glyphs from `params` + `origin`.
+#[test]
+fn text_serde_defaults_and_relayout_rebuilds_cache() {
+    let json = r#"{"shapes":[
+        {"Text":{
+            "params":{"text":"Hi","font_size":72.0},
+            "origin":[0.0,0.0],
+            "fill":[0,0,0,1],"stroke":[0,0,0,1],"stroke_w":0
+        }}
+    ]}"#;
+    let mut doc: Document = serde_json::from_str(json).unwrap();
+    match &doc.shapes[0] {
+        Shape::Text { params, glyphs, .. } => {
+            assert_eq!(params.align, TextAlign::Left, "align defaults to Left");
+            assert!(glyphs.is_empty(), "glyph cache defaults to empty");
+        }
+        _ => panic!("expected Text"),
+    }
+    // Repairing the document lays the glyphs out from the params.
+    doc.relayout_text();
+    match &doc.shapes[0] {
+        Shape::Text { glyphs, .. } => assert!(!glyphs.is_empty(), "relayout filled the cache"),
+        _ => panic!("expected Text"),
+    }
+    // And the text now has real bounds.
+    assert!(doc.shapes[0].bounds().is_some());
+}
+
+/// A text object hit-tests by its bounding box (so it is easy to select).
+#[test]
+fn text_hit_tests_inside_bounds() {
+    let s = text_shape("Hi", (0.0, 0.0));
+    let b = s.bounds().unwrap();
+    let (cx, cy) = (b.x + b.w * 0.5, b.y + b.h * 0.5);
+    assert!(s.hit(cx, cy, 0.1), "centre of the text box hits");
+    assert!(!s.hit(b.x + b.w + 100.0, cy, 0.1), "far outside misses");
+}

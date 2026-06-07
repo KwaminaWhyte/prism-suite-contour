@@ -26,6 +26,12 @@ tiny-skia = "0.11"
 # Boolean polygon operations (Union/Intersect/Difference) for the Object menu.
 i_overlay = "7"
 
+# Glyph-outline extraction for the Type tool. The lightest crate that yields raw
+# TrueType contours (move/line/quad/cubic) via an `OutlineBuilder`, which we map
+# straight onto the document's path geometry so text composes / exports like any
+# vector. Already present transitively (cosmic-text / fontdb), so no new build.
+ttf-parser = "0.25"
+
 # eframe with the default glow backend — Contour draws vectors through egui's
 # painter, so no custom GPU pass is needed.
 eframe = "0.34"

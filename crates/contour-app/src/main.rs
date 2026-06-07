@@ -28,6 +28,7 @@ mod shapebuilder;
 mod snap;
 mod stroke;
 mod swatches;
+mod text;
 mod theme;
 mod transform;
 mod workspace;

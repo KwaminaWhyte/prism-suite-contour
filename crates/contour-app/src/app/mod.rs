@@ -37,6 +37,9 @@ enum Tool {
     /// Interactive merge / subtract by dragging across the selected shapes'
     /// overlapping regions (Illustrator's Shape Builder, `M`).
     ShapeBuilder,
+    /// Place and edit **point type**: click to drop a text object, then type
+    /// (backspace / enter edit the string) — Illustrator's Type tool, `T`.
+    Type,
 }
 
 impl Tool {
@@ -51,6 +54,7 @@ impl Tool {
             Tool::Artboard => icons::ARTBOARD,
             Tool::Eyedropper => icons::EYEDROPPER,
             Tool::ShapeBuilder => icons::SHAPE_BUILDER,
+            Tool::Type => icons::TYPE,
         }
     }
     fn name(self) -> &'static str {
@@ -64,6 +68,7 @@ impl Tool {
             Tool::Artboard => "Artboard",
             Tool::Eyedropper => "Eyedropper (I)",
             Tool::ShapeBuilder => "Shape Builder (M)",
+            Tool::Type => "Type (T)",
         }
     }
 }
@@ -104,6 +109,8 @@ struct Keys {
     direct_select: bool,
     /// Single-key `V` pressed (no modifiers) — activate the Select tool.
     select_tool: bool,
+    /// Single-key `T` pressed (no modifiers) — activate the Type tool.
+    type_tool: bool,
     /// `Cmd/Ctrl+D` — Transform Again (repeat the last transform on the
     /// selection), matching Illustrator. Duplicate keeps its menu button.
     transform_again: bool,
@@ -347,6 +354,10 @@ pub struct ContourApp {
     /// Group ids the user has collapsed in the Layers panel (their member rows
     /// are hidden). Transient UI state, not persisted.
     collapsed_layers: Vec<u64>,
+    /// Index of the text object currently being edited by the Type tool (its
+    /// string takes keyboard input — typing / backspace / enter). `None` when no
+    /// text edit is active. Transient UI state, not persisted.
+    editing_text: Option<usize>,
 }
 
 impl ContourApp {
@@ -382,6 +393,7 @@ impl ContourApp {
             clipboard: Clipboard::default(),
             selected_swatch: None,
             collapsed_layers: Vec::new(),
+            editing_text: None,
         }
     }
 
@@ -394,6 +406,7 @@ impl ContourApp {
         self.selected_swatch = None;
         self.last_transform = None;
         self.collapsed_layers.clear();
+        self.editing_text = None;
     }
 }
 
@@ -467,6 +480,7 @@ impl eframe::App for ContourApp {
                 // tool (Illustrator's tool letters).
                 direct_select: !cmd && i.key_pressed(egui::Key::A),
                 select_tool: !cmd && i.key_pressed(egui::Key::V),
+                type_tool: !cmd && i.key_pressed(egui::Key::T),
                 // Cmd/Ctrl+D repeats the last transform (Illustrator's Transform
                 // Again). Shift is excluded so it never collides with other chords.
                 transform_again: cmd && !shift && i.key_pressed(egui::Key::D),
@@ -489,36 +503,59 @@ impl eframe::App for ContourApp {
             shape_builder: shape_builder_key,
             direct_select: direct_select_key,
             select_tool: select_tool_key,
+            type_tool: type_tool_key,
             transform_again: transform_again_key,
         } = keys;
+
+        // While a text object is being edited (Type tool), the keyboard drives the
+        // string: text events append, Backspace deletes, Enter inserts a newline.
+        // This runs *before* the tool-letter shortcuts so typing "v"/"t"/… edits
+        // the text rather than switching tools. Escape / clicking out ends the edit
+        // (handled in the Type tool input).
+        let text_edit_active = self.tool == Tool::Type && self.editing_text.is_some();
+        if text_edit_active {
+            self.handle_text_editing(&ctx);
+        }
+        // Tool-letter shortcuts and selection Delete are suppressed while editing
+        // a text object's string, so the keys type into the text instead. (The
+        // `wants_keyboard_input` guard covers panel text fields; `text_edit_active`
+        // covers the on-canvas Type edit, which uses our own focus state.)
+        let kb_busy = ctx.wants_keyboard_input() || text_edit_active;
         // `I` switches to the eyedropper (committing any in-progress pen path
         // first, mirroring how clicking a tool button behaves). Guarded so it is
         // ignored while a text field has keyboard focus.
-        if eyedropper_key && self.tool != Tool::Eyedropper && !ctx.wants_keyboard_input() {
+        if eyedropper_key && self.tool != Tool::Eyedropper && !kb_busy {
             if self.tool == Tool::Pen {
                 self.commit_pen(false);
             }
             self.tool = Tool::Eyedropper;
         }
         // `M` switches to the Shape Builder (same guard as the eyedropper key).
-        if shape_builder_key && self.tool != Tool::ShapeBuilder && !ctx.wants_keyboard_input() {
+        if shape_builder_key && self.tool != Tool::ShapeBuilder && !kb_busy {
             if self.tool == Tool::Pen {
                 self.commit_pen(false);
             }
             self.tool = Tool::ShapeBuilder;
         }
         // `A` switches to Direct-Select, `V` back to Select (same focus guard).
-        if direct_select_key && self.tool != Tool::DirectSelect && !ctx.wants_keyboard_input() {
+        if direct_select_key && self.tool != Tool::DirectSelect && !kb_busy {
             if self.tool == Tool::Pen {
                 self.commit_pen(false);
             }
             self.set_tool(Tool::DirectSelect);
         }
-        if select_tool_key && self.tool != Tool::Select && !ctx.wants_keyboard_input() {
+        if select_tool_key && self.tool != Tool::Select && !kb_busy {
             if self.tool == Tool::Pen {
                 self.commit_pen(false);
             }
             self.set_tool(Tool::Select);
+        }
+        // `T` activates the Type tool (so the next canvas click places text).
+        if type_tool_key && self.tool != Tool::Type && !kb_busy {
+            if self.tool == Tool::Pen {
+                self.commit_pen(false);
+            }
+            self.set_tool(Tool::Type);
         }
         if enter && self.tool == Tool::Pen {
             self.commit_pen(true);
@@ -529,7 +566,7 @@ impl eframe::App for ContourApp {
         } else if undo {
             self.undo();
         }
-        if delete {
+        if delete && !text_edit_active {
             // In Direct-Select with anchors picked, Delete removes those anchors
             // (re-fitting the path); otherwise it deletes the whole selection.
             if self.tool == Tool::DirectSelect && !self.inter.ds_anchors.is_empty() {

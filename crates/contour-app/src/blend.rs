@@ -186,6 +186,7 @@ fn first_point(shape: &Shape) -> Option<(f32, f32)> {
         Shape::Compound { subpaths, .. } => {
             subpaths.first().and_then(|s| s.points.first().copied())
         }
+        Shape::Text { origin, .. } => Some(*origin),
     }
 }
 
@@ -195,9 +196,9 @@ fn is_closed(shape: &Shape) -> bool {
         Shape::Rect { .. } | Shape::Ellipse { .. } => true,
         Shape::Line { .. } => false,
         Shape::Path { closed, .. } => *closed,
-        // A compound path is treated as closed (it is filled area); blending uses
+        // A compound path / text is treated as closed (filled area); blending uses
         // its outer ring via `outline_polygon`.
-        Shape::Compound { .. } => true,
+        Shape::Compound { .. } | Shape::Text { .. } => true,
     }
 }
 

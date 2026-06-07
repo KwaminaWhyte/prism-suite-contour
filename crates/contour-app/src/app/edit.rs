@@ -1137,6 +1137,9 @@ impl ContourApp {
                         // Repair a legacy / hand-edited file so the editor always
                         // has at least one artboard and a valid active index.
                         doc.normalize_artboards();
+                        // Re-lay-out text from its params so glyphs match the
+                        // current font build (the cache is advisory only).
+                        doc.relayout_text();
                         self.doc = doc;
                         self.history = crate::history::History::default();
                         self.selection.clear();
@@ -1207,6 +1210,195 @@ impl ContourApp {
             self.inter.pen_handles.clear();
         }
         self.inter.pen_drag = None;
+    }
+
+    // --- Type tool -----------------------------------------------------------
+
+    /// Build a fresh point-type [`Shape::Text`] at `origin` with the given params,
+    /// taking the app's current fill / stroke / style defaults. The glyph cache is
+    /// laid out immediately so the object renders the moment it is placed.
+    fn new_text_shape(&self, origin: (f32, f32), params: crate::text::TextParams) -> Shape {
+        let glyphs = crate::text::layout(&params, origin).0;
+        Shape::Text {
+            params,
+            origin,
+            glyphs,
+            fill: self.fill,
+            fill_gradient: self.fill_gradient.clone(),
+            // New type defaults to a fill with no stroke (Illustrator's default
+            // type appearance), so glyph counters read cleanly.
+            stroke: self.stroke,
+            stroke_w: 0.0,
+            stroke_style: self.stroke_style.clone(),
+            appearance: None,
+            visible: true,
+            group: None,
+            clip: None,
+            mask: false,
+            omask: None,
+            omask_path: false,
+            omask_invert: false,
+            blend: None,
+            blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
+        }
+    }
+
+    /// Place a new point-type object at the clicked document point, select it, and
+    /// begin editing its (initially placeholder) string. One undo step.
+    pub(super) fn place_text(&mut self, x: f32, y: f32) {
+        self.checkpoint();
+        let params = crate::text::TextParams {
+            text: String::new(),
+            ..Default::default()
+        };
+        let shape = self.new_text_shape((x, y), params);
+        self.doc.shapes.push(shape);
+        let idx = self.doc.shapes.len() - 1;
+        self.select_only(Some(idx));
+        self.editing_text = Some(idx);
+        self.status = "Type: start typing (Esc to finish)".into();
+    }
+
+    /// Begin editing the text object at `idx` (select it + make it the keyboard
+    /// target). No-op if `idx` isn't a text object.
+    pub(super) fn begin_text_edit(&mut self, idx: usize) {
+        if matches!(self.doc.shapes.get(idx), Some(Shape::Text { .. })) {
+            self.select_only(Some(idx));
+            self.editing_text = Some(idx);
+            self.status = "Type: editing (Esc to finish)".into();
+        }
+    }
+
+    /// End the active text edit. An empty text object left behind (e.g. placed but
+    /// never typed into) is deleted so the canvas isn't littered with invisible
+    /// zero-glyph objects, matching Illustrator.
+    pub(super) fn end_text_edit(&mut self) {
+        let Some(idx) = self.editing_text.take() else {
+            return;
+        };
+        let empty = matches!(
+            self.doc.shapes.get(idx),
+            Some(Shape::Text { params, .. }) if params.text.trim().is_empty()
+        );
+        if empty && idx < self.doc.shapes.len() {
+            self.doc.shapes.remove(idx);
+            self.selection.retain(|&i| i != idx);
+            for s in self.selection.iter_mut() {
+                if *s > idx {
+                    *s -= 1;
+                }
+            }
+        }
+    }
+
+    /// Apply this frame's keyboard input to the text object under edit: `Text`
+    /// events append characters, Backspace removes the last char, Enter inserts a
+    /// newline, Escape ends the edit. Re-lays-out the glyph cache after any change
+    /// so the canvas updates live. Called once per frame while a Type edit is
+    /// active.
+    pub(super) fn handle_text_editing(&mut self, ctx: &egui::Context) {
+        let Some(idx) = self.editing_text else {
+            return;
+        };
+        if !matches!(self.doc.shapes.get(idx), Some(Shape::Text { .. })) {
+            self.editing_text = None;
+            return;
+        }
+        // Pull the relevant events for this frame.
+        let (mut insert, mut backspace, mut newline, mut escape) = (String::new(), 0usize, 0usize, false);
+        ctx.input(|i| {
+            for ev in &i.events {
+                match ev {
+                    egui::Event::Text(t) => insert.push_str(t),
+                    egui::Event::Key {
+                        key: egui::Key::Backspace,
+                        pressed: true,
+                        ..
+                    } => backspace += 1,
+                    egui::Event::Key {
+                        key: egui::Key::Enter,
+                        pressed: true,
+                        ..
+                    } => newline += 1,
+                    egui::Event::Key {
+                        key: egui::Key::Escape,
+                        pressed: true,
+                        ..
+                    } => escape = true,
+                    _ => {}
+                }
+            }
+        });
+
+        if escape {
+            self.end_text_edit();
+            self.status = "Type: finished".into();
+            return;
+        }
+        if insert.is_empty() && backspace == 0 && newline == 0 {
+            return;
+        }
+        // Coalesce the whole typing run into one undo step (begin once, commit on
+        // edit-end is implicit; here each frame's batch is a checkpoint so undo
+        // steps back through the text in reasonable chunks).
+        self.checkpoint();
+        if let Some(Shape::Text { params, .. }) = self.doc.shapes.get(idx) {
+            let mut text = params.text.clone();
+            for _ in 0..backspace {
+                text.pop();
+            }
+            text.push_str(&insert);
+            for _ in 0..newline {
+                text.push('\n');
+            }
+            let mut new = params.clone();
+            new.text = text;
+            if let Some(shape) = self.doc.shapes.get_mut(idx) {
+                shape.set_text_params(new);
+            }
+        }
+    }
+
+    /// Replace every selected text object with its glyph outlines (Illustrator's
+    /// `Type ▸ Create Outlines`): the live text becomes a real editable
+    /// [`Shape::Compound`] of the glyph contours. One undo step; the produced
+    /// compounds stay selected. No-op (returns whether anything converted) if the
+    /// selection holds no text objects.
+    pub(super) fn convert_text_to_outlines(&mut self) -> bool {
+        let targets: Vec<usize> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|&i| matches!(self.doc.shapes.get(i), Some(Shape::Text { .. })))
+            .collect();
+        if targets.is_empty() {
+            self.status = "Create Outlines: select a type object".into();
+            return false;
+        }
+        self.end_text_edit();
+        self.checkpoint();
+        for &i in &targets {
+            if let Some(shape) = self.doc.shapes.get(i) {
+                self.doc.shapes[i] = shape.text_to_outlines();
+            }
+        }
+        self.status = format!(
+            "Converted {} type {} to outlines",
+            targets.len(),
+            if targets.len() == 1 { "object" } else { "objects" }
+        );
+        true
+    }
+
+    /// Whether the selection contains at least one editable text object (gates the
+    /// `Type ▸ Create Outlines` menu item).
+    pub(super) fn has_text_selected(&self) -> bool {
+        self.selection
+            .iter()
+            .any(|&i| matches!(self.doc.shapes.get(i), Some(Shape::Text { .. })))
     }
 
     pub(super) fn export_svg_dialog(&mut self) {
@@ -1884,6 +2076,9 @@ impl ContourApp {
 fn compound_subpaths(shape: &Shape) -> Option<Vec<crate::document::SubPath>> {
     match shape {
         Shape::Compound { subpaths, .. } => (!subpaths.is_empty()).then(|| subpaths.clone()),
+        // A text object contributes its glyph outlines (it converts to a compound
+        // path), so it can be combined with other shapes.
+        Shape::Text { glyphs, .. } => (!glyphs.is_empty()).then(|| glyphs.clone()),
         Shape::Path {
             points,
             handles,

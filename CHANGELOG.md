@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Type tool — point type with real glyph outlines + Convert to Outlines**
+  (Phase 5 "Type", foundational slice). Contour gains a **Type tool** (`T`):
+  click the canvas to drop a point-type object, then type — characters append,
+  **Backspace** deletes, **Enter** starts a new line, **Esc** finishes (an empty
+  placeholder is discarded). A blinking baseline caret marks the active edit. The
+  inspector's new **Type** section edits the selected text's **string**, **font
+  size**, and **alignment** (left / centre / right); fill + stroke reuse the
+  existing paint / Appearance model.
+  - Text renders as **real vector outlines**: a bundled default font
+    (Ubuntu Light, Ubuntu Font Licence — `assets/fonts/`) is parsed with
+    `ttf-parser`, and each glyph's TrueType contours (quadratics elevated to
+    cubics) are mapped straight onto the document's `(points, handles, closed)`
+    path geometry. Those glyph contours are cached on the new **`Shape::Text`**
+    variant as sub-paths, so a text object **composes / exports like any vector**
+    — it hit-tests, transforms, fills (even-odd, so glyph counters are holes),
+    and exports to **SVG** (one even-odd `<path>`) and **PNG** (tiny-skia) through
+    the same pipelines as a compound path. Multi-line (`\n`) is supported.
+  - **Object ▸ Type ▸ Create Outlines** (and the inspector button) replaces the
+    live text with a real editable **`Shape::Compound`** of the glyph outlines.
+    A general transform (rotate / scale / shear) on live text bakes it to
+    outlines first, so transformed type always renders / exports exactly.
+  - `Shape::Text` carries its editable `params` (string + size + align) + `origin`
+    plus the cached `glyphs`; every field is additive (`#[serde(default)]`), so it
+    **persists to `.contour`** and older files load unchanged. The glyph cache is
+    advisory — `Document::relayout_text` rebuilds it from `params` on load so text
+    always tracks the current font build. The Layers panel shows a text object's
+    string as its row name.
+  - New pure module `text.rs` (layout + glyph-outline → sub-path conversion) is
+    unit-tested: a known glyph yields non-empty closed contours, advance grows
+    with text and scales with font size, multi-line offsets the second line down,
+    alignment shifts a line horizontally, and "o" yields its outer + inner
+    counter. Model + export tests cover the `.contour` serde round-trip (with the
+    additive-default back-compat path), `set_text_params` relayout,
+    convert-to-outlines → non-empty compound, translate-moves-origin-and-glyphs,
+    and SVG/PNG emission. New dep (contour-app only): `ttf-parser`. *Still open
+    (noted):* **area type**, **type-on-path**, threaded/overflow text, rich
+    **character / paragraph** panels, **font selection** + OpenType shaping /
+    kerning / variable fonts, the glyphs panel, text wrap, and character /
+    paragraph **styles** — this pass lands point type only.
 - **Layers panel — real object list with visibility / lock / name / colour +
   group nesting + reorder** (Phase 2 "Layers panel"). The placeholder layers
   list grows into a real panel listing every object **top-to-bottom in z-order**,

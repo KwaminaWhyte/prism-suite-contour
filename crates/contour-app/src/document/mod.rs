@@ -17,6 +17,8 @@ pub use path::{
 };
 pub use style::{Arrowhead, LineCap, LineJoin, StrokeAlign, StrokeStyle};
 
+use crate::text::TextParams;
+
 use crate::appearance::Appearance;
 use crate::artboard::{self, Artboard};
 use crate::gradient::Gradient;
@@ -310,6 +312,63 @@ pub enum Shape {
         #[serde(default)]
         layer_color: Option<[f32; 4]>,
     },
+    /// A **point-type** object: an editable string plus its font parameters,
+    /// rendered as real glyph outlines. The editable model is `params` (text +
+    /// size + alignment) anchored at `origin`; the laid-out glyph contours are
+    /// cached in `glyphs` (one closed [`SubPath`] per glyph contour, in document
+    /// space) so every render surface, geometry query, and the boolean / clip
+    /// pipeline treat a text object exactly like a [`Compound`](Self::Compound)
+    /// path. Editing any of `params` / `origin` re-runs [`crate::text::layout`]
+    /// to refresh `glyphs` (see [`Shape::text_relayout`]). `Object ▸ Type ▸
+    /// Convert to Outlines` lifts `glyphs` into a real `Compound`.
+    Text {
+        /// The editable text + font parameters. Re-laying out on edit refreshes
+        /// the `glyphs` cache.
+        params: TextParams,
+        /// Document-space anchor: the top-left of the first line's em box (where
+        /// the Type tool's click lands).
+        origin: (f32, f32),
+        /// Cached laid-out glyph outlines (one closed contour each). Derived from
+        /// `params` + `origin`; rebuilt on edit and re-derivable on load, so it is
+        /// serialized for forward-compat but never trusted over a relayout.
+        #[serde(default)]
+        glyphs: Vec<SubPath>,
+        fill: [f32; 4],
+        #[serde(default)]
+        fill_gradient: Option<Gradient>,
+        stroke: [f32; 4],
+        stroke_w: f32,
+        #[serde(default)]
+        stroke_style: StrokeStyle,
+        #[serde(default)]
+        appearance: Option<Appearance>,
+        #[serde(default = "default_true")]
+        visible: bool,
+        #[serde(default)]
+        group: Option<u64>,
+        #[serde(default)]
+        clip: Option<u64>,
+        #[serde(default)]
+        mask: bool,
+        #[serde(default)]
+        omask: Option<u64>,
+        #[serde(default)]
+        omask_path: bool,
+        #[serde(default)]
+        omask_invert: bool,
+        #[serde(default)]
+        blend: Option<u64>,
+        #[serde(default)]
+        blend_step: bool,
+        /// Optional Layers-panel display name. Additive (`#[serde(default)]` →
+        /// `None`), so a text object falls back to its string / the type label.
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        locked: bool,
+        #[serde(default)]
+        layer_color: Option<[f32; 4]>,
+    },
 }
 
 impl Shape {
@@ -321,6 +380,7 @@ impl Shape {
             Shape::Line { .. } => "Line",
             Shape::Path { .. } => "Path",
             Shape::Compound { .. } => "Compound Path",
+            Shape::Text { .. } => "Type",
         }
     }
 
@@ -331,7 +391,8 @@ impl Shape {
             | Shape::Ellipse { visible, .. }
             | Shape::Line { visible, .. }
             | Shape::Path { visible, .. }
-            | Shape::Compound { visible, .. } => *visible,
+            | Shape::Compound { visible, .. }
+            | Shape::Text { visible, .. } => *visible,
         }
     }
 
@@ -342,7 +403,8 @@ impl Shape {
             | Shape::Ellipse { visible, .. }
             | Shape::Line { visible, .. }
             | Shape::Path { visible, .. }
-            | Shape::Compound { visible, .. } => *visible = !*visible,
+            | Shape::Compound { visible, .. }
+            | Shape::Text { visible, .. } => *visible = !*visible,
         }
     }
 
@@ -354,7 +416,8 @@ impl Shape {
             | Shape::Ellipse { locked, .. }
             | Shape::Line { locked, .. }
             | Shape::Path { locked, .. }
-            | Shape::Compound { locked, .. } => *locked,
+            | Shape::Compound { locked, .. }
+            | Shape::Text { locked, .. } => *locked,
         }
     }
 
@@ -365,7 +428,8 @@ impl Shape {
             | Shape::Ellipse { locked, .. }
             | Shape::Line { locked, .. }
             | Shape::Path { locked, .. }
-            | Shape::Compound { locked, .. } => *locked = v,
+            | Shape::Compound { locked, .. }
+            | Shape::Text { locked, .. } => *locked = v,
         }
     }
 
@@ -390,7 +454,8 @@ impl Shape {
             | Shape::Ellipse { name, .. }
             | Shape::Line { name, .. }
             | Shape::Path { name, .. }
-            | Shape::Compound { name, .. } => name.as_deref(),
+            | Shape::Compound { name, .. }
+            | Shape::Text { name, .. } => name.as_deref(),
         }
     }
 
@@ -406,16 +471,25 @@ impl Shape {
             | Shape::Ellipse { name, .. }
             | Shape::Line { name, .. }
             | Shape::Path { name, .. }
-            | Shape::Compound { name, .. } => *name = value,
+            | Shape::Compound { name, .. }
+            | Shape::Text { name, .. } => *name = value,
         }
     }
 
     /// The name to show in the Layers panel: the user-set name when present, else
-    /// the generic type label.
+    /// a text object's (first-line) string, else the generic type label.
     pub fn display_name(&self) -> String {
-        self.name()
-            .map(str::to_string)
-            .unwrap_or_else(|| self.label().to_string())
+        if let Some(n) = self.name() {
+            return n.to_string();
+        }
+        if let Shape::Text { params, .. } = self {
+            let first = params.text.lines().next().unwrap_or("").trim();
+            if !first.is_empty() {
+                let truncated: String = first.chars().take(24).collect();
+                return truncated;
+            }
+        }
+        self.label().to_string()
     }
 
     /// The shape's Layers-panel colour swatch, if one has been set.
@@ -425,7 +499,8 @@ impl Shape {
             | Shape::Ellipse { layer_color, .. }
             | Shape::Line { layer_color, .. }
             | Shape::Path { layer_color, .. }
-            | Shape::Compound { layer_color, .. } => *layer_color,
+            | Shape::Compound { layer_color, .. }
+            | Shape::Text { layer_color, .. } => *layer_color,
         }
     }
 
@@ -436,7 +511,8 @@ impl Shape {
             | Shape::Ellipse { layer_color, .. }
             | Shape::Line { layer_color, .. }
             | Shape::Path { layer_color, .. }
-            | Shape::Compound { layer_color, .. } => *layer_color = c,
+            | Shape::Compound { layer_color, .. }
+            | Shape::Text { layer_color, .. } => *layer_color = c,
         }
     }
 
@@ -448,7 +524,8 @@ impl Shape {
             | Shape::Ellipse { group, .. }
             | Shape::Line { group, .. }
             | Shape::Path { group, .. }
-            | Shape::Compound { group, .. } => *group,
+            | Shape::Compound { group, .. }
+            | Shape::Text { group, .. } => *group,
         }
     }
 
@@ -459,7 +536,8 @@ impl Shape {
             | Shape::Ellipse { group, .. }
             | Shape::Line { group, .. }
             | Shape::Path { group, .. }
-            | Shape::Compound { group, .. } => *group = g,
+            | Shape::Compound { group, .. }
+            | Shape::Text { group, .. } => *group = g,
         }
     }
 
@@ -472,7 +550,8 @@ impl Shape {
             | Shape::Ellipse { clip, .. }
             | Shape::Line { clip, .. }
             | Shape::Path { clip, .. }
-            | Shape::Compound { clip, .. } => *clip,
+            | Shape::Compound { clip, .. }
+            | Shape::Text { clip, .. } => *clip,
         }
     }
 
@@ -483,7 +562,8 @@ impl Shape {
             | Shape::Ellipse { clip, .. }
             | Shape::Line { clip, .. }
             | Shape::Path { clip, .. }
-            | Shape::Compound { clip, .. } => *clip = c,
+            | Shape::Compound { clip, .. }
+            | Shape::Text { clip, .. } => *clip = c,
         }
     }
 
@@ -494,7 +574,8 @@ impl Shape {
             | Shape::Ellipse { mask, .. }
             | Shape::Line { mask, .. }
             | Shape::Path { mask, .. }
-            | Shape::Compound { mask, .. } => *mask,
+            | Shape::Compound { mask, .. }
+            | Shape::Text { mask, .. } => *mask,
         }
     }
 
@@ -505,7 +586,8 @@ impl Shape {
             | Shape::Ellipse { mask, .. }
             | Shape::Line { mask, .. }
             | Shape::Path { mask, .. }
-            | Shape::Compound { mask, .. } => *mask = m,
+            | Shape::Compound { mask, .. }
+            | Shape::Text { mask, .. } => *mask = m,
         }
     }
 
@@ -525,7 +607,8 @@ impl Shape {
             | Shape::Ellipse { omask, .. }
             | Shape::Line { omask, .. }
             | Shape::Path { omask, .. }
-            | Shape::Compound { omask, .. } => *omask,
+            | Shape::Compound { omask, .. }
+            | Shape::Text { omask, .. } => *omask,
         }
     }
 
@@ -536,7 +619,8 @@ impl Shape {
             | Shape::Ellipse { omask, .. }
             | Shape::Line { omask, .. }
             | Shape::Path { omask, .. }
-            | Shape::Compound { omask, .. } => *omask = m,
+            | Shape::Compound { omask, .. }
+            | Shape::Text { omask, .. } => *omask = m,
         }
     }
 
@@ -547,7 +631,8 @@ impl Shape {
             | Shape::Ellipse { omask_path, .. }
             | Shape::Line { omask_path, .. }
             | Shape::Path { omask_path, .. }
-            | Shape::Compound { omask_path, .. } => *omask_path,
+            | Shape::Compound { omask_path, .. }
+            | Shape::Text { omask_path, .. } => *omask_path,
         }
     }
 
@@ -558,7 +643,8 @@ impl Shape {
             | Shape::Ellipse { omask_path, .. }
             | Shape::Line { omask_path, .. }
             | Shape::Path { omask_path, .. }
-            | Shape::Compound { omask_path, .. } => *omask_path = m,
+            | Shape::Compound { omask_path, .. }
+            | Shape::Text { omask_path, .. } => *omask_path = m,
         }
     }
 
@@ -569,7 +655,8 @@ impl Shape {
             | Shape::Ellipse { omask_invert, .. }
             | Shape::Line { omask_invert, .. }
             | Shape::Path { omask_invert, .. }
-            | Shape::Compound { omask_invert, .. } => *omask_invert,
+            | Shape::Compound { omask_invert, .. }
+            | Shape::Text { omask_invert, .. } => *omask_invert,
         }
     }
 
@@ -580,7 +667,8 @@ impl Shape {
             | Shape::Ellipse { omask_invert, .. }
             | Shape::Line { omask_invert, .. }
             | Shape::Path { omask_invert, .. }
-            | Shape::Compound { omask_invert, .. } => *omask_invert = v,
+            | Shape::Compound { omask_invert, .. }
+            | Shape::Text { omask_invert, .. } => *omask_invert = v,
         }
     }
 
@@ -600,7 +688,8 @@ impl Shape {
             | Shape::Ellipse { blend, .. }
             | Shape::Line { blend, .. }
             | Shape::Path { blend, .. }
-            | Shape::Compound { blend, .. } => *blend,
+            | Shape::Compound { blend, .. }
+            | Shape::Text { blend, .. } => *blend,
         }
     }
 
@@ -611,7 +700,8 @@ impl Shape {
             | Shape::Ellipse { blend, .. }
             | Shape::Line { blend, .. }
             | Shape::Path { blend, .. }
-            | Shape::Compound { blend, .. } => *blend = b,
+            | Shape::Compound { blend, .. }
+            | Shape::Text { blend, .. } => *blend = b,
         }
     }
 
@@ -623,7 +713,8 @@ impl Shape {
             | Shape::Ellipse { blend_step, .. }
             | Shape::Line { blend_step, .. }
             | Shape::Path { blend_step, .. }
-            | Shape::Compound { blend_step, .. } => *blend_step,
+            | Shape::Compound { blend_step, .. }
+            | Shape::Text { blend_step, .. } => *blend_step,
         }
     }
 
@@ -634,7 +725,8 @@ impl Shape {
             | Shape::Ellipse { blend_step, .. }
             | Shape::Line { blend_step, .. }
             | Shape::Path { blend_step, .. }
-            | Shape::Compound { blend_step, .. } => *blend_step = s,
+            | Shape::Compound { blend_step, .. }
+            | Shape::Text { blend_step, .. } => *blend_step = s,
         }
     }
 
@@ -698,15 +790,138 @@ impl Shape {
                     .map(|(_, s)| s)?;
                 outer.flatten()
             }
+            Shape::Text { glyphs, .. } => {
+                // Like a compound: the outer ring is the largest-area glyph
+                // contour, so a boolean / clip op against text uses its overall
+                // silhouette's biggest piece.
+                let outer = glyphs
+                    .iter()
+                    .filter(|s| s.closed)
+                    .map(|s| (s.signed_area().abs(), s))
+                    .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(_, s)| s)?;
+                outer.flatten()
+            }
             Shape::Line { .. } => return None,
         };
         (pts.len() >= 3).then_some(pts)
     }
 
-    /// The compound path's [`FillRule`], if this is a compound path.
+    /// The editable text parameters, if this is a text object.
+    pub fn text_params(&self) -> Option<&TextParams> {
+        match self {
+            Shape::Text { params, .. } => Some(params),
+            _ => None,
+        }
+    }
+
+    /// Replace this text object's parameters and re-lay-out its glyph cache from
+    /// `params` + `origin`. No-op (returns `false`) on a non-text shape. Editing
+    /// the string / size / alignment routes through here so the cached outlines
+    /// always match the editable model.
+    pub fn set_text_params(&mut self, new: TextParams) -> bool {
+        if let Shape::Text {
+            params,
+            origin,
+            glyphs,
+            ..
+        } = self
+        {
+            *params = new;
+            *glyphs = crate::text::layout(params, *origin).0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Re-run text layout into the glyph cache (after an origin change, or to
+    /// repair a loaded document whose cache may be stale / absent). No-op on a
+    /// non-text shape.
+    pub fn text_relayout(&mut self) {
+        if let Shape::Text {
+            params,
+            origin,
+            glyphs,
+            ..
+        } = self
+        {
+            *glyphs = crate::text::layout(params, *origin).0;
+        }
+    }
+
+    /// Lift a text object's cached glyph outlines into a real editable
+    /// [`Shape::Compound`] (Illustrator's *Convert to Outlines*), inheriting the
+    /// text's paint / style / membership and filling under the even-odd rule so
+    /// glyph counters stay as holes. Returns the original shape unchanged if it is
+    /// not a text object.
+    pub fn text_to_outlines(&self) -> Shape {
+        if let Shape::Text {
+            params,
+            origin,
+            glyphs,
+            fill,
+            fill_gradient,
+            stroke,
+            stroke_w,
+            stroke_style,
+            appearance,
+            visible,
+            group,
+            clip,
+            mask,
+            omask,
+            omask_path,
+            omask_invert,
+            blend,
+            blend_step,
+            name,
+            locked,
+            layer_color,
+        } = self
+        {
+            // Prefer the live cache; fall back to a fresh layout if it is empty
+            // (e.g. a hand-edited file) so convert never yields nothing for
+            // non-empty text.
+            let subpaths = if glyphs.is_empty() {
+                crate::text::layout(params, *origin).0
+            } else {
+                glyphs.clone()
+            };
+            Shape::Compound {
+                subpaths,
+                fill_rule: FillRule::EvenOdd,
+                fill: *fill,
+                fill_gradient: fill_gradient.clone(),
+                stroke: *stroke,
+                stroke_w: *stroke_w,
+                stroke_style: stroke_style.clone(),
+                appearance: appearance.clone(),
+                visible: *visible,
+                group: *group,
+                clip: *clip,
+                mask: *mask,
+                omask: *omask,
+                omask_path: *omask_path,
+                omask_invert: *omask_invert,
+                blend: *blend,
+                blend_step: *blend_step,
+                name: name.clone(),
+                locked: *locked,
+                layer_color: *layer_color,
+            }
+        } else {
+            self.clone()
+        }
+    }
+
+    /// The compound path's [`FillRule`], if this is a compound (or text) shape.
+    /// Text fills under **even-odd** so glyph counters (the hole in an "o") render
+    /// as holes, matching the glyph-outline → compound conversion.
     pub fn fill_rule(&self) -> Option<FillRule> {
         match self {
             Shape::Compound { fill_rule, .. } => Some(*fill_rule),
+            Shape::Text { .. } => Some(FillRule::EvenOdd),
             _ => None,
         }
     }
@@ -720,7 +935,8 @@ impl Shape {
             | Shape::Ellipse { stroke, .. }
             | Shape::Line { stroke, .. }
             | Shape::Path { stroke, .. }
-            | Shape::Compound { stroke, .. } => Some(*stroke),
+            | Shape::Compound { stroke, .. }
+            | Shape::Text { stroke, .. } => Some(*stroke),
         }
     }
 
@@ -731,7 +947,8 @@ impl Shape {
             | Shape::Ellipse { stroke, .. }
             | Shape::Line { stroke, .. }
             | Shape::Path { stroke, .. }
-            | Shape::Compound { stroke, .. } => *stroke = c,
+            | Shape::Compound { stroke, .. }
+            | Shape::Text { stroke, .. } => *stroke = c,
         }
     }
 
@@ -742,7 +959,8 @@ impl Shape {
             | Shape::Ellipse { stroke_w, .. }
             | Shape::Line { stroke_w, .. }
             | Shape::Path { stroke_w, .. }
-            | Shape::Compound { stroke_w, .. } => *stroke_w,
+            | Shape::Compound { stroke_w, .. }
+            | Shape::Text { stroke_w, .. } => *stroke_w,
         }
     }
 
@@ -753,7 +971,8 @@ impl Shape {
             | Shape::Ellipse { stroke_w, .. }
             | Shape::Line { stroke_w, .. }
             | Shape::Path { stroke_w, .. }
-            | Shape::Compound { stroke_w, .. } => *stroke_w = w,
+            | Shape::Compound { stroke_w, .. }
+            | Shape::Text { stroke_w, .. } => *stroke_w = w,
         }
     }
 
@@ -764,7 +983,8 @@ impl Shape {
             | Shape::Ellipse { stroke_style, .. }
             | Shape::Line { stroke_style, .. }
             | Shape::Path { stroke_style, .. }
-            | Shape::Compound { stroke_style, .. } => stroke_style,
+            | Shape::Compound { stroke_style, .. }
+            | Shape::Text { stroke_style, .. } => stroke_style,
         }
     }
 
@@ -775,7 +995,8 @@ impl Shape {
             | Shape::Ellipse { stroke_style, .. }
             | Shape::Line { stroke_style, .. }
             | Shape::Path { stroke_style, .. }
-            | Shape::Compound { stroke_style, .. } => stroke_style,
+            | Shape::Compound { stroke_style, .. }
+            | Shape::Text { stroke_style, .. } => stroke_style,
         }
     }
 
@@ -789,7 +1010,8 @@ impl Shape {
             | Shape::Ellipse { appearance, .. }
             | Shape::Line { appearance, .. }
             | Shape::Path { appearance, .. }
-            | Shape::Compound { appearance, .. } => appearance.as_ref(),
+            | Shape::Compound { appearance, .. }
+            | Shape::Text { appearance, .. } => appearance.as_ref(),
         }
     }
 
@@ -800,7 +1022,8 @@ impl Shape {
             | Shape::Ellipse { appearance, .. }
             | Shape::Line { appearance, .. }
             | Shape::Path { appearance, .. }
-            | Shape::Compound { appearance, .. } => appearance,
+            | Shape::Compound { appearance, .. }
+            | Shape::Text { appearance, .. } => appearance,
         }
     }
 
@@ -834,7 +1057,8 @@ impl Shape {
             Shape::Rect { fill_gradient, .. }
             | Shape::Ellipse { fill_gradient, .. }
             | Shape::Path { fill_gradient, .. }
-            | Shape::Compound { fill_gradient, .. } => fill_gradient.as_ref(),
+            | Shape::Compound { fill_gradient, .. }
+            | Shape::Text { fill_gradient, .. } => fill_gradient.as_ref(),
             Shape::Line { .. } => None,
         }
     }
@@ -846,7 +1070,8 @@ impl Shape {
             Shape::Rect { fill_gradient, .. }
             | Shape::Ellipse { fill_gradient, .. }
             | Shape::Path { fill_gradient, .. }
-            | Shape::Compound { fill_gradient, .. } => *fill_gradient = g,
+            | Shape::Compound { fill_gradient, .. }
+            | Shape::Text { fill_gradient, .. } => *fill_gradient = g,
             Shape::Line { .. } => {}
         }
     }
@@ -859,7 +1084,8 @@ impl Shape {
             Shape::Rect { fill, .. }
             | Shape::Ellipse { fill, .. }
             | Shape::Path { fill, .. }
-            | Shape::Compound { fill, .. } => Some(*fill),
+            | Shape::Compound { fill, .. }
+            | Shape::Text { fill, .. } => Some(*fill),
             Shape::Line { .. } => None,
         }
     }
@@ -870,7 +1096,8 @@ impl Shape {
             Shape::Rect { fill, .. }
             | Shape::Ellipse { fill, .. }
             | Shape::Path { fill, .. }
-            | Shape::Compound { fill, .. } => *fill = c,
+            | Shape::Compound { fill, .. }
+            | Shape::Text { fill, .. } => *fill = c,
             Shape::Line { .. } => {}
         }
     }
@@ -930,7 +1157,8 @@ impl Shape {
             Shape::Rect { fill_gradient, .. }
             | Shape::Ellipse { fill_gradient, .. }
             | Shape::Path { fill_gradient, .. }
-            | Shape::Compound { fill_gradient, .. } => fill_gradient
+            | Shape::Compound { fill_gradient, .. }
+            | Shape::Text { fill_gradient, .. } => fill_gradient
                 .as_mut()
                 .map(|g| {
                     let mut any = false;
@@ -990,8 +1218,9 @@ impl Shape {
                     r.height() as f32,
                 ))
             }
-            Shape::Compound { subpaths, .. } => {
-                // Union of every sub-contour's tight (bezier-aware) bounds.
+            Shape::Compound { subpaths, .. } | Shape::Text { glyphs: subpaths, .. } => {
+                // Union of every sub-contour's tight (bezier-aware) bounds. Text
+                // shares this: its glyph cache is just a list of sub-contours.
                 let mut union: Option<kurbo::Rect> = None;
                 for sp in subpaths {
                     if sp.points.is_empty() {
@@ -1037,6 +1266,20 @@ impl Shape {
             }
             Shape::Compound { subpaths, .. } => {
                 for sp in subpaths.iter_mut() {
+                    for p in sp.points.iter_mut() {
+                        p.0 += dx;
+                        p.1 += dy;
+                    }
+                }
+            }
+            Shape::Text {
+                origin, glyphs, ..
+            } => {
+                // Move the editable anchor *and* the cached glyph outlines so the
+                // text stays live (a later relayout keeps producing it in place).
+                origin.0 += dx;
+                origin.1 += dy;
+                for sp in glyphs.iter_mut() {
                     for p in sp.points.iter_mut() {
                         p.0 += dx;
                         p.1 += dy;
@@ -1103,6 +1346,15 @@ impl Shape {
                     }
                 }
             }
+            Shape::Text { .. } => {
+                // A general affine (scale / rotate / shear / reflect) on live text
+                // would desync the editable params from the transformed glyph
+                // cache, so — like Illustrator baking transformed type — convert to
+                // glyph outlines (a Compound) and transform those. The text stops
+                // being editable as text, but renders / exports exactly.
+                *self = self.text_to_outlines();
+                self.apply_affine(m);
+            }
         }
     }
 
@@ -1155,6 +1407,9 @@ impl Shape {
             // single-ring `Path` it reduces to without losing its holes, so it is
             // returned unchanged (transform / Pathfinder handle it as a compound).
             Shape::Path { .. } | Shape::Compound { .. } => self.clone(),
+            // Text reduces to its glyph outlines (a compound path), the editable
+            // form for Pathfinder / direct-select.
+            Shape::Text { .. } => self.text_to_outlines(),
             Shape::Rect {
                 rect,
                 fill,
@@ -1559,6 +1814,15 @@ impl Shape {
                 }
                 false
             }
+            Shape::Text { .. } => {
+                // A text object is selected by clicking anywhere inside its
+                // bounding box (the way a type object's bounds pick in
+                // Illustrator), which is far friendlier than requiring a click on a
+                // thin glyph stroke.
+                self.bounds()
+                    .map(|b| path::point_in_rect(x, y, &[b.x, b.y, b.w, b.h], tol))
+                    .unwrap_or(false)
+            }
         }
     }
 }
@@ -1652,6 +1916,16 @@ impl Document {
         }
         let i = self.active_artboard.min(self.artboards.len() - 1);
         self.artboards.get(i)
+    }
+
+    /// Re-lay-out every text object's glyph cache from its `params` + `origin`,
+    /// so a loaded document (whose cached `glyphs` may be absent / stale / from a
+    /// different font build) always renders its text correctly. Cheap (only text
+    /// objects do work) and idempotent. Called after deserialize.
+    pub fn relayout_text(&mut self) {
+        for s in self.shapes.iter_mut() {
+            s.text_relayout();
+        }
     }
 
     /// Repair an opened/legacy document: ensure at least one artboard exists and

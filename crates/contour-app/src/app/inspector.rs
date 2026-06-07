@@ -198,6 +198,22 @@ impl ContourApp {
                         });
                     });
 
+                    ui.menu_button(format!("{}  Type", icons::TYPE), |ui| {
+                        ui.add_enabled_ui(self.has_text_selected(), |ui| {
+                            if ui
+                                .button("Create Outlines")
+                                .on_hover_text(
+                                    "Replace the selected type with editable glyph \
+                                     outlines (a compound path)",
+                                )
+                                .clicked()
+                            {
+                                self.convert_text_to_outlines();
+                                ui.close_menu();
+                            }
+                        });
+                    });
+
                     ui.separator();
                     ui.add_enabled_ui(self.can_group(), |ui| {
                         if ui.button(format!("{}  Group", icons::GROUP)).clicked() {
@@ -771,6 +787,7 @@ impl ContourApp {
                                 Tool::Ellipse,
                                 Tool::Line,
                                 Tool::Pen,
+                                Tool::Type,
                                 Tool::Eyedropper,
                                 Tool::ShapeBuilder,
                                 Tool::Artboard,
@@ -818,6 +835,16 @@ impl ContourApp {
                                     );
                                 });
                             });
+
+                        // Type section: only meaningful (and only shown) when a
+                        // text object is the primary selection.
+                        if self.primary_is_text() {
+                            egui::CollapsingHeader::new("Type")
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    self.type_section(ui);
+                                });
+                        }
 
                         egui::CollapsingHeader::new("Stroke options")
                             .default_open(false)
@@ -1287,6 +1314,86 @@ impl ContourApp {
     /// and a numeric "rotate by" about the selection's centre. Mirrors the
     /// on-canvas transform box (drag a handle to scale, drag just outside a
     /// corner to rotate). Each action is one undo step.
+    /// Whether the primary selection is a text object (gates the Type section).
+    pub(super) fn primary_is_text(&self) -> bool {
+        matches!(
+            self.primary().and_then(|i| self.doc.shapes.get(i)),
+            Some(crate::document::Shape::Text { .. })
+        )
+    }
+
+    /// The Type inspector: edit the primary text object's string, font size, and
+    /// alignment, plus a Create-Outlines button. Any change re-lays-out the glyph
+    /// cache (via `set_text_params`) as one undo step.
+    fn type_section(&mut self, ui: &mut egui::Ui) {
+        use crate::text::{TextAlign, TextParams};
+        let Some(idx) = self.primary() else { return };
+        let Some(mut params): Option<TextParams> =
+            self.doc.shapes.get(idx).and_then(|s| s.text_params().cloned())
+        else {
+            return;
+        };
+        let mut changed = false;
+
+        ui.label("Text");
+        // Multi-line string editor (canvas typing still works; this is the panel
+        // path for precise edits).
+        if ui
+            .add(
+                egui::TextEdit::multiline(&mut params.text)
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY),
+            )
+            .changed()
+        {
+            changed = true;
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Size");
+            if ui
+                .add(
+                    egui::DragValue::new(&mut params.font_size)
+                        .speed(0.5)
+                        .range(1.0..=2000.0)
+                        .suffix(" px"),
+                )
+                .changed()
+            {
+                changed = true;
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Align");
+            for a in TextAlign::ALL {
+                if ui
+                    .selectable_label(params.align == a, a.label())
+                    .clicked()
+                {
+                    params.align = a;
+                    changed = true;
+                }
+            }
+        });
+
+        if changed {
+            self.checkpoint();
+            if let Some(shape) = self.doc.shapes.get_mut(idx) {
+                shape.set_text_params(params);
+            }
+        }
+
+        ui.separator();
+        if ui
+            .button(format!("{}  Create Outlines", icons::COMPOUND))
+            .on_hover_text("Replace the type with editable glyph outlines")
+            .clicked()
+        {
+            self.convert_text_to_outlines();
+        }
+    }
+
     fn transform_section(&mut self, ui: &mut egui::Ui) {
         let enabled = !self.selection.is_empty();
         ui.add_enabled_ui(enabled, |ui| {

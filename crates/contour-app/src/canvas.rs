@@ -255,11 +255,11 @@ impl ShapeGeometry {
                     fillable: *closed,
                 }
             }
-            // Plain-painter fallback for a compound path: its outer ring. Compound
-            // paths normally route through the tiny-skia raster path (which fills
-            // holes correctly under the fill rule); this is only a degenerate
-            // fallback if rasterizing fails.
-            Shape::Compound { .. } => {
+            // Plain-painter fallback for a compound path / text: its outer ring.
+            // Both normally route through the tiny-skia raster path (which fills
+            // holes / counters correctly under the fill rule); this is only a
+            // degenerate fallback if rasterizing fails.
+            Shape::Compound { .. } | Shape::Text { .. } => {
                 let ring = shape.outline_polygon().unwrap_or_default();
                 let n = ring.len();
                 Self {
@@ -297,10 +297,11 @@ pub fn paint_shape_masked(
 ) {
     let appearance = shape.effective_appearance();
     if !appearance.is_empty() {
-        // A compound path fills its holes via the fill rule, which egui's painter
-        // can't express, so it always routes through the tiny-skia raster path
-        // (exact even-odd / non-zero fill) alongside effects / blends / masks.
-        let is_compound = matches!(shape, Shape::Compound { .. });
+        // A compound path / text fills its holes / glyph counters via the fill
+        // rule, which egui's painter can't express, so both always route through
+        // the tiny-skia raster path (exact even-odd / non-zero fill) alongside
+        // effects / blends / masks.
+        let is_compound = matches!(shape, Shape::Compound { .. } | Shape::Text { .. });
         if appearance.needs_raster() || omask.is_some() || is_compound {
             // egui's painter can neither blur, blend, nor mask: rasterize the
             // fill/stroke stack with tiny-skia at the current zoom, composite each

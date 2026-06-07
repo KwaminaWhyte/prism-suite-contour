@@ -299,6 +299,25 @@ fn svg_geom(shape: &Shape) -> SvgGeom {
                 fill_rule_attr,
             }
         }
+        Shape::Text { glyphs, .. } => {
+            // Text exports as one even-odd `<path>` concatenating every glyph
+            // contour, so glyph counters render as holes in any SVG viewer.
+            let mut d = String::new();
+            for sp in glyphs {
+                if sp.points.is_empty() {
+                    continue;
+                }
+                if !d.is_empty() {
+                    d.push(' ');
+                }
+                d.push_str(&path_d(&sp.points, &sp.handles, sp.closed));
+            }
+            SvgGeom {
+                head: format!("<path d=\"{d}\""),
+                fillable: true,
+                fill_rule_attr: " fill-rule=\"evenodd\"",
+            }
+        }
     }
 }
 
@@ -724,10 +743,10 @@ pub(crate) fn skia_path_of(shape: &Shape) -> Option<(tiny_skia::Path, bool)> {
             handles,
             ..
         } => build_skia_path(points, handles, *closed).map(|p| (p, *closed)),
-        // A compound path is one tiny-skia path with several sub-contours; the
-        // fill rule (Winding / EvenOdd) is applied at fill time via
-        // [`skia_fill_rule_of`].
-        Shape::Compound { subpaths, .. } => {
+        // A compound path / text is one tiny-skia path with several sub-contours;
+        // the fill rule (Winding / EvenOdd) is applied at fill time via
+        // [`skia_fill_rule_of`] (text is always even-odd, so its counters carve).
+        Shape::Compound { subpaths, .. } | Shape::Text { glyphs: subpaths, .. } => {
             let mut pb = PathBuilder::new();
             let mut any = false;
             for sp in subpaths {
@@ -2392,5 +2411,61 @@ mod tests {
             centre.green(),
             centre.blue()
         );
+    }
+
+    /// A text object exports as an even-odd `<path>` of glyph outlines in SVG, and
+    /// rasterizes to non-blank pixels in PNG (composing / exporting like any
+    /// vector).
+    #[test]
+    fn text_exports_to_svg_and_png() {
+        let params = crate::text::TextParams {
+            text: "Ag".to_string(),
+            font_size: 60.0,
+            align: crate::text::TextAlign::Left,
+        };
+        let glyphs = crate::text::layout(&params, (20.0, 20.0)).0;
+        let text = Shape::Text {
+            params,
+            origin: (20.0, 20.0),
+            glyphs,
+            fill: [0.0, 0.0, 0.0, 1.0],
+            fill_gradient: None,
+            stroke: [0.0, 0.0, 0.0, 1.0],
+            stroke_w: 0.0,
+            stroke_style: StrokeStyle::default(),
+            appearance: None,
+            visible: true,
+            group: None,
+            clip: None,
+            mask: false,
+            omask: None,
+            omask_path: false,
+            omask_invert: false,
+            blend: None,
+            blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
+        };
+        let doc = Document {
+            shapes: vec![text.clone()],
+            ..Default::default()
+        };
+        // SVG: a single even-odd path carrying the glyph contours.
+        let svg = to_svg(&doc, 200.0, 120.0);
+        assert!(svg.contains("<path"), "text emits a path element");
+        assert!(
+            svg.contains("fill-rule=\"evenodd\""),
+            "text fills even-odd so counters carve"
+        );
+        // PNG: the text rasterizes to at least some non-white ink.
+        let mut pixmap = Pixmap::new(200, 120).unwrap();
+        pixmap.fill(TsColor::WHITE);
+        draw_shape_skia(&mut pixmap, &text, Transform::identity(), None);
+        let inked = pixmap
+            .pixels()
+            .iter()
+            .any(|p| p.red() < 200 || p.green() < 200 || p.blue() < 200);
+        assert!(inked, "rasterized text should leave ink on the page");
     }
 }
