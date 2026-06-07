@@ -605,6 +605,7 @@ impl ContourApp {
                 stroke: self.stroke,
                 stroke_w: self.stroke_w,
                 stroke_style: self.stroke_style.clone(),
+                appearance: None,
                 handles,
                 visible: true,
                 group: None,

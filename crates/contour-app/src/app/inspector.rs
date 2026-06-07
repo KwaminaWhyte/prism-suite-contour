@@ -3,6 +3,7 @@
 
 use super::{align_button, color_row, gradient_editor, ContourApp, Tool};
 use crate::align::{Align, AlignTo, Distribute};
+use crate::appearance::{BlendMode, Fill, Paint, Stroke as AppStroke};
 use crate::arrange::{self, Arrange};
 use crate::boolean::BoolOp;
 use crate::document::{LineCap, LineJoin};
@@ -667,6 +668,11 @@ impl ContourApp {
                             .show(ui, |ui| {
                                 self.stroke_section(ui);
                             });
+                        egui::CollapsingHeader::new("Appearance")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                self.appearance_section(ui);
+                            });
                         egui::CollapsingHeader::new("Transform")
                             .default_open(true)
                             .show(ui, |ui| {
@@ -733,16 +739,25 @@ impl ContourApp {
     /// is edited.
     fn fill_section(&mut self, ui: &mut egui::Ui) {
         // Seed the working state from the primary selected shape (so the panel
-        // reflects the selection), falling back to the app default.
+        // reflects the selection), falling back to the app default. For a shape
+        // with an explicit Appearance stack the Style section edits its *topmost*
+        // fill (Illustrator's "basic appearance" row), so what's shown matches
+        // what renders; otherwise it edits the legacy single fill.
         let primary = self.primary();
         let seeded = primary.and_then(|i| self.doc.shapes.get(i));
-        let mut solid = match seeded.and_then(|s| s.fill_color()) {
-            Some(c) => c,
-            None => self.fill,
+        let stacked = seeded.is_some_and(|s| s.appearance().is_some());
+        let top_fill = seeded
+            .and_then(|s| s.appearance())
+            .and_then(|a| a.fills.last());
+        let mut solid = match (top_fill, seeded.and_then(|s| s.fill_color())) {
+            (Some(f), _) => f.paint.swatch(),
+            (None, Some(c)) => c,
+            (None, None) => self.fill,
         };
-        let mut grad: Option<Gradient> = match seeded {
-            Some(s) => s.fill_gradient().cloned(),
-            None => self.fill_gradient.clone(),
+        let mut grad: Option<Gradient> = match (top_fill, seeded) {
+            (Some(f), _) => f.paint.gradient().cloned(),
+            (None, Some(s)) => s.fill_gradient().cloned(),
+            (None, None) => self.fill_gradient.clone(),
         };
 
         let mut changed = false;
@@ -802,8 +817,26 @@ impl ContourApp {
             if let Some(i) = primary {
                 self.checkpoint();
                 if let Some(shape) = self.doc.shapes.get_mut(i) {
-                    shape.set_fill_color(solid);
-                    shape.set_fill_gradient(grad);
+                    if stacked {
+                        // Write into the topmost fill of the explicit stack (the
+                        // basic-appearance row), so the edit renders.
+                        if let Some(ap) = shape.appearance_mut() {
+                            if let Some(f) = ap.fills.last_mut() {
+                                f.paint = match grad {
+                                    Some(g) => Paint::Gradient(g),
+                                    None => Paint::Solid(solid),
+                                };
+                            } else {
+                                ap.fills.push(Fill::solid(solid));
+                                if let (Some(g), Some(f)) = (grad, ap.fills.last_mut()) {
+                                    f.paint = Paint::Gradient(g);
+                                }
+                            }
+                        }
+                    } else {
+                        shape.set_fill_color(solid);
+                        shape.set_fill_gradient(grad);
+                    }
                 }
             }
         }
@@ -815,9 +848,16 @@ impl ContourApp {
     /// inherits it; with no selection the controls edit the app default only.
     fn stroke_section(&mut self, ui: &mut egui::Ui) {
         // Edit a working copy seeded from the primary selected shape (so the
-        // panel reflects what's selected), falling back to the app default.
-        let mut s = match self.primary().and_then(|i| self.doc.shapes.get(i)) {
-            Some(shape) => shape.stroke_style().clone(),
+        // panel reflects what's selected), falling back to the app default. For a
+        // shape with an explicit Appearance stack the controls edit its *topmost*
+        // stroke's style so the edit renders; otherwise the legacy stroke style.
+        let seeded = self.primary().and_then(|i| self.doc.shapes.get(i));
+        let stacked = seeded.is_some_and(|sh| sh.appearance().is_some());
+        let mut s = match seeded {
+            Some(shape) => match shape.appearance().and_then(|a| a.strokes.last()) {
+                Some(top) => top.style.clone(),
+                None => shape.stroke_style().clone(),
+            },
             None => self.stroke_style.clone(),
         };
         let mut changed = false;
@@ -903,8 +943,87 @@ impl ContourApp {
             if let Some(i) = self.primary() {
                 self.checkpoint();
                 if let Some(shape) = self.doc.shapes.get_mut(i) {
-                    *shape.stroke_style_mut() = style;
+                    if stacked {
+                        if let Some(top) = shape
+                            .appearance_mut()
+                            .as_mut()
+                            .and_then(|a| a.strokes.last_mut())
+                        {
+                            top.style = style;
+                        }
+                    } else {
+                        *shape.stroke_style_mut() = style;
+                    }
                 }
+            }
+        }
+    }
+
+    /// The **Appearance** panel: the primary selected shape's stacked fills and
+    /// strokes (Illustrator's Appearance panel). Each list is shown top-to-bottom
+    /// (the topmost paint layer first), with per-item add / remove / move-up /
+    /// move-down, a visibility toggle, a solid-or-gradient paint editor, and an
+    /// opacity + blend-mode row. Editing migrates a legacy single-fill/stroke
+    /// shape into an explicit stack on first touch. Each discrete change is one
+    /// undo step.
+    fn appearance_section(&mut self, ui: &mut egui::Ui) {
+        let Some(i) = self.primary() else {
+            ui.weak("Select a shape to edit its appearance.");
+            return;
+        };
+        // Work on a clone of the shape's *effective* appearance (its explicit
+        // stack, or one migrated from its legacy fields), edit it, then commit the
+        // whole thing back as one undo step if anything changed.
+        let Some(shape) = self.doc.shapes.get(i) else {
+            return;
+        };
+        let fillable = shape.fill_color().is_some();
+        let mut ap = shape.effective_appearance();
+        let mut changed = false;
+
+        // --- Fills (top-to-bottom) ------------------------------------------
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Fills").strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_enabled_ui(fillable, |ui| {
+                    if ui.button("+").on_hover_text("Add a fill").clicked() {
+                        ap.fills.push(Fill::solid(self.fill));
+                        changed = true;
+                    }
+                });
+            });
+        });
+        if !fillable {
+            ui.weak("This shape has no fill region.");
+        } else if ap.fills.is_empty() {
+            ui.weak("No fills. Add one with +.");
+        } else {
+            changed |= appearance_fill_list(ui, &mut ap);
+        }
+
+        ui.separator();
+
+        // --- Strokes (top-to-bottom) ----------------------------------------
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Strokes").strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("+").on_hover_text("Add a stroke").clicked() {
+                    ap.strokes
+                        .push(AppStroke::solid(self.stroke, self.stroke_w.max(1.0)));
+                    changed = true;
+                }
+            });
+        });
+        if ap.strokes.is_empty() {
+            ui.weak("No strokes. Add one with +.");
+        } else {
+            changed |= appearance_stroke_list(ui, &mut ap);
+        }
+
+        if changed {
+            self.checkpoint();
+            if let Some(shape) = self.doc.shapes.get_mut(i) {
+                shape.set_appearance(Some(ap));
             }
         }
     }
@@ -1380,5 +1499,231 @@ impl ContourApp {
             self.checkpoint();
             self.remove_shape(i);
         }
+    }
+}
+
+/// Editable list of [`Fill`]s for the Appearance panel, shown top-to-bottom (the
+/// topmost paint layer first; the model stores bottom-to-top, so the list
+/// iterates in reverse). Reorders route through the model's tested
+/// [`Appearance::raise_fill`] / [`Appearance::lower_fill`]. Returns `true` if any
+/// control changed the stack.
+fn appearance_fill_list(ui: &mut egui::Ui, ap: &mut crate::appearance::Appearance) -> bool {
+    let mut changed = false;
+    let n = ap.fills.len();
+    let mut remove: Option<usize> = None;
+    let mut raise: Option<usize> = None; // towards top (end of vec)
+    let mut lower: Option<usize> = None; // towards bottom (start of vec)
+
+    // Reverse so the topmost layer (highest index) is listed first.
+    for idx in (0..n).rev() {
+        let fill = &mut ap.fills[idx];
+        ui.push_id(("fill", idx), |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::Button::new(eye_glyph(fill.visible)).frame(false))
+                    .on_hover_text("Toggle visibility")
+                    .clicked()
+                {
+                    fill.visible = !fill.visible;
+                    changed = true;
+                }
+                let mut is_grad = matches!(fill.paint, Paint::Gradient(_));
+                if paint_swatch_toggle(ui, &mut fill.paint, &mut is_grad) {
+                    changed = true;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("✕").on_hover_text("Remove fill").clicked() {
+                        remove = Some(idx);
+                    }
+                    // idx+1 < n means there is a layer above to swap with.
+                    ui.add_enabled_ui(idx + 1 < n, |ui| {
+                        if ui.small_button("▲").on_hover_text("Move up").clicked() {
+                            raise = Some(idx);
+                        }
+                    });
+                    ui.add_enabled_ui(idx > 0, |ui| {
+                        if ui.small_button("▼").on_hover_text("Move down").clicked() {
+                            lower = Some(idx);
+                        }
+                    });
+                });
+            });
+            // Gradient editor (when this fill is a gradient).
+            if let Paint::Gradient(g) = &mut fill.paint {
+                changed |= gradient_editor(ui, g);
+            }
+            changed |= opacity_blend_row(ui, &mut fill.opacity, &mut fill.blend);
+        });
+        ui.add_space(2.0);
+    }
+
+    if let Some(i) = remove {
+        ap.fills.remove(i);
+        changed = true;
+    }
+    if let Some(i) = raise {
+        changed |= ap.raise_fill(i);
+    }
+    if let Some(i) = lower {
+        changed |= ap.lower_fill(i);
+    }
+    changed
+}
+
+/// Editable list of [`AppStroke`]s for the Appearance panel (top-to-bottom).
+fn appearance_stroke_list(ui: &mut egui::Ui, ap: &mut crate::appearance::Appearance) -> bool {
+    let mut changed = false;
+    let n = ap.strokes.len();
+    let mut remove: Option<usize> = None;
+    let mut raise: Option<usize> = None;
+    let mut lower: Option<usize> = None;
+
+    for idx in (0..n).rev() {
+        let stroke = &mut ap.strokes[idx];
+        ui.push_id(("stroke", idx), |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::Button::new(eye_glyph(stroke.visible)).frame(false))
+                    .on_hover_text("Toggle visibility")
+                    .clicked()
+                {
+                    stroke.visible = !stroke.visible;
+                    changed = true;
+                }
+                let mut is_grad = matches!(stroke.paint, Paint::Gradient(_));
+                if paint_swatch_toggle(ui, &mut stroke.paint, &mut is_grad) {
+                    changed = true;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("✕").on_hover_text("Remove stroke").clicked() {
+                        remove = Some(idx);
+                    }
+                    ui.add_enabled_ui(idx + 1 < n, |ui| {
+                        if ui.small_button("▲").on_hover_text("Move up").clicked() {
+                            raise = Some(idx);
+                        }
+                    });
+                    ui.add_enabled_ui(idx > 0, |ui| {
+                        if ui.small_button("▼").on_hover_text("Move down").clicked() {
+                            lower = Some(idx);
+                        }
+                    });
+                });
+            });
+            ui.horizontal(|ui| {
+                ui.label("Width");
+                if ui
+                    .add(egui::Slider::new(&mut stroke.width, 0.0..=40.0).suffix(" px"))
+                    .changed()
+                {
+                    changed = true;
+                }
+            });
+            if let Paint::Gradient(g) = &mut stroke.paint {
+                changed |= gradient_editor(ui, g);
+            }
+            changed |= opacity_blend_row(ui, &mut stroke.opacity, &mut stroke.blend);
+        });
+        ui.add_space(2.0);
+    }
+
+    if let Some(i) = remove {
+        ap.strokes.remove(i);
+        changed = true;
+    }
+    if let Some(i) = raise {
+        changed |= ap.raise_stroke(i);
+    }
+    if let Some(i) = lower {
+        changed |= ap.lower_stroke(i);
+    }
+    changed
+}
+
+/// A Solid/Gradient toggle plus the colour swatch for the solid case. Mutates
+/// `paint` in place; `is_grad` mirrors the current kind. Returns `true` on change.
+fn paint_swatch_toggle(ui: &mut egui::Ui, paint: &mut Paint, is_grad: &mut bool) -> bool {
+    let mut changed = false;
+    // Solid colour chip (for a solid paint) or a label (for a gradient).
+    match paint {
+        Paint::Solid(c) => {
+            let mut col = Color32::from_rgba_unmultiplied(
+                (c[0] * 255.0) as u8,
+                (c[1] * 255.0) as u8,
+                (c[2] * 255.0) as u8,
+                (c[3] * 255.0) as u8,
+            );
+            if ui.color_edit_button_srgba(&mut col).changed() {
+                *c = [
+                    col.r() as f32 / 255.0,
+                    col.g() as f32 / 255.0,
+                    col.b() as f32 / 255.0,
+                    col.a() as f32 / 255.0,
+                ];
+                changed = true;
+            }
+        }
+        Paint::Gradient(_) => {
+            ui.label(egui::RichText::new("Gradient").weak());
+        }
+    }
+    // Solid / Gradient kind toggle.
+    if ui.selectable_label(!*is_grad, "S").on_hover_text("Solid").clicked() && *is_grad {
+        let c = paint.swatch();
+        *paint = Paint::Solid(c);
+        *is_grad = false;
+        changed = true;
+    }
+    if ui
+        .selectable_label(*is_grad, "G")
+        .on_hover_text("Gradient")
+        .clicked()
+        && !*is_grad
+    {
+        let base = paint.swatch();
+        *paint = Paint::Gradient(Gradient::two_stop(
+            GradientKind::Linear,
+            base,
+            [1.0, 1.0, 1.0, 1.0],
+        ));
+        *is_grad = true;
+        changed = true;
+    }
+    changed
+}
+
+/// An opacity slider + blend-mode combo row for one appearance item.
+fn opacity_blend_row(ui: &mut egui::Ui, opacity: &mut f32, blend: &mut BlendMode) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("Opacity");
+        if ui
+            .add(egui::Slider::new(opacity, 0.0..=1.0).fixed_decimals(2))
+            .changed()
+        {
+            changed = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Blend");
+        egui::ComboBox::from_id_salt("blend")
+            .selected_text(blend.label())
+            .show_ui(ui, |ui| {
+                for m in BlendMode::ALL {
+                    if ui.selectable_value(blend, m, m.label()).changed() {
+                        changed = true;
+                    }
+                }
+            });
+    });
+    changed
+}
+
+/// Eye / eye-slash glyph for an appearance item's visibility toggle.
+fn eye_glyph(visible: bool) -> &'static str {
+    if visible {
+        icons::EYE
+    } else {
+        icons::EYE_SLASH
     }
 }

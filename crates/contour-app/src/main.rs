@@ -6,6 +6,7 @@
 
 mod align;
 mod app;
+mod appearance;
 mod arrange;
 mod artboard;
 mod boolean;

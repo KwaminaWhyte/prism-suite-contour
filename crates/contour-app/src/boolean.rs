@@ -114,6 +114,8 @@ pub fn apply(subj_shape: &Shape, clip_shape: &Shape, op: BoolOp) -> Option<Shape
     };
     let stroke_style = subj_shape.stroke_style().clone();
     let fill_gradient = subj_shape.fill_gradient().cloned();
+    // Carry the subject's stacked appearance onto the boolean result.
+    let appearance = subj_shape.appearance().cloned();
 
     Some(Shape::Path {
         points,
@@ -123,6 +125,7 @@ pub fn apply(subj_shape: &Shape, clip_shape: &Shape, op: BoolOp) -> Option<Shape
         stroke,
         stroke_w,
         stroke_style,
+        appearance,
         handles: Vec::new(),
         visible: true,
         group: None,
@@ -144,6 +147,7 @@ mod tests {
             stroke: [0.0, 0.0, 0.0, 1.0],
             stroke_w: 1.0,
             stroke_style: StrokeStyle::default(),
+            appearance: None,
             visible: true,
             group: None,
             clip: None,

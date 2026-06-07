@@ -1,6 +1,7 @@
 //! The drawing surface: pan/zoom transform, per-frame shape painting, and tool
 //! interaction (create / select / move / pen).
 
+use crate::appearance::{self, Appearance};
 use crate::document::{self, Shape, StrokeStyle};
 use crate::gradient::{Gradient, GradientKind};
 use crate::theme;
@@ -189,96 +190,236 @@ fn polygon_bbox(pts: &[(f32, f32)]) -> [f32; 4] {
     [min_x, min_y, max_x - min_x, max_y - min_y]
 }
 
-/// Paint one shape using the painter, transforming document coords to screen.
-pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected: bool) {
-    let style = shape.stroke_style();
-    match shape {
-        Shape::Rect {
-            rect,
-            fill,
-            fill_gradient,
-            stroke,
-            stroke_w,
-            ..
-        } => {
-            let corners = [
-                (rect[0], rect[1]),
-                (rect[0] + rect[2], rect[1]),
-                (rect[0] + rect[2], rect[1] + rect[3]),
-                (rect[0], rect[1] + rect[3]),
-            ];
-            fill_region(painter, view, &corners, *fill, fill_gradient.as_ref());
-            if *stroke_w > 0.0 {
-                // A rect's outline is its 4 corners as a closed polyline so we
-                // can honor a dash pattern; solid strokes use the fast path.
-                let ring = [
+/// The drawable geometry of a shape, factored out so the [`Appearance`] stack
+/// can paint every fill / stroke over the *same* outline. A `Rect` / `Ellipse` /
+/// closed `Path` has a fillable `closed` ring; a `Line` / open `Path` is stroke-
+/// only (`closed == false`, no fill). `points`/`handles` keep the bezier handles
+/// for paths so curved outlines stroke as cubics; primitives carry a flattened
+/// ring with zeroed handles.
+struct ShapeGeometry {
+    points: Vec<(f32, f32)>,
+    handles: Vec<(f32, f32)>,
+    closed: bool,
+    fillable: bool,
+}
+
+impl ShapeGeometry {
+    fn of(shape: &Shape) -> Self {
+        match shape {
+            Shape::Rect { rect, .. } => {
+                let ring = vec![
                     (rect[0], rect[1]),
                     (rect[0] + rect[2], rect[1]),
                     (rect[0] + rect[2], rect[1] + rect[3]),
                     (rect[0], rect[1] + rect[3]),
                 ];
-                stroke_polyline(painter, view, &ring, true, *stroke, *stroke_w, style);
+                let handles = vec![(0.0, 0.0); ring.len()];
+                Self {
+                    points: ring,
+                    handles,
+                    closed: true,
+                    fillable: true,
+                }
             }
-        }
-        Shape::Ellipse {
-            rect,
-            fill,
-            fill_gradient,
-            stroke,
-            stroke_w,
-            ..
-        } => {
-            let ring: Vec<(f32, f32)> = ellipse_doc_points(rect, 48);
-            fill_region(painter, view, &ring, *fill, fill_gradient.as_ref());
-            if *stroke_w > 0.0 {
-                stroke_polyline(painter, view, &ring, true, *stroke, *stroke_w, style);
+            Shape::Ellipse { rect, .. } => {
+                let ring = ellipse_doc_points(rect, 48);
+                let handles = vec![(0.0, 0.0); ring.len()];
+                Self {
+                    points: ring,
+                    handles,
+                    closed: true,
+                    fillable: true,
+                }
             }
-        }
-        Shape::Line {
-            p0,
-            p1,
-            stroke,
-            stroke_w,
-            ..
-        } => {
-            stroke_polyline(
-                painter,
-                view,
-                &[*p0, *p1],
-                false,
-                *stroke,
-                stroke_w.max(0.5),
-                style,
-            );
-        }
-        Shape::Path {
-            points,
-            closed,
-            fill,
-            fill_gradient,
-            stroke,
-            stroke_w,
-            handles,
-            ..
-        } => {
-            paint_path(
-                painter,
-                view,
+            Shape::Line { p0, p1, .. } => Self {
+                points: vec![*p0, *p1],
+                handles: vec![(0.0, 0.0); 2],
+                closed: false,
+                fillable: false,
+            },
+            Shape::Path {
                 points,
                 handles,
-                *closed,
-                *fill,
-                fill_gradient.as_ref(),
-                *stroke,
-                *stroke_w,
-                style,
-            );
+                closed,
+                ..
+            } => {
+                let mut h = handles.clone();
+                h.resize(points.len(), (0.0, 0.0));
+                Self {
+                    points: points.clone(),
+                    handles: h,
+                    closed: *closed,
+                    fillable: *closed,
+                }
+            }
         }
     }
+}
 
+/// Paint one shape using the painter, transforming document coords to screen.
+///
+/// Walks the shape's *effective* [`Appearance`] stack — its explicit stack if it
+/// has one, otherwise a one-fill/one-stroke stack migrated from its legacy
+/// fields — painting every visible fill (bottom-to-top) then every visible
+/// stroke (bottom-to-top) over the same geometry, so a shape with one fill +
+/// one stroke renders exactly as before and a stacked shape layers correctly.
+pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected: bool) {
+    let appearance = shape.effective_appearance();
+    if !appearance.is_empty() {
+        let geom = ShapeGeometry::of(shape);
+        paint_appearance(painter, view, &geom, &appearance);
+    }
     if selected {
         paint_selection_ring(painter, view, shape);
     }
+}
+
+/// Paint an [`Appearance`] stack over a shape's geometry: fills first
+/// (bottom-to-top), then strokes (bottom-to-top), each scaled by its per-item
+/// opacity. Hidden items are skipped. Only [`BlendMode::Normal`] is composited
+/// (the egui painter has no per-shape blend); other modes render as Normal.
+fn paint_appearance(
+    painter: &egui::Painter,
+    view: &View,
+    geom: &ShapeGeometry,
+    appearance: &Appearance,
+) {
+    // Fills (only on a fillable / closed outline).
+    if geom.fillable && geom.closed {
+        for fill in &appearance.fills {
+            if !fill.visible || fill.opacity <= 0.0 {
+                continue;
+            }
+            paint_fill_layer(painter, view, geom, fill);
+        }
+    }
+    // Strokes (over the same outline; honour caps/joins/dashes per item).
+    for stroke in &appearance.strokes {
+        if !stroke.visible || stroke.opacity <= 0.0 || stroke.width <= 0.0 {
+            continue;
+        }
+        paint_stroke_layer(painter, view, geom, stroke);
+    }
+}
+
+/// Paint one fill of the stack: a solid colour (scaled by opacity) or a gradient
+/// (whose stop alphas are scaled by opacity), filling the geometry's outline.
+fn paint_fill_layer(
+    painter: &egui::Painter,
+    view: &View,
+    geom: &ShapeGeometry,
+    fill: &crate::appearance::Fill,
+) {
+    // Flatten any bezier outline so the fill polygon traces curves.
+    let flat = document::flatten(&geom.points, &geom.handles, true);
+    if let Some(g) = fill.paint.gradient() {
+        // Scale every stop's alpha by the item opacity so the layer fades as a
+        // whole, then sample as usual.
+        let g = scale_gradient_opacity(g, fill.opacity);
+        fill_region(painter, view, &flat, [0.0; 4], Some(&g));
+    } else {
+        let c = appearance::apply_opacity(fill.paint.swatch(), fill.opacity);
+        fill_region(painter, view, &flat, c, None);
+    }
+}
+
+/// Paint one stroke of the stack over the geometry, honouring its width, style,
+/// and opacity. A gradient-painted stroke previews with its first stop's colour
+/// on the canvas (the egui painter strokes a single colour); export renders the
+/// gradient. Solid strokes scale alpha by opacity.
+fn paint_stroke_layer(
+    painter: &egui::Painter,
+    view: &View,
+    geom: &ShapeGeometry,
+    stroke: &crate::appearance::Stroke,
+) {
+    let color = appearance::apply_opacity(stroke.paint.swatch(), stroke.opacity);
+    let any_curve = geom.handles.iter().any(|&(hx, hy)| hx != 0.0 || hy != 0.0);
+    if any_curve && !stroke.style.is_dashed() {
+        // Stroke the cubic outline segment-by-segment (curved paths).
+        stroke_curve(
+            painter,
+            view,
+            &geom.points,
+            &geom.handles,
+            geom.closed,
+            color,
+            stroke.width,
+        );
+    } else {
+        // Straight or dashed: flatten (dashes need a continuous polyline) and
+        // stroke the polyline honouring the dash pattern.
+        let pts = if stroke.style.is_dashed() {
+            document::flatten(&geom.points, &geom.handles, geom.closed)
+        } else {
+            geom.points.clone()
+        };
+        let closed = if stroke.style.is_dashed() {
+            // flatten() already appended the closing point for closed rings.
+            false
+        } else {
+            geom.closed
+        };
+        stroke_polyline(
+            painter,
+            view,
+            &pts,
+            closed,
+            color,
+            stroke.width.max(0.5),
+            &stroke.style,
+        );
+    }
+}
+
+/// Stroke a (possibly cubic) outline segment-by-segment, choosing a straight
+/// line or a cubic bezier per segment. Used for solid strokes on curved paths.
+fn stroke_curve(
+    painter: &egui::Painter,
+    view: &View,
+    points: &[(f32, f32)],
+    handles: &[(f32, f32)],
+    closed: bool,
+    stroke: [f32; 4],
+    stroke_w: f32,
+) {
+    let n = points.len();
+    if n < 2 {
+        return;
+    }
+    let stroke32 = Stroke::new(stroke_w.max(0.5) * view.zoom, to_color32(stroke));
+    let seg_count = if closed { n } else { n - 1 };
+    for i in 0..seg_count {
+        let a = points[i];
+        let b = points[(i + 1) % n];
+        let ha = document::handle_at(handles, i);
+        let hb = document::handle_at(handles, (i + 1) % n);
+        let a_corner = ha.0 == 0.0 && ha.1 == 0.0;
+        let b_corner = hb.0 == 0.0 && hb.1 == 0.0;
+        if a_corner && b_corner {
+            painter.line_segment([view.doc_to_screen(a), view.doc_to_screen(b)], stroke32);
+        } else {
+            let c1 = view.doc_to_screen((a.0 + ha.0, a.1 + ha.1));
+            let c2 = view.doc_to_screen((b.0 - hb.0, b.1 - hb.1));
+            let bez = CubicBezierShape::from_points_stroke(
+                [view.doc_to_screen(a), c1, c2, view.doc_to_screen(b)],
+                false,
+                Color32::TRANSPARENT,
+                stroke32,
+            );
+            painter.add(bez);
+        }
+    }
+}
+
+/// Clone a gradient with every stop's alpha multiplied by `opacity`, so a fill
+/// layer's opacity slider fades the whole gradient.
+fn scale_gradient_opacity(g: &Gradient, opacity: f32) -> Gradient {
+    let mut g = g.clone();
+    for s in g.stops.iter_mut() {
+        s.color = appearance::apply_opacity(s.color, opacity);
+    }
+    g
 }
 
 /// Draw the accent selection ring around a shape's bounding box. Split out from

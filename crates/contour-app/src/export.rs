@@ -4,11 +4,14 @@
 //! hidden shapes. SVG emits standard `rect`/`ellipse`/`line`/`path` elements;
 //! PNG rasterizes via `tiny-skia` into a `Pixmap` sized to the artboard.
 
+use crate::appearance::{Appearance, Paint};
+// NOTE: `Paint` here is the Appearance paint enum; tiny-skia's `Paint` is used
+// fully-qualified as `tiny_skia::Paint` in the rasterizer to avoid the clash.
 use crate::document::{self, Document, LineCap, LineJoin, Shape, StrokeStyle};
 use crate::gradient::{Gradient, GradientKind, SpreadMode};
 use tiny_skia::{
     Color as TsColor, FillRule as TsFillRule, GradientStop as TsStop, LineCap as TsCap,
-    LineJoin as TsJoin, LinearGradient, Paint, PathBuilder, Pixmap, Point as TsPoint,
+    LineJoin as TsJoin, LinearGradient, Paint as TsPaint, PathBuilder, Pixmap, Point as TsPoint,
     RadialGradient, Rect as TsRect, Shader, SpreadMode as TsSpread, Stroke, StrokeDash, Transform,
 };
 
@@ -60,29 +63,75 @@ pub fn to_svg(doc: &Document, w: f32, h: f32) -> String {
 /// Build the inner SVG body (`<defs>` for gradients + the shape elements) shared
 /// by [`to_svg`] and [`to_svg_artboard`]. Does not emit the `<svg>` wrapper.
 fn svg_body(doc: &Document) -> String {
-    // First pass: build the <defs> for every gradient-filled, visible shape.
-    // Clipping masks are resolved before emission: a clip mask path drops out,
-    // and clipped content is emitted already cropped to the mask outline (so the
-    // SVG matches the canvas without needing `<clipPath>` plumbing).
+    // Build the <defs> for every gradient (one per gradient-painted fill/stroke
+    // layer) and the layered shape elements. Clipping masks are resolved before
+    // emission: a clip mask path drops out, and clipped content is emitted
+    // already cropped to the mask outline (so the SVG matches the canvas without
+    // needing `<clipPath>` plumbing).
+    //
+    // Each shape's *effective* Appearance is walked bottom-to-top: a separate SVG
+    // element is emitted for every visible fill (filled, no stroke) then every
+    // visible stroke (fill=none), so a stacked object becomes a stack of paint
+    // layers and a legacy single-fill/stroke object emits one fill + one stroke.
     let mut defs = String::new();
     let mut body = String::new();
     for (i, shape) in doc.render_shapes() {
         if !shape.visible() {
             continue;
         }
-        let grad_id = match (shape.fill_gradient(), shape.bounds()) {
-            (Some(g), Some(b)) => {
-                let id = format!("grad{i}");
-                defs.push_str("    ");
-                defs.push_str(&gradient_def(&id, g, &[b.x, b.y, b.w, b.h]));
-                defs.push('\n');
-                Some(id)
+        let bbox = shape.bounds().map(|b| [b.x, b.y, b.w, b.h]).unwrap_or([0.0; 4]);
+        let appearance = shape.effective_appearance();
+        let geom = svg_geom(&shape);
+        let mut grad_n = 0usize;
+
+        // Fills, bottom-to-top (only on a fillable geometry).
+        if geom.fillable {
+            for fill in &appearance.fills {
+                if !fill.visible || fill.opacity <= 0.0 {
+                    continue;
+                }
+                let (fill_attr, grad) = paint_to_svg_fill(&fill.paint, fill.opacity);
+                let grad_id = grad.map(|g| {
+                    let id = format!("grad{i}_{grad_n}");
+                    grad_n += 1;
+                    defs.push_str("    ");
+                    defs.push_str(&gradient_def(&id, &g, &bbox));
+                    defs.push('\n');
+                    id
+                });
+                let attrs = match grad_id {
+                    Some(id) => format!(" fill=\"url(#{id})\""),
+                    None => fill_attr,
+                };
+                body.push_str("  ");
+                body.push_str(&geom.element(&format!("{attrs} stroke=\"none\"")));
+                body.push('\n');
             }
-            _ => None,
-        };
-        body.push_str("  ");
-        body.push_str(&shape_to_svg(&shape, grad_id.as_deref()));
-        body.push('\n');
+        }
+        // Strokes, bottom-to-top.
+        for stroke in &appearance.strokes {
+            if !stroke.visible || stroke.opacity <= 0.0 || stroke.width <= 0.0 {
+                continue;
+            }
+            let (stroke_attr, grad) = paint_to_svg_stroke(&stroke.paint, stroke.opacity);
+            let stroke_paint = match grad {
+                Some(g) => {
+                    let id = format!("grad{i}_{grad_n}");
+                    grad_n += 1;
+                    defs.push_str("    ");
+                    defs.push_str(&gradient_def(&id, &g, &bbox));
+                    defs.push('\n');
+                    format!(" stroke=\"url(#{id})\"")
+                }
+                None => stroke_attr,
+            };
+            let mut attrs = String::from(" fill=\"none\"");
+            attrs.push_str(&stroke_paint);
+            attrs.push_str(&stroke_geom_attrs(stroke.width, &stroke.style));
+            body.push_str("  ");
+            body.push_str(&geom.element(&attrs));
+            body.push('\n');
+        }
     }
 
     let mut s = String::new();
@@ -93,6 +142,131 @@ fn svg_body(doc: &Document) -> String {
     }
     s.push_str(&body);
     s
+}
+
+/// An SVG geometry token: emits the shape's element (`<rect>`, `<ellipse>`,
+/// `<line>`, or `<path>`) with arbitrary paint attributes spliced in, so the
+/// Appearance walker can emit the same outline once per fill / stroke layer.
+struct SvgGeom {
+    /// The element kind + geometry attributes (everything but paint).
+    head: String,
+    /// Whether the geometry has a fillable region (closed).
+    fillable: bool,
+}
+
+impl SvgGeom {
+    /// `<tag geom… {paint} />`.
+    fn element(&self, paint: &str) -> String {
+        format!("{}{} />", self.head, paint)
+    }
+}
+
+/// Build the geometry token for a shape (no paint).
+fn svg_geom(shape: &Shape) -> SvgGeom {
+    match shape {
+        Shape::Rect { rect, .. } => {
+            let (x, y, w, h) = norm_rect(rect);
+            SvgGeom {
+                head: format!("<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\""),
+                fillable: true,
+            }
+        }
+        Shape::Ellipse { rect, .. } => {
+            let (x, y, w, h) = norm_rect(rect);
+            let (cx, cy) = (x + w * 0.5, y + h * 0.5);
+            let (rx, ry) = (w * 0.5, h * 0.5);
+            SvgGeom {
+                head: format!("<ellipse cx=\"{cx}\" cy=\"{cy}\" rx=\"{rx}\" ry=\"{ry}\""),
+                fillable: true,
+            }
+        }
+        Shape::Line { p0, p1, .. } => SvgGeom {
+            head: format!(
+                "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\"",
+                p0.0, p0.1, p1.0, p1.1
+            ),
+            fillable: false,
+        },
+        Shape::Path {
+            points,
+            handles,
+            closed,
+            ..
+        } => {
+            let d = path_d(points, handles, *closed);
+            SvgGeom {
+                head: format!("<path d=\"{d}\""),
+                fillable: *closed,
+            }
+        }
+    }
+}
+
+/// SVG `fill` attribute for a paint layer (with opacity folded into the colour
+/// alpha / `fill-opacity`). Returns the attribute string and, for a gradient,
+/// the (opacity-scaled) gradient so the caller can emit a def.
+fn paint_to_svg_fill(paint: &Paint, opacity: f32) -> (String, Option<Gradient>) {
+    match paint {
+        Paint::Solid(c) => {
+            let mut a = format!(" fill=\"{}\"", hex(*c));
+            let eff = c[3] * opacity;
+            if eff < 1.0 {
+                a.push_str(&format!(" fill-opacity=\"{:.3}\"", eff.clamp(0.0, 1.0)));
+            }
+            (a, None)
+        }
+        Paint::Gradient(g) => (String::new(), Some(scale_grad(g, opacity))),
+    }
+}
+
+/// SVG `stroke` colour attribute (sans width/dash) for a stroke layer.
+fn paint_to_svg_stroke(paint: &Paint, opacity: f32) -> (String, Option<Gradient>) {
+    match paint {
+        Paint::Solid(c) => {
+            let mut a = format!(" stroke=\"{}\"", hex(*c));
+            let eff = c[3] * opacity;
+            if eff < 1.0 {
+                a.push_str(&format!(" stroke-opacity=\"{:.3}\"", eff.clamp(0.0, 1.0)));
+            }
+            (a, None)
+        }
+        Paint::Gradient(g) => (String::new(), Some(scale_grad(g, opacity))),
+    }
+}
+
+/// Width + caps/joins/dashes attributes for a stroke layer (mirrors the legacy
+/// [`paint_attrs`] stroke half, minus the colour).
+fn stroke_geom_attrs(width: f32, style: &StrokeStyle) -> String {
+    let mut a = format!(" stroke-width=\"{width}\"");
+    if style.cap != LineCap::Butt {
+        a.push_str(&format!(" stroke-linecap=\"{}\"", style.cap.svg()));
+    }
+    if style.join != LineJoin::Miter {
+        a.push_str(&format!(" stroke-linejoin=\"{}\"", style.join.svg()));
+    } else if (style.miter_limit - 4.0).abs() > 1e-3 {
+        a.push_str(&format!(" stroke-miterlimit=\"{}\"", style.miter_limit));
+    }
+    if let Some(runs) = style.normalized_dash() {
+        let list = runs
+            .iter()
+            .map(|v| format!("{v}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        a.push_str(&format!(" stroke-dasharray=\"{list}\""));
+        if style.dash_offset != 0.0 {
+            a.push_str(&format!(" stroke-dashoffset=\"{}\"", style.dash_offset));
+        }
+    }
+    a
+}
+
+/// Clone a gradient with every stop alpha scaled by `opacity`.
+fn scale_grad(g: &Gradient, opacity: f32) -> Gradient {
+    let mut g = g.clone();
+    for s in g.stops.iter_mut() {
+        s.color[3] = (s.color[3] * opacity).clamp(0.0, 1.0);
+    }
+    g
 }
 
 /// Emit a `<linearGradient>` / `<radialGradient>` def for `g` mapped onto the
@@ -143,131 +317,6 @@ fn gradient_def(id: &str, g: &Gradient, bbox: &[f32; 4]) -> String {
 fn hex(c: [f32; 4]) -> String {
     let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     format!("#{:02x}{:02x}{:02x}", b(c[0]), b(c[1]), b(c[2]))
-}
-
-/// Stroke/fill paint attributes shared by all elements, including the stroke
-/// style's caps/joins/miter/dashes. When `grad_id` is set the fill references
-/// that gradient def (`fill="url(#id)"`); otherwise `fill` (if `Some`) is a
-/// solid colour and `None` means `fill="none"`.
-fn paint_attrs(
-    fill: Option<[f32; 4]>,
-    grad_id: Option<&str>,
-    stroke: [f32; 4],
-    stroke_w: f32,
-    style: &StrokeStyle,
-) -> String {
-    let mut a = String::new();
-    match (grad_id, fill) {
-        (Some(id), _) => a.push_str(&format!(" fill=\"url(#{id})\"")),
-        (None, Some(f)) => {
-            a.push_str(&format!(" fill=\"{}\"", hex(f)));
-            if f[3] < 1.0 {
-                a.push_str(&format!(" fill-opacity=\"{:.3}\"", f[3]));
-            }
-        }
-        (None, None) => a.push_str(" fill=\"none\""),
-    }
-    if stroke_w > 0.0 {
-        a.push_str(&format!(
-            " stroke=\"{}\" stroke-width=\"{}\"",
-            hex(stroke),
-            stroke_w
-        ));
-        if stroke[3] < 1.0 {
-            a.push_str(&format!(" stroke-opacity=\"{:.3}\"", stroke[3]));
-        }
-        // Only emit non-default cap/join keywords to keep the SVG compact.
-        if style.cap != LineCap::Butt {
-            a.push_str(&format!(" stroke-linecap=\"{}\"", style.cap.svg()));
-        }
-        if style.join != LineJoin::Miter {
-            a.push_str(&format!(" stroke-linejoin=\"{}\"", style.join.svg()));
-        } else if (style.miter_limit - 4.0).abs() > 1e-3 {
-            a.push_str(&format!(" stroke-miterlimit=\"{}\"", style.miter_limit));
-        }
-        if let Some(runs) = style.normalized_dash() {
-            let list = runs
-                .iter()
-                .map(|v| format!("{v}"))
-                .collect::<Vec<_>>()
-                .join(",");
-            a.push_str(&format!(" stroke-dasharray=\"{list}\""));
-            if style.dash_offset != 0.0 {
-                a.push_str(&format!(" stroke-dashoffset=\"{}\"", style.dash_offset));
-            }
-        }
-    }
-    a
-}
-
-fn shape_to_svg(shape: &Shape, grad_id: Option<&str>) -> String {
-    let style = shape.stroke_style();
-    match shape {
-        Shape::Rect {
-            rect,
-            fill,
-            stroke,
-            stroke_w,
-            ..
-        } => {
-            // Normalize negative width/height (drags can produce them).
-            let (x, y, w, h) = norm_rect(rect);
-            format!(
-                "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\"{} />",
-                paint_attrs(Some(*fill), grad_id, *stroke, *stroke_w, style)
-            )
-        }
-        Shape::Ellipse {
-            rect,
-            fill,
-            stroke,
-            stroke_w,
-            ..
-        } => {
-            let (x, y, w, h) = norm_rect(rect);
-            let (cx, cy) = (x + w * 0.5, y + h * 0.5);
-            let (rx, ry) = (w * 0.5, h * 0.5);
-            format!(
-                "<ellipse cx=\"{cx}\" cy=\"{cy}\" rx=\"{rx}\" ry=\"{ry}\"{} />",
-                paint_attrs(Some(*fill), grad_id, *stroke, *stroke_w, style)
-            )
-        }
-        Shape::Line {
-            p0,
-            p1,
-            stroke,
-            stroke_w,
-            ..
-        } => format!(
-            "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\"{} />",
-            p0.0,
-            p0.1,
-            p1.0,
-            p1.1,
-            paint_attrs(None, None, *stroke, *stroke_w, style)
-        ),
-        Shape::Path {
-            points,
-            closed,
-            fill,
-            stroke,
-            stroke_w,
-            handles,
-            ..
-        } => {
-            let d = path_d(points, handles, *closed);
-            // Only closed paths take a fill; open paths are stroke-only.
-            let (fill, grad_id) = if *closed {
-                (Some(*fill), grad_id)
-            } else {
-                (None, None)
-            };
-            format!(
-                "<path d=\"{d}\"{} />",
-                paint_attrs(fill, grad_id, *stroke, *stroke_w, style)
-            )
-        }
-    }
 }
 
 fn norm_rect(rect: &[f32; 4]) -> (f32, f32, f32, f32) {
@@ -354,108 +403,128 @@ pub fn to_png_artboard(doc: &Document, ab: [f32; 4]) -> Option<Vec<u8>> {
 }
 
 fn draw_shape_skia(pixmap: &mut Pixmap, shape: &Shape, id: Transform) {
-    let style = shape.stroke_style();
-    // Gradient fill geometry maps onto the shape's document-space bounding box.
+    // Gradient geometry maps onto the shape's document-space bounding box.
     let bbox = shape
         .bounds()
         .map(|b| [b.x, b.y, b.w, b.h])
         .unwrap_or([0.0; 4]);
-    let grad = shape.fill_gradient();
-    match shape {
-        Shape::Rect {
-            rect,
-            fill,
-            stroke,
-            stroke_w,
-            ..
-        } => {
+    // Build the shape's tiny-skia path once + whether it has a fillable region,
+    // then walk its effective Appearance stack over that path.
+    let (path, fillable) = match shape {
+        Shape::Rect { rect, .. } => {
             let (x, y, w, h) = norm_rect(rect);
-            if let Some(r) = TsRect::from_xywh(x, y, w.max(0.01), h.max(0.01)) {
-                let path = PathBuilder::from_rect(r);
-                fill_then_stroke(
-                    pixmap,
-                    &path,
-                    Some(*fill),
-                    grad,
-                    &bbox,
-                    *stroke,
-                    *stroke_w,
-                    style,
-                    id,
-                );
+            match TsRect::from_xywh(x, y, w.max(0.01), h.max(0.01)) {
+                Some(r) => (Some(PathBuilder::from_rect(r)), true),
+                None => (None, true),
             }
         }
-        Shape::Ellipse {
-            rect,
-            fill,
-            stroke,
-            stroke_w,
-            ..
-        } => {
+        Shape::Ellipse { rect, .. } => {
             let (x, y, w, h) = norm_rect(rect);
-            if let Some(r) = TsRect::from_xywh(x, y, w.max(0.01), h.max(0.01)) {
+            let path = TsRect::from_xywh(x, y, w.max(0.01), h.max(0.01)).and_then(|r| {
                 let mut pb = PathBuilder::new();
                 pb.push_oval(r);
-                if let Some(path) = pb.finish() {
-                    fill_then_stroke(
-                        pixmap,
-                        &path,
-                        Some(*fill),
-                        grad,
-                        &bbox,
-                        *stroke,
-                        *stroke_w,
-                        style,
-                        id,
-                    );
-                }
-            }
+                pb.finish()
+            });
+            (path, true)
         }
-        Shape::Line {
-            p0,
-            p1,
-            stroke,
-            stroke_w,
-            ..
-        } => {
+        Shape::Line { p0, p1, .. } => {
             let mut pb = PathBuilder::new();
             pb.move_to(p0.0, p0.1);
             pb.line_to(p1.0, p1.1);
-            if let Some(path) = pb.finish() {
-                fill_then_stroke(
-                    pixmap,
-                    &path,
-                    None,
-                    None,
-                    &bbox,
-                    *stroke,
-                    (*stroke_w).max(1.0),
-                    style,
-                    id,
-                );
-            }
+            (pb.finish(), false)
         }
         Shape::Path {
             points,
             closed,
-            fill,
-            stroke,
-            stroke_w,
             handles,
             ..
-        } => {
-            if let Some(path) = build_skia_path(points, handles, *closed) {
-                let (fill, grad) = if *closed {
-                    (Some(*fill), grad)
-                } else {
-                    (None, None)
-                };
-                fill_then_stroke(
-                    pixmap, &path, fill, grad, &bbox, *stroke, *stroke_w, style, id,
-                );
+        } => (build_skia_path(points, handles, *closed), *closed),
+    };
+    let Some(path) = path else {
+        return;
+    };
+    let appearance = shape.effective_appearance();
+    paint_appearance_skia(pixmap, &path, fillable, &bbox, &appearance, id);
+}
+
+/// Rasterize an [`Appearance`] stack onto `path`: fills bottom-to-top (only when
+/// `fillable`), then strokes bottom-to-top, each scaled by its per-item opacity.
+/// Only [`BlendMode::Normal`] is composited (tiny-skia source-over); other modes
+/// rasterize as Normal.
+fn paint_appearance_skia(
+    pixmap: &mut Pixmap,
+    path: &tiny_skia::Path,
+    fillable: bool,
+    bbox: &[f32; 4],
+    appearance: &Appearance,
+    transform: Transform,
+) {
+    if fillable {
+        for fill in &appearance.fills {
+            if !fill.visible || fill.opacity <= 0.0 {
+                continue;
             }
+            let mut paint = TsPaint::default();
+            match &fill.paint {
+                Paint::Solid(c) => {
+                    let c = scale_alpha(*c, fill.opacity);
+                    if c[3] <= 0.0 {
+                        continue;
+                    }
+                    paint.set_color(ts_color(c));
+                }
+                Paint::Gradient(g) => {
+                    let g = scale_grad(g, fill.opacity);
+                    match gradient_shader(&g, bbox) {
+                        Some(s) => paint.shader = s,
+                        None => continue,
+                    }
+                }
+            }
+            paint.anti_alias = true;
+            pixmap.fill_path(path, &paint, TsFillRule::Winding, transform, None);
         }
     }
+    for stroke in &appearance.strokes {
+        if !stroke.visible || stroke.opacity <= 0.0 || stroke.width <= 0.0 {
+            continue;
+        }
+        let mut paint = TsPaint::default();
+        match &stroke.paint {
+            Paint::Solid(c) => {
+                let c = scale_alpha(*c, stroke.opacity);
+                if c[3] <= 0.0 {
+                    continue;
+                }
+                paint.set_color(ts_color(c));
+            }
+            Paint::Gradient(g) => {
+                let g = scale_grad(g, stroke.opacity);
+                match gradient_shader(&g, bbox) {
+                    Some(s) => paint.shader = s,
+                    None => continue,
+                }
+            }
+        }
+        paint.anti_alias = true;
+        let s = Stroke {
+            width: stroke.width.max(0.01),
+            miter_limit: stroke.style.miter_limit.max(1.0),
+            line_cap: ts_cap(stroke.style.cap),
+            line_join: ts_join(stroke.style.join),
+            dash: stroke
+                .style
+                .normalized_dash()
+                .and_then(|runs| StrokeDash::new(runs, stroke.style.dash_offset)),
+        };
+        pixmap.stroke_path(path, &paint, &s, transform, None);
+    }
+}
+
+/// Multiply a straight-sRGB RGBA colour's alpha by `opacity`.
+fn scale_alpha(mut c: [f32; 4], opacity: f32) -> [f32; 4] {
+    c[3] = (c[3] * opacity).clamp(0.0, 1.0);
+    c
 }
 
 /// Map our gradient [`SpreadMode`] to tiny-skia's.
@@ -554,50 +623,6 @@ fn build_skia_path(
     pb.finish()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn fill_then_stroke(
-    pixmap: &mut Pixmap,
-    path: &tiny_skia::Path,
-    fill: Option<[f32; 4]>,
-    gradient: Option<&Gradient>,
-    bbox: &[f32; 4],
-    stroke: [f32; 4],
-    stroke_w: f32,
-    style: &StrokeStyle,
-    transform: Transform,
-) {
-    if let Some(f) = fill {
-        // A gradient (when present) overrides the solid colour; if it is
-        // degenerate, fall back to the solid fill.
-        let shader = gradient.and_then(|g| gradient_shader(g, bbox));
-        let draw = shader.is_some() || f[3] > 0.0;
-        if draw {
-            let mut paint = Paint::default();
-            match shader {
-                Some(s) => paint.shader = s,
-                None => paint.set_color(ts_color(f)),
-            }
-            paint.anti_alias = true;
-            pixmap.fill_path(path, &paint, TsFillRule::Winding, transform, None);
-        }
-    }
-    if stroke_w > 0.0 && stroke[3] > 0.0 {
-        let mut paint = Paint::default();
-        paint.set_color(ts_color(stroke));
-        paint.anti_alias = true;
-        let s = Stroke {
-            width: stroke_w,
-            miter_limit: style.miter_limit.max(1.0),
-            line_cap: ts_cap(style.cap),
-            line_join: ts_join(style.join),
-            dash: style
-                .normalized_dash()
-                .and_then(|runs| StrokeDash::new(runs, style.dash_offset)),
-        };
-        pixmap.stroke_path(path, &paint, &s, transform, None);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -613,6 +638,7 @@ mod tests {
                     stroke: [0.0, 0.0, 0.0, 1.0],
                     stroke_w: 2.0,
                     stroke_style: StrokeStyle::default(),
+                    appearance: None,
                     visible: true,
                     group: None,
                     clip: None,
@@ -626,6 +652,7 @@ mod tests {
                     stroke: [0.0, 0.0, 0.0, 1.0],
                     stroke_w: 1.0,
                     stroke_style: StrokeStyle::default(),
+                    appearance: None,
                     handles: vec![(10.0, 0.0), (0.0, 0.0), (0.0, 0.0)],
                     visible: true,
                     group: None,
@@ -713,6 +740,7 @@ mod tests {
                     dash: vec![12.0, 6.0],
                     dash_offset: 3.0,
                 },
+                appearance: None,
                 visible: true,
                 group: None,
                 clip: None,
@@ -760,6 +788,7 @@ mod tests {
                 stroke: [0.0, 0.0, 0.0, 0.0],
                 stroke_w: 0.0,
                 stroke_style: StrokeStyle::default(),
+                appearance: None,
                 visible: true,
                 group: None,
                 clip: None,
@@ -773,14 +802,15 @@ mod tests {
     fn svg_emits_linear_gradient_def_and_ref() {
         let svg = to_svg(&gradient_doc(GradientKind::Linear), 100.0, 100.0);
         assert!(svg.contains("<defs>"), "svg: {svg}");
-        assert!(svg.contains("<linearGradient id=\"grad0\""), "svg: {svg}");
+        // Gradient defs are now named per-layer: grad{shape}_{layer}.
+        assert!(svg.contains("<linearGradient id=\"grad0_0\""), "svg: {svg}");
         assert!(
             svg.contains("gradientUnits=\"userSpaceOnUse\""),
             "svg: {svg}"
         );
         assert!(svg.contains("<stop offset="), "svg: {svg}");
-        // The shape references the def rather than a solid colour.
-        assert!(svg.contains("fill=\"url(#grad0)\""), "svg: {svg}");
+        // The shape's fill layer references the def rather than a solid colour.
+        assert!(svg.contains("fill=\"url(#grad0_0)\""), "svg: {svg}");
         assert!(
             !svg.contains("fill=\"#808080\""),
             "svg should not use solid"
@@ -790,8 +820,8 @@ mod tests {
     #[test]
     fn svg_emits_radial_gradient_def() {
         let svg = to_svg(&gradient_doc(GradientKind::Radial), 100.0, 100.0);
-        assert!(svg.contains("<radialGradient id=\"grad0\""), "svg: {svg}");
-        assert!(svg.contains("fill=\"url(#grad0)\""), "svg: {svg}");
+        assert!(svg.contains("<radialGradient id=\"grad0_0\""), "svg: {svg}");
+        assert!(svg.contains("fill=\"url(#grad0_0)\""), "svg: {svg}");
     }
 
     #[test]
@@ -815,5 +845,85 @@ mod tests {
         // Left is more red than blue; right is more blue than red.
         assert!(lr > lb, "left should be reddish: {lr},{lb}");
         assert!(rb > rr, "right should be bluish: {rr},{rb}");
+    }
+
+    /// A shape with two stacked fills + two strokes emits a paint layer per item
+    /// in the SVG (bottom-to-top), so the stack survives export.
+    #[test]
+    fn svg_emits_stacked_paint_layers() {
+        use crate::appearance::{Appearance, Fill, Stroke as AppStroke};
+        let mut s = Shape::Rect {
+            rect: [0.0, 0.0, 50.0, 50.0],
+            fill: [1.0, 0.0, 0.0, 1.0],
+            fill_gradient: None,
+            stroke: [0.0, 0.0, 0.0, 1.0],
+            stroke_w: 1.0,
+            stroke_style: StrokeStyle::default(),
+            appearance: None,
+            visible: true,
+            group: None,
+            clip: None,
+            mask: false,
+        };
+        s.set_appearance(Some(Appearance {
+            fills: vec![
+                Fill::solid([1.0, 0.0, 0.0, 1.0]),
+                Fill::solid([0.0, 1.0, 0.0, 1.0]),
+            ],
+            strokes: vec![
+                AppStroke::solid([0.0, 0.0, 1.0, 1.0], 2.0),
+                AppStroke::solid([1.0, 1.0, 1.0, 1.0], 6.0),
+            ],
+        }));
+        let doc = Document {
+            shapes: vec![s],
+            ..Default::default()
+        };
+        let svg = to_svg(&doc, 100.0, 100.0);
+        // Two fill colours + two stroke colours present as separate elements.
+        assert!(svg.matches("<rect").count() == 4, "4 paint layers: {svg}");
+        assert!(svg.contains("fill=\"#ff0000\""), "bottom fill: {svg}");
+        assert!(svg.contains("fill=\"#00ff00\""), "top fill: {svg}");
+        assert!(svg.contains("stroke=\"#0000ff\""), "bottom stroke: {svg}");
+        assert!(svg.contains("stroke=\"#ffffff\""), "top stroke: {svg}");
+    }
+
+    /// A stacked PNG paints the top fill over the bottom one (last-on-top), so the
+    /// centre samples the topmost opaque fill's colour.
+    #[test]
+    fn png_renders_top_of_fill_stack() {
+        use crate::appearance::{Appearance, Fill};
+        let mut s = Shape::Rect {
+            rect: [0.0, 0.0, 100.0, 100.0],
+            fill: [1.0, 0.0, 0.0, 1.0],
+            fill_gradient: None,
+            stroke: [0.0, 0.0, 0.0, 0.0],
+            stroke_w: 0.0,
+            stroke_style: StrokeStyle::default(),
+            appearance: None,
+            visible: true,
+            group: None,
+            clip: None,
+            mask: false,
+        };
+        // Bottom red, top opaque green → centre reads green.
+        s.set_appearance(Some(Appearance {
+            fills: vec![
+                Fill::solid([1.0, 0.0, 0.0, 1.0]),
+                Fill::solid([0.0, 1.0, 0.0, 1.0]),
+            ],
+            strokes: vec![],
+        }));
+        let mut pixmap = Pixmap::new(100, 100).unwrap();
+        pixmap.fill(TsColor::WHITE);
+        draw_shape_skia(&mut pixmap, &s, Transform::identity());
+        let p = pixmap.pixel(50, 50).unwrap();
+        assert!(
+            p.green() > p.red() && p.green() > p.blue(),
+            "top green fill wins: {},{},{}",
+            p.red(),
+            p.green(),
+            p.blue()
+        );
     }
 }

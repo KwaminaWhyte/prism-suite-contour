@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Appearance panel (multiple fills / strokes per object, reorderable, with
+  per-item opacity / blend / visibility)** — a new pure, unit-tested `appearance`
+  module and an additive `appearance: Option<Appearance>` on every shape
+  (`#[serde(default)]`), promoting Contour's former single-fill / single-stroke
+  shape into Illustrator's non-destructive **Appearance stack**:
+  - An **`Appearance`** is an ordered `Vec` of **`Fill`**s and a `Vec` of
+    **`Stroke`**s. Each entry carries a **`Paint`** (a solid straight-sRGB RGBA
+    colour or an overriding multi-stop `Gradient`), a per-item **opacity**
+    (`0..=1`), a **blend mode**, and a **visibility** toggle; a stroke also keeps
+    its own width and `StrokeStyle` (caps / joins / dashes). Painting walks the
+    fills then the strokes **bottom-to-top**, so later entries sit over earlier
+    ones — exactly like a layer stack. The reorder helpers (`raise_fill` /
+    `lower_fill` / `raise_stroke` / `lower_stroke`), the legacy bridge
+    (`from_legacy`), and the per-item `apply_opacity` are pure functions pinned by
+    unit tests (no egui context).
+  - A new **stack-aware inspector** Appearance section: **add / remove** fills and
+    strokes, **reorder** each within its list, toggle a per-item **visibility**
+    eye, and edit the selected item (paint — solid ⇄ gradient — opacity, blend,
+    and a stroke's width / style). Edits land as single undo steps and feed the
+    app's paint defaults so the next new shape inherits the look.
+  - Rendered consistently across all three surfaces from the same model: the
+    **on-canvas** painter, **PNG** export, and **SVG** export each walk the stack
+    bottom-to-top and emit one layered paint per entry, with per-item opacity
+    folded into each paint's alpha.
+  - **Backward compatible.** `appearance` is additive (`#[serde(default)]` →
+    `None`): a shape with `None` renders identically from its legacy single
+    fill / stroke fields, so every pre-existing `.contour` file loads and renders
+    the same. `Appearance::from_legacy` migrates a single fill / stroke into a
+    one-element-each stack **on demand** (the first time the user opens the
+    Appearance section on an old shape) — a zero-width or fully-transparent legacy
+    stroke, and a fill-less line, migrate without inventing an empty entry.
+    Appearance stacks round-trip through serde, with per-item fields
+    (`opacity` / `blend` / `visible`) defaulted so a minimal or older stack still
+    loads.
+  - **Deferred this pass** (the struct is the seam where they attach): per-shape
+    **blend compositing** (blend modes are stored and editable but only `Normal`
+    composites today), a live **effects** vec, **mesh gradients**, and
+    **patterns**.
+
 - **Swatches panel (named colour library, global swatches)** — a new pure,
   unit-tested `swatches` module and an additive `swatches: Swatches` palette on
   the `Document` (`#[serde(default)]`), bringing the everyday Illustrator /

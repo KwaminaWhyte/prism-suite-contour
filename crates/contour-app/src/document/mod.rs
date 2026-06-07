@@ -14,6 +14,7 @@ mod tests;
 pub use path::{flatten, handle_at, nearest_segment, rects_intersect};
 pub use style::{LineCap, LineJoin, StrokeStyle};
 
+use crate::appearance::Appearance;
 use crate::artboard::{self, Artboard};
 use crate::gradient::Gradient;
 use crate::swatches::{self, Swatches};
@@ -46,6 +47,12 @@ pub enum Shape {
         stroke_w: f32,
         #[serde(default)]
         stroke_style: StrokeStyle,
+        /// Optional stacked [`Appearance`] (multiple fills/strokes) that, when
+        /// `Some`, overrides the single `fill`/`stroke` fields on every render
+        /// surface. Additive (`#[serde(default)]` → `None`), so older files load
+        /// with their single fill/stroke and render unchanged.
+        #[serde(default)]
+        appearance: Option<Appearance>,
         #[serde(default = "default_true")]
         visible: bool,
         /// Group membership: shapes sharing a `Some(id)` form one group and are
@@ -72,6 +79,8 @@ pub enum Shape {
         stroke_w: f32,
         #[serde(default)]
         stroke_style: StrokeStyle,
+        #[serde(default)]
+        appearance: Option<Appearance>,
         #[serde(default = "default_true")]
         visible: bool,
         #[serde(default)]
@@ -88,6 +97,8 @@ pub enum Shape {
         stroke_w: f32,
         #[serde(default)]
         stroke_style: StrokeStyle,
+        #[serde(default)]
+        appearance: Option<Appearance>,
         #[serde(default = "default_true")]
         visible: bool,
         #[serde(default)]
@@ -116,6 +127,8 @@ pub enum Shape {
         /// loads identically to the v0 model.
         #[serde(default)]
         handles: Vec<(f32, f32)>,
+        #[serde(default)]
+        appearance: Option<Appearance>,
         #[serde(default = "default_true")]
         visible: bool,
         #[serde(default)]
@@ -334,6 +347,52 @@ impl Shape {
         }
     }
 
+    /// The shape's stacked [`Appearance`], if one has been attached. When `Some`
+    /// it overrides the single `fill`/`stroke` fields on every render surface;
+    /// when `None` the shape paints from its legacy single fields. Every variant
+    /// can carry one (a `Line`'s stack just holds strokes).
+    pub fn appearance(&self) -> Option<&Appearance> {
+        match self {
+            Shape::Rect { appearance, .. }
+            | Shape::Ellipse { appearance, .. }
+            | Shape::Line { appearance, .. }
+            | Shape::Path { appearance, .. } => appearance.as_ref(),
+        }
+    }
+
+    /// Mutable access to the shape's `appearance` slot (set/clear the stack).
+    pub fn appearance_mut(&mut self) -> &mut Option<Appearance> {
+        match self {
+            Shape::Rect { appearance, .. }
+            | Shape::Ellipse { appearance, .. }
+            | Shape::Line { appearance, .. }
+            | Shape::Path { appearance, .. } => appearance,
+        }
+    }
+
+    /// Set (or clear, with `None`) the shape's stacked appearance.
+    pub fn set_appearance(&mut self, a: Option<Appearance>) {
+        *self.appearance_mut() = a;
+    }
+
+    /// The appearance the renderers should walk: the attached stack if there is
+    /// one, otherwise a freshly-migrated one-fill/one-stroke stack built from the
+    /// shape's legacy single fields ([`Appearance::from_legacy`]). This is the
+    /// single source of truth for the canvas painter and the SVG / PNG exporters,
+    /// so a shape renders identically whether or not it has an explicit stack.
+    pub fn effective_appearance(&self) -> Appearance {
+        match self.appearance() {
+            Some(a) => a.clone(),
+            None => Appearance::from_legacy(
+                self.fill_color(),
+                self.fill_gradient(),
+                self.stroke_color().unwrap_or([0.0, 0.0, 0.0, 0.0]),
+                self.stroke_width(),
+                self.stroke_style(),
+            ),
+        }
+    }
+
     /// The shape's gradient fill, if it has one (`Line` never does). When
     /// present this overrides the solid `fill` colour on every render surface.
     pub fn fill_gradient(&self) -> Option<&Gradient> {
@@ -399,6 +458,34 @@ impl Shape {
             if swatches::colors_eq(c, old) {
                 self.set_stroke_color(new);
                 changed = true;
+            }
+        }
+        // Remap colours inside an attached appearance stack (solid paints and
+        // gradient stops on every fill / stroke) so a global swatch edit follows
+        // stacked artwork too.
+        if let Some(ap) = self.appearance_mut() {
+            use crate::appearance::Paint;
+            let mut remap_paint = |p: &mut Paint| match p {
+                Paint::Solid(c) => {
+                    if swatches::colors_eq(*c, old) {
+                        *c = new;
+                        changed = true;
+                    }
+                }
+                Paint::Gradient(g) => {
+                    for stop in g.stops.iter_mut() {
+                        if swatches::colors_eq(stop.color, old) {
+                            stop.color = new;
+                            changed = true;
+                        }
+                    }
+                }
+            };
+            for f in ap.fills.iter_mut() {
+                remap_paint(&mut f.paint);
+            }
+            for s in ap.strokes.iter_mut() {
+                remap_paint(&mut s.paint);
             }
         }
         let grad_changed = match self {
@@ -552,6 +639,9 @@ impl Shape {
             stroke: self.stroke_color().unwrap_or([0.0, 0.0, 0.0, 0.0]),
             stroke_w: self.stroke_width(),
             stroke_style: self.stroke_style().clone(),
+            // Carry the stacked appearance through so a clipped multi-fill shape
+            // keeps its full paint stack after clipping.
+            appearance: self.appearance().cloned(),
             handles: vec![(0.0, 0.0); n],
             visible: self.visible(),
             group: self.group(),
@@ -574,6 +664,7 @@ impl Shape {
                 stroke,
                 stroke_w,
                 stroke_style,
+                appearance,
                 visible,
                 group,
                 clip,
@@ -594,6 +685,7 @@ impl Shape {
                     stroke: *stroke,
                     stroke_w: *stroke_w,
                     stroke_style: stroke_style.clone(),
+                    appearance: appearance.clone(),
                     handles,
                     visible: *visible,
                     group: *group,
@@ -608,6 +700,7 @@ impl Shape {
                 stroke,
                 stroke_w,
                 stroke_style,
+                appearance,
                 visible,
                 group,
                 clip,
@@ -642,6 +735,7 @@ impl Shape {
                     stroke: *stroke,
                     stroke_w: *stroke_w,
                     stroke_style: stroke_style.clone(),
+                    appearance: appearance.clone(),
                     handles,
                     visible: *visible,
                     group: *group,
@@ -655,6 +749,7 @@ impl Shape {
                 stroke,
                 stroke_w,
                 stroke_style,
+                appearance,
                 visible,
                 group,
                 clip,
@@ -667,6 +762,7 @@ impl Shape {
                 stroke: *stroke,
                 stroke_w: *stroke_w,
                 stroke_style: stroke_style.clone(),
+                appearance: appearance.clone(),
                 handles: vec![(0.0, 0.0); 2],
                 visible: *visible,
                 group: *group,

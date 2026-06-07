@@ -59,6 +59,10 @@ impl Appearance {
     /// where eyedropping a line onto a filled shape leaves the fill colour but
     /// removes any gradient and copies the stroke.
     pub fn apply_to(&self, target: &mut Shape) {
+        // Eyedropper copies a single basic paint, so drop any explicit stacked
+        // appearance on the target — the copied legacy fill/stroke then renders
+        // (a shape with no stack falls back to its legacy fields).
+        target.set_appearance(None);
         if let Some(c) = self.fill {
             target.set_fill_color(c);
         }
@@ -85,6 +89,7 @@ mod tests {
             stroke,
             stroke_w: w,
             stroke_style: StrokeStyle::default(),
+            appearance: None,
             visible: true,
             group: Some(7),
             clip: None,
@@ -100,6 +105,7 @@ mod tests {
             stroke: [0.0, 0.0, 0.0, 1.0],
             stroke_w: 1.0,
             stroke_style: StrokeStyle::default(),
+            appearance: None,
             visible: true,
             group: None,
             clip: None,
@@ -114,6 +120,7 @@ mod tests {
             stroke: [0.2, 0.4, 0.6, 1.0],
             stroke_w: 3.5,
             stroke_style: StrokeStyle::default(),
+            appearance: None,
             visible: true,
             group: None,
             clip: None,

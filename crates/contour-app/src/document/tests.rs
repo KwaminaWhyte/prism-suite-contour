@@ -32,6 +32,63 @@ fn loads_legacy_document() {
     } else {
         panic!("expected Path");
     }
+    // A pre-appearance document loads with no explicit stack on any shape.
+    assert!(doc.shapes[0].appearance().is_none());
+    assert!(doc.shapes[1].appearance().is_none());
+}
+
+/// A shape with no explicit `appearance` migrates its legacy single fill/stroke
+/// into a one-fill / one-stroke effective stack on demand.
+#[test]
+fn legacy_shape_migrates_to_one_fill_one_stroke() {
+    let json = r#"{"shapes":[
+        {"Rect":{"rect":[0,0,10,10],"fill":[1,0,0,1],"stroke":[0,0,0,1],"stroke_w":2}}
+    ]}"#;
+    let doc: Document = serde_json::from_str(json).unwrap();
+    let ap = doc.shapes[0].effective_appearance();
+    assert_eq!(ap.fills.len(), 1, "one fill migrated from the legacy fill");
+    assert_eq!(ap.strokes.len(), 1, "one stroke migrated from the legacy stroke");
+    assert_eq!(ap.fills[0].paint.swatch(), [1.0, 0.0, 0.0, 1.0]);
+    assert_eq!(ap.strokes[0].width, 2.0);
+}
+
+/// An explicit stacked appearance round-trips through serde on a Shape and is
+/// preferred over the legacy fields by `effective_appearance`.
+#[test]
+fn appearance_round_trips_on_shape_and_overrides_legacy() {
+    use crate::appearance::{Appearance, Fill};
+    let mut s = Shape::Rect {
+        rect: [0.0, 0.0, 10.0, 10.0],
+        fill: [1.0, 0.0, 0.0, 1.0],
+        fill_gradient: None,
+        stroke: [0.0, 0.0, 0.0, 1.0],
+        stroke_w: 2.0,
+        stroke_style: StrokeStyle::default(),
+        appearance: None,
+        visible: true,
+        group: None,
+        clip: None,
+        mask: false,
+    };
+    // Two stacked fills override the single legacy red fill.
+    s.set_appearance(Some(Appearance {
+        fills: vec![
+            Fill::solid([0.0, 1.0, 0.0, 1.0]),
+            Fill::solid([0.0, 0.0, 1.0, 0.5]),
+        ],
+        strokes: vec![],
+    }));
+    let doc = Document {
+        shapes: vec![s],
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&doc).unwrap();
+    let back: Document = serde_json::from_str(&json).unwrap();
+    let ap = back.shapes[0].effective_appearance();
+    assert_eq!(ap.fills.len(), 2, "stacked fills survive the round-trip");
+    assert_eq!(ap.fills[1].paint.swatch(), [0.0, 0.0, 1.0, 0.5]);
+    // The legacy `fill` field is untouched but ignored when a stack is present.
+    assert_eq!(back.shapes[0].fill_color(), Some([1.0, 0.0, 0.0, 1.0]));
 }
 
 /// Guides round-trip through serde and load back as the same variant.
@@ -341,6 +398,7 @@ fn axis_aligned_scale_keeps_rect_a_rect() {
         stroke: [0.0; 4],
         stroke_w: 1.0,
         stroke_style: StrokeStyle::default(),
+        appearance: None,
         visible: true,
         group: None,
         clip: None,
@@ -365,6 +423,7 @@ fn flip_keeps_rect_normalized() {
         stroke: [0.0; 4],
         stroke_w: 1.0,
         stroke_style: StrokeStyle::default(),
+        appearance: None,
         visible: true,
         group: None,
         clip: None,
@@ -392,6 +451,7 @@ fn rotation_converts_rect_to_path() {
         stroke: [0.0; 4],
         stroke_w: 1.0,
         stroke_style: StrokeStyle::default(),
+        appearance: None,
         visible: true,
         group: None,
         clip: None,
@@ -417,6 +477,7 @@ fn rotation_preserves_rect_center() {
         stroke: [0.0; 4],
         stroke_w: 1.0,
         stroke_style: StrokeStyle::default(),
+        appearance: None,
         visible: true,
         group: None,
         clip: None,
@@ -443,6 +504,7 @@ fn ellipse_to_path_round_trips_bounds() {
         stroke: [0.0; 4],
         stroke_w: 1.0,
         stroke_style: StrokeStyle::default(),
+        appearance: None,
         visible: true,
         group: None,
         clip: None,
@@ -469,6 +531,7 @@ fn path_handles_transform_by_linear_part() {
         stroke: [0.0; 4],
         stroke_w: 1.0,
         stroke_style: StrokeStyle::default(),
+        appearance: None,
         handles: vec![(3.0, 4.0), (0.0, 0.0)],
         visible: true,
         group: None,
@@ -538,6 +601,7 @@ fn line_ignores_gradient_fill() {
         stroke: [0.0; 4],
         stroke_w: 1.0,
         stroke_style: StrokeStyle::default(),
+        appearance: None,
         visible: true,
         group: None,
         clip: None,
@@ -582,6 +646,7 @@ fn group_accessor_covers_every_variant() {
         stroke: [0.0; 4],
         stroke_w: 1.0,
         stroke_style: StrokeStyle::default(),
+        appearance: None,
         visible: true,
         group: None,
         clip: None,
@@ -605,6 +670,7 @@ fn to_path_preserves_group() {
         stroke: [0.0; 4],
         stroke_w: 1.0,
         stroke_style: StrokeStyle::default(),
+        appearance: None,
         visible: true,
         group: Some(42),
         clip: None,
@@ -630,6 +696,7 @@ fn with_outline_inherits_paint_and_clears_clip() {
         stroke: [0.1, 0.1, 0.1, 1.0],
         stroke_w: 3.0,
         stroke_style: StrokeStyle::default(),
+        appearance: None,
         visible: true,
         group: Some(5),
         clip: Some(9),
@@ -670,6 +737,7 @@ fn clip_rect(rect: [f32; 4], clip: Option<u64>, mask: bool) -> Shape {
         stroke: [0.0, 0.0, 0.0, 1.0],
         stroke_w: 1.0,
         stroke_style: StrokeStyle::default(),
+        appearance: None,
         visible: true,
         group: None,
         clip,
@@ -765,6 +833,7 @@ fn swatch_rect(fill: [f32; 4], stroke: [f32; 4]) -> Shape {
         stroke,
         stroke_w: 1.0,
         stroke_style: StrokeStyle::default(),
+        appearance: None,
         visible: true,
         group: None,
         clip: None,
