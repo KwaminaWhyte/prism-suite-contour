@@ -94,6 +94,20 @@ impl Affine {
         }
     }
 
+    /// Pure shear about the origin: `shx` slides x by `shx·y` (horizontal shear),
+    /// `shy` slides y by `shy·x` (vertical shear). The two factors are tangents of
+    /// the shear angles, so `shear(tan θ, 0.0)` slants verticals by `θ`.
+    pub fn shear(shx: f32, shy: f32) -> Affine {
+        Affine {
+            a: 1.0,
+            b: shy,
+            c: shx,
+            d: 1.0,
+            e: 0.0,
+            f: 0.0,
+        }
+    }
+
     /// Compose: `self * rhs`, i.e. apply `rhs` first, then `self`.
     pub fn then(self, parent: Affine) -> Affine {
         // parent ∘ self  (matrix product parent · self)
@@ -126,15 +140,23 @@ impl Affine {
             .then_apply(Affine::translate(-px, -py))
     }
 
-    /// Reflect across the vertical line `x = px` (a horizontal flip), keeping
-    /// that line fixed.
-    pub fn flip_h_about(px: f32) -> Affine {
-        Affine::scale_about(-1.0, 1.0, px, 0.0)
+    /// Shear by `(shx, shy)` while keeping the pivot `(px, py)` fixed.
+    pub fn shear_about(shx: f32, shy: f32, px: f32, py: f32) -> Affine {
+        Affine::translate(px, py)
+            .then_apply(Affine::shear(shx, shy))
+            .then_apply(Affine::translate(-px, -py))
     }
 
-    /// Reflect across the horizontal line `y = py` (a vertical flip).
-    pub fn flip_v_about(py: f32) -> Affine {
-        Affine::scale_about(1.0, -1.0, 0.0, py)
+    /// Reflect across the line through `(px, py)` at `radians` from the +x axis,
+    /// keeping that line fixed. `angle = 0` is a vertical flip (mirror across the
+    /// horizontal axis); `angle = π/2` is a horizontal flip. This is the general
+    /// Reflect tool: `R(θ)·diag(1,-1)·R(-θ)` recentred on the pivot.
+    pub fn reflect_about(radians: f32, px: f32, py: f32) -> Affine {
+        Affine::translate(px, py)
+            .then_apply(Affine::rotate(radians))
+            .then_apply(Affine::scale(1.0, -1.0))
+            .then_apply(Affine::rotate(-radians))
+            .then_apply(Affine::translate(-px, -py))
     }
 
     /// Right-multiply: `self · rhs` (apply `rhs` first, then `self`). The dual of
@@ -282,6 +304,113 @@ pub fn scale_factors_for_handle(
     }
 }
 
+/// Compute the shear factors for Cmd/Ctrl-dragging an *edge* `handle` of a box
+/// of size `(bw, bh)`, given the cursor's `(dx, dy)` displacement from where the
+/// handle started. A top/bottom edge shears horizontally (`shx`) by sliding
+/// along x in proportion to the box height; a left/right edge shears vertically
+/// (`shy`) by sliding along y in proportion to the box width. Corner handles do
+/// not shear (returns `(0, 0)`). The pivot is the opposite edge, so the factor
+/// is the drag distance divided by the *full* extent perpendicular to the edge.
+///
+/// The sign convention keeps the dragged edge following the cursor: dragging the
+/// top edge right shears the top of the box to the right (positive `shx`).
+pub fn shear_factors_for_handle(handle: Handle, bw: f32, bh: f32, dx: f32, dy: f32) -> (f32, f32) {
+    match handle {
+        // Horizontal edges slide along x; the pivot is the far edge a full height
+        // away, so the shear factor is dx / height. Dragging the bottom edge
+        // (which is below the top pivot, +y) needs an inverted sign so it tracks.
+        Handle::TopMid => {
+            if bh.abs() > 1e-6 {
+                (-dx / bh, 0.0)
+            } else {
+                (0.0, 0.0)
+            }
+        }
+        Handle::BottomMid => {
+            if bh.abs() > 1e-6 {
+                (dx / bh, 0.0)
+            } else {
+                (0.0, 0.0)
+            }
+        }
+        // Vertical edges slide along y; the pivot is a full width away.
+        Handle::MidLeft => {
+            if bw.abs() > 1e-6 {
+                (0.0, -dy / bw)
+            } else {
+                (0.0, 0.0)
+            }
+        }
+        Handle::MidRight => {
+            if bw.abs() > 1e-6 {
+                (0.0, dy / bw)
+            } else {
+                (0.0, 0.0)
+            }
+        }
+        // Corners don't shear.
+        _ => (0.0, 0.0),
+    }
+}
+
+/// The pivot a shear-drag of `handle` keeps fixed: the opposite edge's midpoint
+/// on a box `[x, y, w, h]`. Returns `None` for corner handles (no shear).
+pub fn shear_pivot(handle: Handle, bbox: &[f32; 4]) -> Option<(f32, f32)> {
+    if handle.is_corner() {
+        return None;
+    }
+    let opp = handle.opposite();
+    let (fx, fy) = opp.unit_pos();
+    Some((bbox[0] + bbox[2] * fx, bbox[1] + bbox[3] * fy))
+}
+
+/// A numeric transform request: translate, then scale, then rotate, then shear,
+/// each about the selection centre (translate is absolute). Mirrors the
+/// Transform-panel order Illustrator composes its numeric dialog in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NumericTransform {
+    /// Document-space translation (applied first).
+    pub move_x: f32,
+    pub move_y: f32,
+    /// Uniform-or-per-axis scale factors (1.0 = unchanged).
+    pub scale_x: f32,
+    pub scale_y: f32,
+    /// Rotation about the pivot, radians (positive = clockwise, +y down).
+    pub rotate: f32,
+    /// Shear angles about the pivot, radians (x then y).
+    pub shear_x: f32,
+    pub shear_y: f32,
+}
+
+impl Default for NumericTransform {
+    fn default() -> Self {
+        Self {
+            move_x: 0.0,
+            move_y: 0.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            rotate: 0.0,
+            shear_x: 0.0,
+            shear_y: 0.0,
+        }
+    }
+}
+
+impl NumericTransform {
+    /// Compose this request into a single affine about pivot `(px, py)`.
+    ///
+    /// Order (right-to-left, i.e. applied to a point in this sequence): translate
+    /// → scale → rotate → shear, the rotation/scale/shear each pivot-anchored so
+    /// the selection stays put except for the explicit move.
+    pub fn to_affine(self, px: f32, py: f32) -> Affine {
+        let mut m = Affine::translate(self.move_x, self.move_y);
+        m = Affine::scale_about(self.scale_x, self.scale_y, px, py).then(m);
+        m = Affine::rotate_about(self.rotate, px, py).then(m);
+        m = Affine::shear_about(self.shear_x.tan(), self.shear_y.tan(), px, py).then(m);
+        m
+    }
+}
+
 /// The clockwise angle (radians) from the pivot→reference baseline to the
 /// pivot→cursor direction — used to map a rotate-handle drag to a rotation.
 /// Returns `0` when either vector is degenerate.
@@ -354,20 +483,6 @@ mod tests {
     }
 
     #[test]
-    fn flip_h_mirrors_across_line() {
-        let m = Affine::flip_h_about(100.0);
-        assert!(approx_pt(m.apply_point(100.0, 7.0), (100.0, 7.0))); // on the line
-        assert!(approx_pt(m.apply_point(120.0, 7.0), (80.0, 7.0))); // mirrored
-    }
-
-    #[test]
-    fn flip_v_mirrors_across_line() {
-        let m = Affine::flip_v_about(50.0);
-        assert!(approx_pt(m.apply_point(7.0, 50.0), (7.0, 50.0)));
-        assert!(approx_pt(m.apply_point(7.0, 70.0), (7.0, 30.0)));
-    }
-
-    #[test]
     fn compose_is_apply_rhs_then_self() {
         // First scale ×2 about origin, then translate +10.
         let m = Affine::translate(10.0, 0.0).then(Affine::scale(2.0, 2.0));
@@ -429,6 +544,134 @@ mod tests {
         for h in Handle::ALL {
             assert_eq!(h.opposite().opposite(), h);
         }
+    }
+
+    #[test]
+    fn shear_slants_one_axis() {
+        // Horizontal shear by 1: x slides by 1·y; verticals lean over.
+        let m = Affine::shear(1.0, 0.0);
+        assert!(approx_pt(m.apply_point(0.0, 0.0), (0.0, 0.0)));
+        assert!(approx_pt(m.apply_point(0.0, 10.0), (10.0, 10.0)));
+        // A vertical shear leaves x, slides y by shy·x.
+        let mv = Affine::shear(0.0, 0.5);
+        assert!(approx_pt(mv.apply_point(10.0, 0.0), (10.0, 5.0)));
+    }
+
+    #[test]
+    fn shear_about_keeps_pivot_fixed() {
+        let m = Affine::shear_about(0.5, 0.0, 100.0, 50.0);
+        assert!(approx_pt(m.apply_point(100.0, 50.0), (100.0, 50.0)));
+        // A point 10 below the pivot slides right by 0.5·10 = 5.
+        assert!(approx_pt(m.apply_point(100.0, 60.0), (105.0, 60.0)));
+    }
+
+    #[test]
+    fn reflect_about_zero_is_vertical_flip() {
+        // angle 0 mirrors across the horizontal line y = py (a vertical flip).
+        let m = Affine::reflect_about(0.0, 0.0, 50.0);
+        assert!(approx_pt(m.apply_point(7.0, 50.0), (7.0, 50.0)));
+        assert!(approx_pt(m.apply_point(7.0, 70.0), (7.0, 30.0)));
+    }
+
+    #[test]
+    fn reflect_about_half_pi_is_horizontal_flip() {
+        // angle π/2 mirrors across the vertical line x = px (a horizontal flip).
+        let m = Affine::reflect_about(std::f32::consts::FRAC_PI_2, 100.0, 0.0);
+        assert!(approx_pt(m.apply_point(100.0, 7.0), (100.0, 7.0)));
+        assert!(approx_pt(m.apply_point(120.0, 7.0), (80.0, 7.0)));
+    }
+
+    #[test]
+    fn reflect_is_an_involution() {
+        // Reflecting twice across the same line is the identity.
+        let m = Affine::reflect_about(0.6, 12.0, -8.0);
+        let twice = m.then(m);
+        assert!(twice.is_identity());
+    }
+
+    #[test]
+    fn top_edge_shears_horizontally() {
+        // Box 200 wide, 100 tall. Drag the top edge 50px right: shx = -dx/h so the
+        // top (above the bottom pivot) leans right.
+        let (shx, shy) = shear_factors_for_handle(Handle::TopMid, 200.0, 100.0, 50.0, 999.0);
+        assert!(approx(shx, -0.5));
+        assert!(approx(shy, 0.0)); // y ignored on a horizontal edge
+    }
+
+    #[test]
+    fn side_edge_shears_vertically() {
+        let (shx, shy) = shear_factors_for_handle(Handle::MidRight, 200.0, 100.0, 999.0, 40.0);
+        assert!(approx(shx, 0.0));
+        assert!(approx(shy, 0.2)); // dy / width = 40/200
+    }
+
+    #[test]
+    fn corner_handle_does_not_shear() {
+        let (shx, shy) = shear_factors_for_handle(Handle::TopRight, 200.0, 100.0, 50.0, 50.0);
+        assert!(approx(shx, 0.0) && approx(shy, 0.0));
+        assert_eq!(shear_pivot(Handle::TopRight, &[0.0, 0.0, 200.0, 100.0]), None);
+    }
+
+    #[test]
+    fn shear_pivot_is_opposite_edge_midpoint() {
+        let bbox = [10.0, 20.0, 200.0, 100.0];
+        // Dragging the top edge pivots about the bottom edge midpoint.
+        assert_eq!(shear_pivot(Handle::TopMid, &bbox), Some((110.0, 120.0)));
+        // Dragging the right edge pivots about the left edge midpoint.
+        assert_eq!(shear_pivot(Handle::MidRight, &bbox), Some((10.0, 70.0)));
+    }
+
+    #[test]
+    fn numeric_identity_is_noop() {
+        let m = NumericTransform::default().to_affine(33.0, 44.0);
+        assert!(m.is_identity());
+    }
+
+    #[test]
+    fn numeric_translate_only_moves() {
+        let nt = NumericTransform {
+            move_x: 10.0,
+            move_y: -5.0,
+            ..Default::default()
+        };
+        let m = nt.to_affine(0.0, 0.0);
+        assert!(approx_pt(m.apply_point(1.0, 1.0), (11.0, -4.0)));
+    }
+
+    #[test]
+    fn numeric_scale_about_pivot() {
+        let nt = NumericTransform {
+            scale_x: 2.0,
+            scale_y: 3.0,
+            ..Default::default()
+        };
+        let m = nt.to_affine(100.0, 50.0);
+        assert!(approx_pt(m.apply_point(100.0, 50.0), (100.0, 50.0)));
+        assert!(approx_pt(m.apply_point(110.0, 60.0), (120.0, 80.0)));
+    }
+
+    #[test]
+    fn numeric_compose_scale_then_rotate() {
+        // Scale ×2 then rotate 90° CW about the origin. (2,0) -> (4,0) -> (0,4).
+        let nt = NumericTransform {
+            scale_x: 2.0,
+            scale_y: 2.0,
+            rotate: std::f32::consts::FRAC_PI_2,
+            ..Default::default()
+        };
+        let m = nt.to_affine(0.0, 0.0);
+        assert!(approx_pt(m.apply_point(2.0, 0.0), (0.0, 4.0)));
+    }
+
+    #[test]
+    fn numeric_shear_uses_angle_tangent() {
+        // 45° x-shear has tan = 1: a point 10 below the pivot slides right by 10.
+        let nt = NumericTransform {
+            shear_x: std::f32::consts::FRAC_PI_4,
+            ..Default::default()
+        };
+        let m = nt.to_affine(0.0, 0.0);
+        assert!(approx_pt(m.apply_point(0.0, 10.0), (10.0, 10.0)));
     }
 
     #[test]

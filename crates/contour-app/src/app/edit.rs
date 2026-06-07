@@ -3,7 +3,7 @@
 //! and export dialogs, boolean ops, and the align / distribute / transform /
 //! snap math.
 
-use super::{ContourApp, TransformDrag, TransformKind};
+use super::{ContourApp, LastTransform, TransformDrag, TransformKind};
 use crate::align::{self, Align, AlignTo, Distribute};
 use crate::arrange::{self, Arrange};
 use crate::boolean::{self, BoolOp};
@@ -11,7 +11,7 @@ use crate::document::{self, Guide, Shape};
 use crate::export;
 use crate::group;
 use crate::snap::{self, SnapFeatures, SnapResult, SnapTargets};
-use crate::transform::{self, Affine};
+use crate::transform::{self, Affine, NumericTransform};
 
 impl ContourApp {
     // --- Selection helpers ---------------------------------------------------
@@ -1252,9 +1252,12 @@ impl ContourApp {
 
     /// Apply an affine to every selected shape as one undo step, dropping no-op
     /// (identity) transforms.
-    fn transform_selection(&mut self, m: &Affine, label: &str) {
+    /// Apply `m` to every selected shape as one undo step. Returns `true` when it
+    /// did something (a non-identity matrix and a non-empty selection), `false`
+    /// on a no-op so callers can skip recording it for Transform Again.
+    fn transform_selection(&mut self, m: &Affine, label: &str) -> bool {
         if m.is_identity() || self.selection.is_empty() {
-            return;
+            return false;
         }
         self.checkpoint();
         let n = self.doc.shapes.len();
@@ -1265,37 +1268,112 @@ impl ContourApp {
             }
         }
         self.status = label.into();
+        true
+    }
+
+    /// The selection's bounding-box centre in document space, or `None` when
+    /// nothing with geometry is selected. This is the pivot every centred
+    /// transform (rotate / reflect / scale / shear) turns about.
+    pub(super) fn selection_center(&self) -> Option<(f32, f32)> {
+        self.selection_bbox()
+            .map(|b| (b[0] + b[2] * 0.5, b[1] + b[3] * 0.5))
     }
 
     /// Rotate the selection about its bounding-box centre by `radians`
     /// (positive = clockwise) as one undo step.
     pub(super) fn rotate_selection(&mut self, radians: f32, label: &str) {
-        let Some(b) = self.selection_bbox() else {
+        let Some((cx, cy)) = self.selection_center() else {
             return;
         };
-        let (cx, cy) = (b[0] + b[2] * 0.5, b[1] + b[3] * 0.5);
-        self.transform_selection(&Affine::rotate_about(radians, cx, cy), label);
+        if self.transform_selection(&Affine::rotate_about(radians, cx, cy), label) {
+            self.last_transform = Some(LastTransform::Rotate(radians));
+        }
     }
 
     /// Mirror the selection across its bounding-box centre, horizontally
     /// (`horizontal = true`) or vertically, as one undo step.
     pub(super) fn flip_selection(&mut self, horizontal: bool) {
-        let Some(b) = self.selection_bbox() else {
-            return;
-        };
-        let m = if horizontal {
-            Affine::flip_h_about(b[0] + b[2] * 0.5)
+        // A horizontal flip mirrors across the vertical centre line (reflect at
+        // π/2); a vertical flip across the horizontal centre line (reflect at 0).
+        let angle = if horizontal {
+            std::f32::consts::FRAC_PI_2
         } else {
-            Affine::flip_v_about(b[1] + b[3] * 0.5)
+            0.0
         };
-        self.transform_selection(
-            &m,
+        self.reflect_selection(
+            angle,
             if horizontal {
                 "Flipped horizontal"
             } else {
                 "Flipped vertical"
             },
         );
+    }
+
+    /// Reflect the selection across the line through its centre at `radians` from
+    /// the +x axis, as one undo step. The general Reflect tool; `flip_selection`
+    /// is the axis-aligned shorthand.
+    pub(super) fn reflect_selection(&mut self, radians: f32, label: &str) {
+        let Some((cx, cy)) = self.selection_center() else {
+            return;
+        };
+        if self.transform_selection(&Affine::reflect_about(radians, cx, cy), label) {
+            self.last_transform = Some(LastTransform::Reflect(radians));
+        }
+    }
+
+    /// Apply a full numeric transform (move / scale / rotate / shear) about the
+    /// selection centre in one undo step, recording it for Transform Again.
+    pub(super) fn apply_numeric_transform(&mut self, nt: NumericTransform) {
+        let Some((cx, cy)) = self.selection_center() else {
+            return;
+        };
+        let m = nt.to_affine(cx, cy);
+        if self.transform_selection(&m, "Transformed") {
+            // Repeat re-derives about the new centre; a move repeats verbatim. A
+            // pure-move numeric reduces to a Move so Transform Again nudges again.
+            self.last_transform = Some(
+                if nt.scale_x == 1.0
+                    && nt.scale_y == 1.0
+                    && nt.rotate == 0.0
+                    && nt.shear_x == 0.0
+                    && nt.shear_y == 0.0
+                {
+                    LastTransform::Move(nt.move_x, nt.move_y)
+                } else {
+                    LastTransform::Numeric(nt)
+                },
+            );
+        }
+    }
+
+    /// Repeat the most recent transform on the current selection about its centre
+    /// (Illustrator's Transform Again, Cmd/Ctrl+D). No-op when nothing has been
+    /// transformed yet or the selection is empty.
+    pub(super) fn transform_again(&mut self) {
+        let Some(last) = self.last_transform else {
+            self.status = "Nothing to transform again".into();
+            return;
+        };
+        let Some((cx, cy)) = self.selection_center() else {
+            return;
+        };
+        let (m, label) = match last {
+            LastTransform::Move(dx, dy) => (Affine::translate(dx, dy), "Moved again"),
+            LastTransform::Scale(sx, sy) => {
+                (Affine::scale_about(sx, sy, cx, cy), "Scaled again")
+            }
+            LastTransform::Rotate(r) => (Affine::rotate_about(r, cx, cy), "Rotated again"),
+            LastTransform::Shear(shx, shy) => {
+                (Affine::shear_about(shx, shy, cx, cy), "Sheared again")
+            }
+            LastTransform::Reflect(r) => {
+                (Affine::reflect_about(r, cx, cy), "Reflected again")
+            }
+            LastTransform::Numeric(nt) => (nt.to_affine(cx, cy), "Transformed again"),
+        };
+        // Re-apply without overwriting `last_transform` (the recipe is unchanged).
+        self.transform_selection(&m, label);
     }
 
     /// Begin a free-transform: snapshot the selected shapes and the pivot.
@@ -1312,6 +1390,8 @@ impl ContourApp {
                 )
             }
             TransformKind::Rotate => (bbox[0] + bbox[2] * 0.5, bbox[1] + bbox[3] * 0.5),
+            TransformKind::Shear(h) => transform::shear_pivot(h, &bbox)
+                .unwrap_or((bbox[0] + bbox[2] * 0.5, bbox[1] + bbox[3] * 0.5)),
         };
         let snapshot: Vec<(usize, Shape)> = self
             .selection
@@ -1322,6 +1402,7 @@ impl ContourApp {
         self.inter.transform = Some(TransformDrag {
             kind,
             pivot,
+            box_wh: (bbox[2], bbox[3]),
             start: (x, y),
             snapshot,
         });
@@ -1334,7 +1415,10 @@ impl ContourApp {
         let Some(td) = &self.inter.transform else {
             return;
         };
-        let m = match td.kind {
+        // Each gesture yields both the matrix to apply this frame and the
+        // repeatable [`LastTransform`] recipe (so Transform Again, Cmd/Ctrl+D,
+        // replays the same gesture about the current selection centre).
+        let (m, last) = match td.kind {
             TransformKind::Scale(h) => {
                 let (px, py) = td.pivot;
                 let orig_dx = td.start.0 - px;
@@ -1344,11 +1428,24 @@ impl ContourApp {
                 let (sx, sy) = transform::scale_factors_for_handle(
                     h, orig_dx, orig_dy, cur_dx, cur_dy, uniform,
                 );
-                Affine::scale_about(sx, sy, px, py)
+                (Affine::scale_about(sx, sy, px, py), LastTransform::Scale(sx, sy))
             }
             TransformKind::Rotate => {
                 let ang = transform::angle_between(td.start, (x, y), td.pivot);
-                Affine::rotate_about(ang, td.pivot.0, td.pivot.1)
+                (
+                    Affine::rotate_about(ang, td.pivot.0, td.pivot.1),
+                    LastTransform::Rotate(ang),
+                )
+            }
+            TransformKind::Shear(h) => {
+                let dx = x - td.start.0;
+                let dy = y - td.start.1;
+                let (shx, shy) =
+                    transform::shear_factors_for_handle(h, td.box_wh.0, td.box_wh.1, dx, dy);
+                (
+                    Affine::shear_about(shx, shy, td.pivot.0, td.pivot.1),
+                    LastTransform::Shear(shx, shy),
+                )
             }
         };
 
@@ -1360,6 +1457,7 @@ impl ContourApp {
                 slot.apply_affine(&m);
             }
         }
+        self.last_transform = Some(last);
     }
 
     // --- Artboards -----------------------------------------------------------

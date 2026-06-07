@@ -146,7 +146,7 @@ app-agnostic. Phases 0–1 are largely **done** (see §1); the rest is the road 
 ### Phase 2 — Selection, organize, transform  *(the daily-driver core)*
 - [ ] Selection (M): multi-select (shift/marquee), group-select, **groups** + isolation mode, lasso, magic-wand (same fill/stroke), select-same, lock/hide per layer
 - [ ] **Layers panel** (M): real layer tree, sublayers, reorder/drag, lock/hide/target, layer color
-- [ ] Transform (M): rotate / scale / reflect / shear / free-transform with on-canvas handles; transform-each; numeric transform; **Transform Again**
+- [~] Transform (M): rotate / scale / reflect / shear / free-transform with on-canvas handles; transform-each; numeric transform; **Transform Again**. *(Done: on-canvas free-transform box — scale (corner/edge handles, Shift = aspect-lock), rotate (ring outside a corner), shear (Cmd/Ctrl-drag an edge); numeric scale + move in the inspector; 90°/180° rotate + flip H/V + rotate-by; **Transform Again** (Cmd/Ctrl+D) replays the last gesture about the current centre. Pure affine math unit-tested. Still open: transform-each per-object pivots; a floating numeric dialog with shear/rotate fields.)*
 - [ ] **Align & distribute** (S): edges/centers, distribute spacing, align-to (selection/artboard/key-object)
 - [ ] **Guides / grid / smart guides / rulers** (M): snapping (point/grid/object/anchor), pixel-snap, measurement
 - [ ] **Artboards** (M): multiple artboards, add/resize/reorder, per-artboard export, presets

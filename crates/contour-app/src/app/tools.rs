@@ -27,20 +27,25 @@ impl ContourApp {
     /// Hit-test the transform-box handles at document point `(x, y)`. Returns the
     /// gesture to begin: a corner/edge scale, or a rotate when the cursor is in
     /// the rotate ring just outside a corner. `None` if not on any handle.
-    pub(super) fn hit_transform_handle(&self, x: f32, y: f32) -> Option<TransformKind> {
+    pub(super) fn hit_transform_handle(&self, x: f32, y: f32, shear: bool) -> Option<TransformKind> {
         if !self.show_transform_box() {
             return None;
         }
         let bbox = self.selection_bbox()?;
         let cursor = self.view.doc_to_screen((x, y));
 
-        // Scale handles take priority (inner pick radius).
+        // Scale handles take priority (inner pick radius). With the primary
+        // modifier (Cmd/Ctrl) held, dragging an *edge* handle shears instead of
+        // scaling — corner handles never shear, so they still scale.
         for h in Handle::ALL {
             let hp = self.view.doc_to_screen((
                 bbox[0] + bbox[2] * h.unit_pos().0,
                 bbox[1] + bbox[3] * h.unit_pos().1,
             ));
             if (cursor - hp).length() <= canvas::HANDLE_PICK_PX {
+                if shear && !h.is_corner() {
+                    return Some(TransformKind::Shear(h));
+                }
                 return Some(TransformKind::Scale(h));
             }
         }
@@ -561,7 +566,8 @@ impl ContourApp {
                 }
                 // Next: grabbing a transform-box handle (scale/rotate). These can
                 // sit outside the shape, so they're tested before shape picking.
-                if let Some(kind) = self.hit_transform_handle(x, y) {
+                let shear = response.ctx.input(|i| i.modifiers.command);
+                if let Some(kind) = self.hit_transform_handle(x, y, shear) {
                     self.begin_transform(kind, x, y);
                     self.inter.move_last = None;
                     return;
@@ -662,7 +668,7 @@ impl ContourApp {
             if let Some((x, y)) = doc_pos {
                 // A click that lands on a transform handle keeps the selection
                 // (the user was aiming for the box, not the canvas behind it).
-                if self.hit_transform_handle(x, y).is_some() {
+                if self.hit_transform_handle(x, y, false).is_some() {
                     return;
                 }
                 let hit = self

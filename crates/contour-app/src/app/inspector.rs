@@ -1332,6 +1332,37 @@ impl ContourApp {
                     self.rotate_selection(rad, "Rotated");
                 }
             });
+
+            // Numeric scale + move about the selection centre (one undo step).
+            // Shear is available on-canvas (Cmd/Ctrl-drag an edge handle).
+            ui.horizontal(|ui| {
+                ui.label("Scale");
+                ui.add(
+                    egui::DragValue::new(&mut self.numeric.scale_x)
+                        .speed(0.01)
+                        .range(0.01..=100.0)
+                        .prefix("x "),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut self.numeric.scale_y)
+                        .speed(0.01)
+                        .range(0.01..=100.0)
+                        .prefix("y "),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("Move");
+                ui.add(egui::DragValue::new(&mut self.numeric.move_x).speed(0.5).suffix(" x"));
+                ui.add(egui::DragValue::new(&mut self.numeric.move_y).speed(0.5).suffix(" y"));
+                if ui
+                    .button("Apply")
+                    .on_hover_text("Apply numeric transform (Transform Again, Cmd/Ctrl+D, repeats it)")
+                    .clicked()
+                {
+                    let nt = self.numeric;
+                    self.apply_numeric_transform(nt);
+                }
+            });
         });
 
         if !enabled {

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Transform — free-transform tool (scale / rotate / shear) + numeric
+  transform + Transform Again** (Phase 4 "Transform"). A pure affine module
+  (`transform.rs`: `Affine` with pivot-anchored scale/rotate/shear/reflect,
+  per-handle scale & shear factor math, `NumericTransform`, `angle_between`) is
+  driven by an on-canvas transform box: drag a corner/edge handle to **scale**
+  (Shift = lock aspect), the ring just outside a corner to **rotate**, and
+  **Cmd/Ctrl-drag an edge handle to shear**. The inspector Transform section
+  adds numeric **scale** (x/y) and **move** (x/y) about the selection centre, on
+  top of the existing 90°/180° rotate, flip H/V, and rotate-by controls.
+  **Transform Again** (Cmd/Ctrl+D) replays the last gesture — scale, rotate,
+  shear, reflect, move, or a full numeric transform — about the *current*
+  selection's centre. Every action is one undo step and works on paths and the
+  compound-path sub-contours. The affine math is unit-tested. *Still open:*
+  transform-each (per-object pivots) and a floating numeric dialog with
+  shear/rotate fields (shear is on-canvas; rotate via the rotate-by field).
 - **Gradients — Angle (conic) type + perceptual interpolation + dithering**
   (extends the Phase 3 "Gradients" item, building on the already-shipped
   linear/radial multi-stop fills *and* gradient-on-stroke). All three additions

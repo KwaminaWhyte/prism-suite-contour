@@ -802,7 +802,7 @@ fn flip_keeps_rect_normalized() {
     };
     // Horizontal flip about x = 30 (the rect's centre): bounds unchanged,
     // width/height stay positive.
-    s.apply_affine(&Affine::flip_h_about(30.0));
+    s.apply_affine(&Affine::scale_about(-1.0, 1.0, 30.0, 0.0));
     match s {
         Shape::Rect { rect, .. } => {
             assert!((rect[0] - 10.0).abs() < 1e-3);
