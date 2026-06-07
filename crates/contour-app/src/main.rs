@@ -22,6 +22,7 @@ mod gradient;
 mod group;
 mod history;
 mod icons;
+mod layers;
 mod opacity_mask;
 mod shapebuilder;
 mod snap;

@@ -1465,6 +1465,9 @@ mod tests {
                     omask_invert: false,
                     blend: None,
                     blend_step: false,
+                    name: None,
+                    locked: false,
+                    layer_color: None,
                 },
                 Shape::Path {
                     points: vec![(60.0, 60.0), (90.0, 60.0), (90.0, 90.0)],
@@ -1485,6 +1488,9 @@ mod tests {
                     omask_invert: false,
                     blend: None,
                     blend_step: false,
+                    name: None,
+                    locked: false,
+                    layer_color: None,
                 },
             ],
             ..Default::default()
@@ -1578,6 +1584,9 @@ mod tests {
                 omask_invert: false,
                 blend: None,
                 blend_step: false,
+                name: None,
+                locked: false,
+                layer_color: None,
             }],
             ..Default::default()
         }
@@ -1634,6 +1643,9 @@ mod tests {
                 omask_invert: false,
                 blend: None,
                 blend_step: false,
+                name: None,
+                locked: false,
+                layer_color: None,
             }],
             ..Default::default()
         }
@@ -1662,6 +1674,9 @@ mod tests {
                 omask_invert: false,
                 blend: None,
                 blend_step: false,
+                name: None,
+                locked: false,
+                layer_color: None,
             }],
             ..Default::default()
         }
@@ -1729,6 +1744,9 @@ mod tests {
                 omask_invert: false,
                 blend: None,
                 blend_step: false,
+                name: None,
+                locked: false,
+                layer_color: None,
             }],
             ..Default::default()
         }
@@ -1891,6 +1909,9 @@ mod tests {
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         };
         s.set_appearance(Some(Appearance {
             fills: vec![
@@ -1938,6 +1959,9 @@ mod tests {
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         };
         // Bottom red, top opaque green → centre reads green.
         s.set_appearance(Some(Appearance {
@@ -1985,6 +2009,9 @@ mod tests {
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         };
         // Bottom 60% grey, top 60% grey Multiply → 0.36 grey (much darker than
         // either layer alone, which a source-over top fill could never produce).
@@ -2035,6 +2062,9 @@ mod tests {
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         };
         s.set_appearance(Some(Appearance {
             fills: vec![
@@ -2082,6 +2112,9 @@ mod tests {
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         }
     }
 
@@ -2163,6 +2196,9 @@ mod tests {
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         };
         s.set_appearance(Some(Appearance {
             fills: vec![Fill::solid([1.0, 0.0, 0.0, 1.0])],
@@ -2284,6 +2320,9 @@ mod tests {
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         }
     }
 

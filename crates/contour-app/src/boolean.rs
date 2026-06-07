@@ -227,6 +227,9 @@ fn compound_from_subpaths(
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     }
 }
 
@@ -274,6 +277,9 @@ fn ring_to_path(ring: Vec<(f32, f32)>, style: &Shape, fill_override: Option<[f32
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     }
 }
 
@@ -463,6 +469,9 @@ mod tests {
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         }
     }
 
@@ -758,6 +767,9 @@ mod tests {
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         };
         assert!(apply(&a, &line, BoolOp::Union, BoolFillRule::NonZero).is_empty());
     }

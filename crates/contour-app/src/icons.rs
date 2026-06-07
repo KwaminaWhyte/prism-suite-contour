@@ -69,6 +69,16 @@ pub const EYE_SLASH: &str = ph::EYE_SLASH;
 pub const CARET_UP: &str = ph::CARET_UP;
 /// Move layer down in paint order.
 pub const CARET_DOWN: &str = ph::CARET_DOWN;
+/// Locked layer (cannot be selected / edited).
+pub const LOCK: &str = ph::LOCK_SIMPLE;
+/// Unlocked layer.
+pub const LOCK_OPEN: &str = ph::LOCK_SIMPLE_OPEN;
+/// A collapsed group row (disclosure pointing right).
+pub const CARET_RIGHT: &str = ph::CARET_RIGHT;
+/// Bring to front (top of the stack) — reused in the Layers panel.
+pub const LAYER_TO_FRONT: &str = ph::ARROW_LINE_UP;
+/// Send to back (bottom of the stack) — reused in the Layers panel.
+pub const LAYER_TO_BACK: &str = ph::ARROW_LINE_DOWN;
 
 // --- Align & distribute -----------------------------------------------------
 

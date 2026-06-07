@@ -366,6 +366,9 @@ fn region_to_shape_subpaths(subpaths: Vec<SubPath>, style: Option<&Shape>) -> Sh
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         }
     } else {
         Shape::Compound {
@@ -386,6 +389,9 @@ fn region_to_shape_subpaths(subpaths: Vec<SubPath>, style: Option<&Shape>) -> Sh
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         }
     }
 }
@@ -413,6 +419,9 @@ mod tests {
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         }
     }
 

@@ -1352,11 +1352,21 @@ impl ContourApp {
             });
             ui.horizontal(|ui| {
                 ui.label("Move");
-                ui.add(egui::DragValue::new(&mut self.numeric.move_x).speed(0.5).suffix(" x"));
-                ui.add(egui::DragValue::new(&mut self.numeric.move_y).speed(0.5).suffix(" y"));
+                ui.add(
+                    egui::DragValue::new(&mut self.numeric.move_x)
+                        .speed(0.5)
+                        .suffix(" x"),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut self.numeric.move_y)
+                        .speed(0.5)
+                        .suffix(" y"),
+                );
                 if ui
                     .button("Apply")
-                    .on_hover_text("Apply numeric transform (Transform Again, Cmd/Ctrl+D, repeats it)")
+                    .on_hover_text(
+                        "Apply numeric transform (Transform Again, Cmd/Ctrl+D, repeats it)",
+                    )
                     .clicked()
                 {
                     let nt = self.numeric;
@@ -1702,9 +1712,12 @@ impl ContourApp {
         }
     }
 
-    /// The Layers list: newest on top, with visibility toggle, reorder up/down,
-    /// delete, and click-to-select (shift-click toggles the shape in the
-    /// multi-selection set).
+    /// A real Layers panel: every object (and group, as an expandable parent)
+    /// listed top-to-bottom in z-order, each row carrying a visibility toggle, a
+    /// lock toggle, an editable name, a layer-colour swatch, click-to-target
+    /// selection (kept in sync with the canvas), and reorder controls
+    /// (front/back + up/down). Hidden / locked rows are dimmed; the gates are
+    /// shared with the canvas via [`Shape::selectable`](crate::document::Shape).
     fn layers_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1715,109 +1728,233 @@ impl ContourApp {
 
         // Deferred mutations so we don't borrow `self.doc` while iterating.
         let mut to_delete: Option<usize> = None;
-        let mut to_toggle: Option<usize> = None;
-        let mut to_raise: Option<usize> = None; // swap with idx+1 (towards top)
-        let mut to_lower: Option<usize> = None; // swap with idx-1 (towards bottom)
-        let mut to_select: Option<(usize, bool)> = None; // (idx, shift held)
+        let mut to_toggle_vis: Option<usize> = None;
+        let mut to_toggle_lock: Option<usize> = None;
+        let mut to_rename: Option<(usize, String)> = None;
+        let mut to_recolor: Option<(usize, Option<[f32; 4]>)> = None;
+        let mut arrange_one: Option<(usize, Arrange)> = None;
+        let mut select_shape: Option<(usize, bool)> = None; // (idx, shift held)
+        let mut select_group: Option<u64> = None;
+        let mut toggle_group: Option<u64> = None; // collapse / expand
 
         let shift = ui.input(|i| i.modifiers.shift);
         let n = self.doc.shapes.len();
 
-        // Paint order: index 0 painted first (bottom). "Newest on top" =>
-        // iterate indices in reverse so the last (topmost) is listed first. The
-        // enclosing inspector ScrollArea scrolls these rows; no inner scroll.
-        for idx in (0..n).rev() {
-            let primary = self.primary() == Some(idx);
-            // A non-primary member of a multi-selection.
-            let secondary = !primary && self.is_selected(idx);
-            let visible = self.doc.shapes[idx].visible();
-            let label = self.doc.shapes[idx].label();
-            let grouped = self.doc.shapes[idx].group().is_some();
+        // Build the top-to-bottom row layout (front first), grouping members
+        // under a collapsible header, via the pure `layers` helper.
+        let group_tags: Vec<Option<u64>> = self.doc.shapes.iter().map(|s| s.group()).collect();
+        let rows = crate::layers::rows(&group_tags, &self.collapsed_layers);
 
-            ui.horizontal(|ui| {
-                // Visibility toggle.
-                let eye = if visible {
-                    icons::EYE
-                } else {
-                    icons::EYE_SLASH
-                };
-                if ui
-                    .add(egui::Button::new(eye).frame(false))
-                    .on_hover_text("Toggle visibility")
-                    .clicked()
-                {
-                    to_toggle = Some(idx);
-                }
-
-                // A leading group glyph marks shapes that belong to a group.
-                let prefix = if grouped {
-                    format!("{}  ", icons::GROUP)
-                } else {
-                    String::new()
-                };
-                let mut text = egui::RichText::new(format!("{}{}  {}", prefix, n - idx, label));
-                if !visible {
-                    text = text.weak();
-                }
-                if secondary {
-                    text = text.color(theme::accent());
-                }
-                if ui
-                    .selectable_label(primary, text)
-                    .on_hover_text(if grouped { "Grouped" } else { "" })
-                    .clicked()
-                {
-                    to_select = Some((idx, shift));
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(icons::TRASH).on_hover_text("Delete").clicked() {
-                        to_delete = Some(idx);
-                    }
-                    ui.add_enabled_ui(idx > 0, |ui| {
+        for row in rows {
+            match row {
+                crate::layers::LayerRow::Group { id, count } => {
+                    let collapsed = self.collapsed_layers.contains(&id);
+                    ui.horizontal(|ui| {
+                        let caret = if collapsed {
+                            icons::CARET_RIGHT
+                        } else {
+                            icons::CARET_DOWN
+                        };
                         if ui
-                            .button(icons::CARET_DOWN)
-                            .on_hover_text("Move down")
+                            .add(egui::Button::new(caret).frame(false))
+                            .on_hover_text(if collapsed { "Expand" } else { "Collapse" })
                             .clicked()
                         {
-                            to_lower = Some(idx);
+                            toggle_group = Some(id);
                         }
-                    });
-                    ui.add_enabled_ui(idx + 1 < n, |ui| {
+                        let label = format!("{}  Group ({count})", icons::GROUP);
                         if ui
-                            .button(icons::CARET_UP)
-                            .on_hover_text("Move up")
+                            .selectable_label(false, egui::RichText::new(label).strong())
+                            .on_hover_text("Select the whole group")
                             .clicked()
                         {
-                            to_raise = Some(idx);
+                            select_group = Some(id);
                         }
                     });
-                });
-            });
+                }
+                crate::layers::LayerRow::Shape { idx, depth } => {
+                    let primary = self.primary() == Some(idx);
+                    let secondary = !primary && self.is_selected(idx);
+                    let visible = self.doc.shapes[idx].visible();
+                    let locked = self.doc.shapes[idx].locked();
+                    let name = self.doc.shapes[idx].display_name();
+                    let layer_color = self.doc.shapes[idx].layer_color();
+
+                    ui.push_id(("layer", idx), |ui| {
+                        ui.horizontal(|ui| {
+                            // Indent grouped members under their header.
+                            if depth > 0 {
+                                ui.add_space(16.0 * depth as f32);
+                            }
+
+                            // Visibility toggle.
+                            let eye = if visible {
+                                icons::EYE
+                            } else {
+                                icons::EYE_SLASH
+                            };
+                            if ui
+                                .add(egui::Button::new(eye).frame(false))
+                                .on_hover_text("Toggle visibility")
+                                .clicked()
+                            {
+                                to_toggle_vis = Some(idx);
+                            }
+
+                            // Lock toggle.
+                            let lock = if locked {
+                                icons::LOCK
+                            } else {
+                                icons::LOCK_OPEN
+                            };
+                            if ui
+                                .add(egui::Button::new(lock).frame(false))
+                                .on_hover_text(if locked {
+                                    "Unlock (locked: can't be selected)"
+                                } else {
+                                    "Lock"
+                                })
+                                .clicked()
+                            {
+                                to_toggle_lock = Some(idx);
+                            }
+
+                            // Layer-colour swatch: a small chip; click to set,
+                            // right-click to clear back to none.
+                            let mut chip = layer_color.unwrap_or([0.6, 0.6, 0.6, 1.0]);
+                            let mut c = Color32::from_rgba_unmultiplied(
+                                (chip[0] * 255.0) as u8,
+                                (chip[1] * 255.0) as u8,
+                                (chip[2] * 255.0) as u8,
+                                (chip[3] * 255.0) as u8,
+                            );
+                            let resp = ui
+                                .color_edit_button_srgba(&mut c)
+                                .on_hover_text("Layer colour (right-click to clear)");
+                            if resp.changed() {
+                                chip = [
+                                    c.r() as f32 / 255.0,
+                                    c.g() as f32 / 255.0,
+                                    c.b() as f32 / 255.0,
+                                    c.a() as f32 / 255.0,
+                                ];
+                                to_recolor = Some((idx, Some(chip)));
+                            }
+                            if resp.secondary_clicked() {
+                                to_recolor = Some((idx, None));
+                            }
+
+                            // Editable name, taking the remaining width before the
+                            // reorder buttons. A blank name reverts to the type
+                            // label (handled by `set_shape_name`).
+                            let mut buf = self.doc.shapes[idx].name().unwrap_or("").to_string();
+                            let hint = self.doc.shapes[idx].label();
+                            let edit = egui::TextEdit::singleline(&mut buf)
+                                .hint_text(hint)
+                                .desired_width(96.0);
+                            let mut text = egui::RichText::new(&name);
+                            if !visible || locked {
+                                text = text.weak();
+                            }
+                            if secondary {
+                                text = text.color(theme::accent());
+                            }
+                            // A selectable label that, when the row is the active
+                            // selection, swaps to an inline text editor. The name
+                            // is committed on focus-loss / Enter (not per keystroke)
+                            // so it is one undo step.
+                            if primary {
+                                if ui.add(edit).lost_focus() {
+                                    to_rename = Some((idx, buf.clone()));
+                                }
+                            } else if ui
+                                .selectable_label(secondary, text)
+                                .on_hover_text(if locked { "Locked" } else { "Click to select" })
+                                .clicked()
+                            {
+                                select_shape = Some((idx, shift));
+                            }
+
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button(icons::TRASH).on_hover_text("Delete").clicked() {
+                                        to_delete = Some(idx);
+                                    }
+                                    ui.add_enabled_ui(idx > 0, |ui| {
+                                        if ui
+                                            .button(icons::CARET_DOWN)
+                                            .on_hover_text("Move down")
+                                            .clicked()
+                                        {
+                                            arrange_one = Some((idx, Arrange::SendBackward));
+                                        }
+                                    });
+                                    ui.add_enabled_ui(idx + 1 < n, |ui| {
+                                        if ui
+                                            .button(icons::CARET_UP)
+                                            .on_hover_text("Move up")
+                                            .clicked()
+                                        {
+                                            arrange_one = Some((idx, Arrange::BringForward));
+                                        }
+                                    });
+                                    ui.add_enabled_ui(idx > 0, |ui| {
+                                        if ui
+                                            .button(icons::LAYER_TO_BACK)
+                                            .on_hover_text("Send to back")
+                                            .clicked()
+                                        {
+                                            arrange_one = Some((idx, Arrange::SendToBack));
+                                        }
+                                    });
+                                    ui.add_enabled_ui(idx + 1 < n, |ui| {
+                                        if ui
+                                            .button(icons::LAYER_TO_FRONT)
+                                            .on_hover_text("Bring to front")
+                                            .clicked()
+                                        {
+                                            arrange_one = Some((idx, Arrange::BringToFront));
+                                        }
+                                    });
+                                },
+                            );
+                        });
+                    });
+                }
+            }
         }
         if n == 0 {
             ui.weak("No shapes yet. Pick a tool and draw.");
         }
 
-        if let Some(i) = to_toggle {
-            self.checkpoint();
-            self.doc.shapes[i].toggle_visible();
+        // Apply the deferred mutations (each is its own undo step where it
+        // touches the document).
+        if let Some(g) = toggle_group {
+            crate::layers::toggle_collapsed(&mut self.collapsed_layers, g);
         }
-        if let Some(i) = to_raise {
-            self.checkpoint();
-            self.swap_shapes(i, i + 1);
+        if let Some(i) = to_toggle_vis {
+            self.toggle_shape_visible(i);
         }
-        if let Some(i) = to_lower {
-            self.checkpoint();
-            self.swap_shapes(i, i - 1);
+        if let Some(i) = to_toggle_lock {
+            self.toggle_shape_locked(i);
         }
-        if let Some((i, shift)) = to_select {
-            if shift {
-                self.toggle_group_selection(i);
-            } else {
-                self.select_only(Some(i));
-                self.expand_selection_to_groups();
-            }
+        if let Some((i, name)) = to_rename {
+            self.set_shape_name(i, &name);
+        }
+        if let Some((i, color)) = to_recolor {
+            self.set_shape_layer_color(i, color);
+        }
+        if let Some((i, op)) = arrange_one {
+            // Reorder just this row through the tested arrange ops; the live
+            // selection is remapped through the same permutation so it follows.
+            self.arrange_shape(i, op);
+        }
+        if let Some((i, shift)) = select_shape {
+            self.select_shape_from_panel(i, shift);
+        }
+        if let Some(g) = select_group {
+            self.select_group_from_panel(g);
         }
         if let Some(i) = to_delete {
             self.checkpoint();
@@ -1919,7 +2056,11 @@ fn appearance_stroke_list(ui: &mut egui::Ui, ap: &mut crate::appearance::Appeara
                     changed = true;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("✕").on_hover_text("Remove stroke").clicked() {
+                    if ui
+                        .small_button("✕")
+                        .on_hover_text("Remove stroke")
+                        .clicked()
+                    {
                         remove = Some(idx);
                     }
                     ui.add_enabled_ui(idx + 1 < n, |ui| {
@@ -1983,7 +2124,11 @@ fn appearance_effect_list(ui: &mut egui::Ui, ap: &mut crate::appearance::Appeara
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(effect.label()).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("✕").on_hover_text("Remove effect").clicked() {
+                    if ui
+                        .small_button("✕")
+                        .on_hover_text("Remove effect")
+                        .clicked()
+                    {
                         remove = Some(idx);
                     }
                     ui.add_enabled_ui(idx + 1 < n, |ui| {
@@ -2109,7 +2254,12 @@ fn paint_swatch_toggle(ui: &mut egui::Ui, paint: &mut Paint, is_grad: &mut bool)
         }
     }
     // Solid / Gradient kind toggle.
-    if ui.selectable_label(!*is_grad, "S").on_hover_text("Solid").clicked() && *is_grad {
+    if ui
+        .selectable_label(!*is_grad, "S")
+        .on_hover_text("Solid")
+        .clicked()
+        && *is_grad
+    {
         let c = paint.swatch();
         *paint = Paint::Solid(c);
         *is_grad = false;

@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Layers panel — real object list with visibility / lock / name / colour +
+  group nesting + reorder** (Phase 2 "Layers panel"). The placeholder layers
+  list grows into a real panel listing every object **top-to-bottom in z-order**,
+  with grouped objects gathered under an **expandable / collapsible group
+  header** (the closest the flat `Vec<Shape>` model gets to a layer tree). Each
+  shape row carries:
+  - a **visibility** toggle (hide/show),
+  - a **lock** toggle — locked objects render but can't be selected, picked, or
+    marquee-grabbed; the gate is the new `Shape::selectable()` (`visible &&
+    !locked`) shared by *every* canvas pick path (click, drag-to-move,
+    eyedropper, direct-select, marquee) so the panel and canvas never drift,
+  - an **editable name** (inline editor on the active row; a blank name reverts
+    to the type label),
+  - a **layer-colour** swatch (click to set, right-click to clear),
+  - **click-to-target** selection kept in sync with the canvas (shift-click
+    toggles; a group header selects the whole group),
+  - **reorder** controls — up / down (bring-forward / send-backward) and
+    bring-to-front / send-to-back — routed through the already-tested
+    `arrange::reorder` permutation so the live selection follows the move.
+  The new `name` / `locked` / `layer_color` fields are additive on every `Shape`
+  variant (`#[serde(default)]`), so they **persist to `.contour`** and older
+  files load unnamed / unlocked / un-coloured and unchanged. New pure module
+  `layers.rs` builds the panel's row layout (group nesting + collapse) and is
+  unit-tested; lock-blocks-selection, hidden-excluded-from-pick, the metadata
+  serde round-trip, and back-compat defaults are unit-tested on the model. *Still
+  open:* a true recursive **sublayer tree**, **drag-to-reorder** (button reorder
+  ships instead), and a per-layer appearance **target dot**.
 - **Transform — free-transform tool (scale / rotate / shear) + numeric
   transform + Transform Again** (Phase 4 "Transform"). A pure affine module
   (`transform.rs`: `Affine` with pivot-anchored scale/rotate/shear/reflect,

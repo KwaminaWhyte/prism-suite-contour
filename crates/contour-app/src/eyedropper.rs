@@ -99,6 +99,9 @@ mod tests {
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         }
     }
 
@@ -120,6 +123,9 @@ mod tests {
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         }
     }
 
@@ -140,6 +146,9 @@ mod tests {
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         }
     }
 

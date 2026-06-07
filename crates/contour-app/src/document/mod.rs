@@ -106,6 +106,19 @@ pub enum Shape {
         /// the ends. Additive (`#[serde(default)]` → `false`).
         #[serde(default)]
         blend_step: bool,
+        /// Optional Layers-panel display name. Additive (`#[serde(default)]` →
+        /// `None`), so older files load with the generic type label.
+        #[serde(default)]
+        name: Option<String>,
+        /// Whether the shape is **locked**: it renders normally but cannot be
+        /// selected, hit-tested, or edited. Additive (`#[serde(default)]` →
+        /// `false`), so older files load unlocked.
+        #[serde(default)]
+        locked: bool,
+        /// Optional Layers-panel colour swatch (the row tint Illustrator gives a
+        /// layer). Additive (`#[serde(default)]` → `None`).
+        #[serde(default)]
+        layer_color: Option<[f32; 4]>,
     },
     Ellipse {
         rect: [f32; 4],
@@ -136,6 +149,19 @@ pub enum Shape {
         blend: Option<u64>,
         #[serde(default)]
         blend_step: bool,
+        /// Optional Layers-panel display name. Additive (`#[serde(default)]` →
+        /// `None`), so older files load with the generic type label.
+        #[serde(default)]
+        name: Option<String>,
+        /// Whether the shape is **locked**: it renders normally but cannot be
+        /// selected, hit-tested, or edited. Additive (`#[serde(default)]` →
+        /// `false`), so older files load unlocked.
+        #[serde(default)]
+        locked: bool,
+        /// Optional Layers-panel colour swatch (the row tint Illustrator gives a
+        /// layer). Additive (`#[serde(default)]` → `None`).
+        #[serde(default)]
+        layer_color: Option<[f32; 4]>,
     },
     Line {
         p0: (f32, f32),
@@ -164,6 +190,19 @@ pub enum Shape {
         blend: Option<u64>,
         #[serde(default)]
         blend_step: bool,
+        /// Optional Layers-panel display name. Additive (`#[serde(default)]` →
+        /// `None`), so older files load with the generic type label.
+        #[serde(default)]
+        name: Option<String>,
+        /// Whether the shape is **locked**: it renders normally but cannot be
+        /// selected, hit-tested, or edited. Additive (`#[serde(default)]` →
+        /// `false`), so older files load unlocked.
+        #[serde(default)]
+        locked: bool,
+        /// Optional Layers-panel colour swatch (the row tint Illustrator gives a
+        /// layer). Additive (`#[serde(default)]` → `None`).
+        #[serde(default)]
+        layer_color: Option<[f32; 4]>,
     },
     Path {
         points: Vec<(f32, f32)>,
@@ -204,6 +243,19 @@ pub enum Shape {
         blend: Option<u64>,
         #[serde(default)]
         blend_step: bool,
+        /// Optional Layers-panel display name. Additive (`#[serde(default)]` →
+        /// `None`), so older files load with the generic type label.
+        #[serde(default)]
+        name: Option<String>,
+        /// Whether the shape is **locked**: it renders normally but cannot be
+        /// selected, hit-tested, or edited. Additive (`#[serde(default)]` →
+        /// `false`), so older files load unlocked.
+        #[serde(default)]
+        locked: bool,
+        /// Optional Layers-panel colour swatch (the row tint Illustrator gives a
+        /// layer). Additive (`#[serde(default)]` → `None`).
+        #[serde(default)]
+        layer_color: Option<[f32; 4]>,
     },
     /// A **compound path**: one object that keeps several sub-contours (an outer
     /// ring plus inner holes, or several disjoint regions) together, filled as a
@@ -244,6 +296,19 @@ pub enum Shape {
         blend: Option<u64>,
         #[serde(default)]
         blend_step: bool,
+        /// Optional Layers-panel display name. Additive (`#[serde(default)]` →
+        /// `None`), so older files load with the generic type label.
+        #[serde(default)]
+        name: Option<String>,
+        /// Whether the shape is **locked**: it renders normally but cannot be
+        /// selected, hit-tested, or edited. Additive (`#[serde(default)]` →
+        /// `false`), so older files load unlocked.
+        #[serde(default)]
+        locked: bool,
+        /// Optional Layers-panel colour swatch (the row tint Illustrator gives a
+        /// layer). Additive (`#[serde(default)]` → `None`).
+        #[serde(default)]
+        layer_color: Option<[f32; 4]>,
     },
 }
 
@@ -278,6 +343,100 @@ impl Shape {
             | Shape::Line { visible, .. }
             | Shape::Path { visible, .. }
             | Shape::Compound { visible, .. } => *visible = !*visible,
+        }
+    }
+
+    /// Whether the shape is **locked**. A locked shape still renders, but it is
+    /// excluded from selection, hit-testing, and editing (Illustrator's lock).
+    pub fn locked(&self) -> bool {
+        match self {
+            Shape::Rect { locked, .. }
+            | Shape::Ellipse { locked, .. }
+            | Shape::Line { locked, .. }
+            | Shape::Path { locked, .. }
+            | Shape::Compound { locked, .. } => *locked,
+        }
+    }
+
+    /// Set the shape's locked flag.
+    pub fn set_locked(&mut self, v: bool) {
+        match self {
+            Shape::Rect { locked, .. }
+            | Shape::Ellipse { locked, .. }
+            | Shape::Line { locked, .. }
+            | Shape::Path { locked, .. }
+            | Shape::Compound { locked, .. } => *locked = v,
+        }
+    }
+
+    /// Flip the locked flag.
+    pub fn toggle_locked(&mut self) {
+        let v = self.locked();
+        self.set_locked(!v);
+    }
+
+    /// Whether the shape can take part in selection / hit-testing / editing: it
+    /// must be both **visible** and **unlocked**. The single predicate the canvas
+    /// pick paths and the Layers panel share so the two gates never drift apart.
+    pub fn selectable(&self) -> bool {
+        self.visible() && !self.locked()
+    }
+
+    /// The shape's user-set Layers-panel name, if it has one (`None` falls back to
+    /// the generic [`label`](Self::label)).
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Shape::Rect { name, .. }
+            | Shape::Ellipse { name, .. }
+            | Shape::Line { name, .. }
+            | Shape::Path { name, .. }
+            | Shape::Compound { name, .. } => name.as_deref(),
+        }
+    }
+
+    /// Set (or clear, with an empty string) the shape's Layers-panel name. A blank
+    /// name is stored as `None` so the row falls back to the type label.
+    pub fn set_name(&mut self, n: &str) {
+        let value = {
+            let t = n.trim();
+            (!t.is_empty()).then(|| t.to_string())
+        };
+        match self {
+            Shape::Rect { name, .. }
+            | Shape::Ellipse { name, .. }
+            | Shape::Line { name, .. }
+            | Shape::Path { name, .. }
+            | Shape::Compound { name, .. } => *name = value,
+        }
+    }
+
+    /// The name to show in the Layers panel: the user-set name when present, else
+    /// the generic type label.
+    pub fn display_name(&self) -> String {
+        self.name()
+            .map(str::to_string)
+            .unwrap_or_else(|| self.label().to_string())
+    }
+
+    /// The shape's Layers-panel colour swatch, if one has been set.
+    pub fn layer_color(&self) -> Option<[f32; 4]> {
+        match self {
+            Shape::Rect { layer_color, .. }
+            | Shape::Ellipse { layer_color, .. }
+            | Shape::Line { layer_color, .. }
+            | Shape::Path { layer_color, .. }
+            | Shape::Compound { layer_color, .. } => *layer_color,
+        }
+    }
+
+    /// Set (or clear, with `None`) the shape's Layers-panel colour swatch.
+    pub fn set_layer_color(&mut self, c: Option<[f32; 4]>) {
+        match self {
+            Shape::Rect { layer_color, .. }
+            | Shape::Ellipse { layer_color, .. }
+            | Shape::Line { layer_color, .. }
+            | Shape::Path { layer_color, .. }
+            | Shape::Compound { layer_color, .. } => *layer_color = c,
         }
     }
 
@@ -845,7 +1004,12 @@ impl Shape {
                     });
                 }
                 union.map(|r| {
-                    CoreRect::new(r.x0 as f32, r.y0 as f32, r.width() as f32, r.height() as f32)
+                    CoreRect::new(
+                        r.x0 as f32,
+                        r.y0 as f32,
+                        r.width() as f32,
+                        r.height() as f32,
+                    )
                 })
             }
         }
@@ -973,6 +1137,11 @@ impl Shape {
             // Carry blend tags through so a clipped blend member stays in its set.
             blend: self.blend(),
             blend_step: self.is_blend_step(),
+            // Carry the Layers-panel metadata through so a clipped shape keeps
+            // its name / lock / colour.
+            name: self.name().map(str::to_string),
+            locked: self.locked(),
+            layer_color: self.layer_color(),
         }
     }
 
@@ -1003,6 +1172,9 @@ impl Shape {
                 omask_invert,
                 blend,
                 blend_step,
+                name,
+                locked,
+                layer_color,
             } => {
                 let pts = vec![
                     (rect[0], rect[1]),
@@ -1030,6 +1202,9 @@ impl Shape {
                     omask_invert: *omask_invert,
                     blend: *blend,
                     blend_step: *blend_step,
+                    name: name.clone(),
+                    locked: *locked,
+                    layer_color: *layer_color,
                 }
             }
             Shape::Ellipse {
@@ -1049,6 +1224,9 @@ impl Shape {
                 omask_invert,
                 blend,
                 blend_step,
+                name,
+                locked,
+                layer_color,
             } => {
                 // Four anchors at the extrema with the classic 0.5523 cubic
                 // tangent so the path traces a smooth ellipse.
@@ -1090,6 +1268,9 @@ impl Shape {
                     omask_invert: *omask_invert,
                     blend: *blend,
                     blend_step: *blend_step,
+                    name: name.clone(),
+                    locked: *locked,
+                    layer_color: *layer_color,
                 }
             }
             Shape::Line {
@@ -1108,6 +1289,9 @@ impl Shape {
                 omask_invert,
                 blend,
                 blend_step,
+                name,
+                locked,
+                layer_color,
             } => Shape::Path {
                 points: vec![*p0, *p1],
                 closed: false,
@@ -1127,6 +1311,9 @@ impl Shape {
                 omask_invert: *omask_invert,
                 blend: *blend,
                 blend_step: *blend_step,
+                name: name.clone(),
+                locked: *locked,
+                layer_color: *layer_color,
             },
         }
     }

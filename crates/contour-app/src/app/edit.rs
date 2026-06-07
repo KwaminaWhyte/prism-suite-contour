@@ -627,6 +627,9 @@ impl ContourApp {
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         };
         self.doc.shapes.insert(insert_at, compound);
         self.select_only(Some(insert_at));
@@ -983,20 +986,116 @@ impl ContourApp {
         }
     }
 
-    /// Swap shapes `a` and `b`, keeping the selection pinned to the moved shapes.
-    pub(super) fn swap_shapes(&mut self, a: usize, b: usize) {
-        let n = self.doc.shapes.len();
-        if a >= n || b >= n || a == b {
+    // --- Layers panel operations --------------------------------------------
+
+    /// Toggle shape `i`'s visibility as one undo step (Layers eye button).
+    pub(super) fn toggle_shape_visible(&mut self, i: usize) {
+        if i >= self.doc.shapes.len() {
             return;
         }
-        self.doc.shapes.swap(a, b);
-        for s in self.selection.iter_mut() {
-            if *s == a {
-                *s = b;
-            } else if *s == b {
-                *s = a;
-            }
+        self.checkpoint();
+        self.doc.shapes[i].toggle_visible();
+    }
+
+    /// Toggle shape `i`'s lock as one undo step (Layers lock button). Locking a
+    /// shape that is currently selected drops it from the selection, since a
+    /// locked shape can't be part of an editable selection.
+    pub(super) fn toggle_shape_locked(&mut self, i: usize) {
+        if i >= self.doc.shapes.len() {
+            return;
         }
+        self.checkpoint();
+        self.doc.shapes[i].toggle_locked();
+        if self.doc.shapes[i].locked() {
+            self.selection.retain(|&s| s != i);
+        }
+    }
+
+    /// Rename shape `i` from the Layers panel as one undo step. A blank name
+    /// clears back to the generic type label.
+    pub(super) fn set_shape_name(&mut self, i: usize, name: &str) {
+        if i >= self.doc.shapes.len() {
+            return;
+        }
+        // Normalise the way `Shape::set_name` does (blank → cleared), then skip
+        // the checkpoint when nothing changes so committing an unedited text
+        // field doesn't pile up empty undo steps.
+        let trimmed = name.trim();
+        let next = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        if self.doc.shapes[i].name().map(str::to_string) == next {
+            return;
+        }
+        self.checkpoint();
+        self.doc.shapes[i].set_name(name);
+    }
+
+    /// Set (or clear, with `None`) shape `i`'s Layers-panel colour as one undo
+    /// step.
+    pub(super) fn set_shape_layer_color(&mut self, i: usize, color: Option<[f32; 4]>) {
+        if i >= self.doc.shapes.len() {
+            return;
+        }
+        self.checkpoint();
+        self.doc.shapes[i].set_layer_color(color);
+    }
+
+    /// Select shape `i` from the Layers panel (the row's target affordance),
+    /// expanding to its whole group / clip unit so panel ↔ canvas selection stay
+    /// in sync. A **locked** shape can't be selected, so the click is ignored.
+    pub(super) fn select_shape_from_panel(&mut self, i: usize, additive: bool) {
+        if i >= self.doc.shapes.len() || self.doc.shapes[i].locked() {
+            return;
+        }
+        if additive {
+            self.toggle_group_selection(i);
+        } else {
+            self.select_only(Some(i));
+            self.expand_selection_to_groups();
+        }
+    }
+
+    /// Select every member of group `g` (the Layers group header's target
+    /// affordance). No-op if the group has no selectable (unlocked) members.
+    pub(super) fn select_group_from_panel(&mut self, g: u64) {
+        let members: Vec<usize> = self
+            .doc
+            .shapes
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.group() == Some(g) && !s.locked())
+            .map(|(i, _)| i)
+            .collect();
+        if members.is_empty() {
+            return;
+        }
+        self.selection = members;
+    }
+
+    /// Reorder a single shape `i` in paint order (the Layers-panel reorder
+    /// buttons), independent of the current selection: the op is computed for
+    /// just `{i}`, and the real selection is remapped through the same
+    /// permutation so it follows the move. One undo step; no-op if the move
+    /// wouldn't change the order.
+    pub(super) fn arrange_shape(&mut self, i: usize, op: Arrange) {
+        let len = self.doc.shapes.len();
+        if i >= len || !arrange::changes_order(len, &[i], op) {
+            return;
+        }
+        let perm = arrange::reorder(len, &[i], op);
+        let inv = arrange::invert(&perm);
+        self.checkpoint();
+        let old = std::mem::take(&mut self.doc.shapes);
+        let mut taken: Vec<Option<Shape>> = old.into_iter().map(Some).collect();
+        let mut reordered = Vec::with_capacity(len);
+        for &src in &perm {
+            reordered.push(taken[src].take().expect("permutation visits each once"));
+        }
+        self.doc.shapes = reordered;
+        // A shape at old index `j` is now at `inv[j]`; remap the live selection.
+        for s in self.selection.iter_mut() {
+            *s = inv[*s];
+        }
+        self.status = op.label().into();
     }
 
     /// Reorder the selected shapes in paint order (Arrange / stacking) as one
@@ -1098,6 +1197,9 @@ impl ContourApp {
                 omask_invert: false,
                 blend: None,
                 blend_step: false,
+                name: None,
+                locked: false,
+                layer_color: None,
             });
             self.select_only(Some(self.doc.shapes.len() - 1));
         } else {
@@ -1178,7 +1280,11 @@ impl ContourApp {
         self.doc.shapes.extend(results);
         // Select every path the op produced.
         self.selection = (first..first + n).collect();
-        self.status = format!("{} applied ({n} path{})", op.label(), if n == 1 { "" } else { "s" });
+        self.status = format!(
+            "{} applied ({n} path{})",
+            op.label(),
+            if n == 1 { "" } else { "s" }
+        );
     }
 
     /// Reference rectangle the Align operations measure against.
@@ -1360,16 +1466,12 @@ impl ContourApp {
         };
         let (m, label) = match last {
             LastTransform::Move(dx, dy) => (Affine::translate(dx, dy), "Moved again"),
-            LastTransform::Scale(sx, sy) => {
-                (Affine::scale_about(sx, sy, cx, cy), "Scaled again")
-            }
+            LastTransform::Scale(sx, sy) => (Affine::scale_about(sx, sy, cx, cy), "Scaled again"),
             LastTransform::Rotate(r) => (Affine::rotate_about(r, cx, cy), "Rotated again"),
             LastTransform::Shear(shx, shy) => {
                 (Affine::shear_about(shx, shy, cx, cy), "Sheared again")
             }
-            LastTransform::Reflect(r) => {
-                (Affine::reflect_about(r, cx, cy), "Reflected again")
-            }
+            LastTransform::Reflect(r) => (Affine::reflect_about(r, cx, cy), "Reflected again"),
             LastTransform::Numeric(nt) => (nt.to_affine(cx, cy), "Transformed again"),
         };
         // Re-apply without overwriting `last_transform` (the recipe is unchanged).
@@ -1428,7 +1530,10 @@ impl ContourApp {
                 let (sx, sy) = transform::scale_factors_for_handle(
                     h, orig_dx, orig_dy, cur_dx, cur_dy, uniform,
                 );
-                (Affine::scale_about(sx, sy, px, py), LastTransform::Scale(sx, sy))
+                (
+                    Affine::scale_about(sx, sy, px, py),
+                    LastTransform::Scale(sx, sy),
+                )
             }
             TransformKind::Rotate => {
                 let ang = transform::angle_between(td.start, (x, y), td.pivot);
@@ -1778,9 +1883,7 @@ impl ContourApp {
 /// contributes all of its sub-contours (so combining a compound flattens it).
 fn compound_subpaths(shape: &Shape) -> Option<Vec<crate::document::SubPath>> {
     match shape {
-        Shape::Compound { subpaths, .. } => {
-            (!subpaths.is_empty()).then(|| subpaths.clone())
-        }
+        Shape::Compound { subpaths, .. } => (!subpaths.is_empty()).then(|| subpaths.clone()),
         Shape::Path {
             points,
             handles,
@@ -1842,6 +1945,9 @@ fn release_compound_to_paths(compound: &Shape) -> Vec<Shape> {
         omask_invert,
         blend,
         blend_step,
+        name,
+        locked,
+        layer_color,
         ..
     } = compound
     else {
@@ -1872,6 +1978,9 @@ fn release_compound_to_paths(compound: &Shape) -> Vec<Shape> {
                 omask_invert: *omask_invert,
                 blend: *blend,
                 blend_step: *blend_step,
+                name: name.clone(),
+                locked: *locked,
+                layer_color: *layer_color,
             }
         })
         .collect()

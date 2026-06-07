@@ -27,7 +27,12 @@ impl ContourApp {
     /// Hit-test the transform-box handles at document point `(x, y)`. Returns the
     /// gesture to begin: a corner/edge scale, or a rotate when the cursor is in
     /// the rotate ring just outside a corner. `None` if not on any handle.
-    pub(super) fn hit_transform_handle(&self, x: f32, y: f32, shear: bool) -> Option<TransformKind> {
+    pub(super) fn hit_transform_handle(
+        &self,
+        x: f32,
+        y: f32,
+        shear: bool,
+    ) -> Option<TransformKind> {
         if !self.show_transform_box() {
             return None;
         }
@@ -344,8 +349,10 @@ impl ContourApp {
                 .collect();
             sources.sort_unstable();
             sources.dedup();
-            let shapes: Vec<crate::document::Shape> =
-                sources.iter().map(|&i| self.doc.shapes[i].clone()).collect();
+            let shapes: Vec<crate::document::Shape> = sources
+                .iter()
+                .map(|&i| self.doc.shapes[i].clone())
+                .collect();
             let faces = crate::shapebuilder::build_faces(&shapes);
             if sources.len() < 2 || faces.is_empty() {
                 self.status = "Shape Builder: select two or more overlapping shapes".into();
@@ -400,7 +407,7 @@ impl ContourApp {
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, s)| s.visible() && s.hit(x, y, tol))
+            .find(|(_, s)| s.selectable() && s.hit(x, y, tol))
             .map(|(i, _)| i)
         else {
             return;
@@ -582,7 +589,7 @@ impl ContourApp {
                     .iter()
                     .enumerate()
                     .rev()
-                    .find(|(_, s)| s.visible() && s.hit(x, y, tol))
+                    .find(|(_, s)| s.selectable() && s.hit(x, y, tol))
                     .map(|(i, _)| i);
                 if let Some(i) = hit {
                     if !self.is_selected(i) {
@@ -677,7 +684,7 @@ impl ContourApp {
                     .iter()
                     .enumerate()
                     .rev()
-                    .find(|(_, s)| s.visible() && s.hit(x, y, tol))
+                    .find(|(_, s)| s.selectable() && s.hit(x, y, tol))
                     .map(|(i, _)| i);
                 let shift = response.ctx.input(|inp| inp.modifiers.shift);
                 if shift {
@@ -716,7 +723,8 @@ impl ContourApp {
         // a shift-marquee), then append intersected shapes not already present.
         let mut sel = self.inter.marquee_base.clone();
         for (i, s) in self.doc.shapes.iter().enumerate() {
-            if !s.visible() {
+            // Hidden or locked shapes can't be marquee-picked.
+            if !s.selectable() {
                 continue;
             }
             if let Some(b) = s.bounds() {
@@ -898,7 +906,7 @@ impl ContourApp {
                     .iter()
                     .enumerate()
                     .rev()
-                    .find(|(_, s)| s.visible() && s.hit(x, y, tol) && s.contour_count() > 0)
+                    .find(|(_, s)| s.selectable() && s.hit(x, y, tol) && s.contour_count() > 0)
                     .map(|(i, _)| i);
                 if let Some(i) = hit {
                     if Some(i) != self.primary() {
@@ -1229,6 +1237,9 @@ impl ContourApp {
                         omask_invert: false,
                         blend: None,
                         blend_step: false,
+                        name: None,
+                        locked: false,
+                        layer_color: None,
                     }
                 } else {
                     Shape::Ellipse {
@@ -1248,6 +1259,9 @@ impl ContourApp {
                         omask_invert: false,
                         blend: None,
                         blend_step: false,
+                        name: None,
+                        locked: false,
+                        layer_color: None,
                     }
                 })
             }
@@ -1271,6 +1285,9 @@ impl ContourApp {
                     omask_invert: false,
                     blend: None,
                     blend_step: false,
+                    name: None,
+                    locked: false,
+                    layer_color: None,
                 })
             }
             _ => None,

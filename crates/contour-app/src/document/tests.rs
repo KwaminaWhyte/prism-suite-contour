@@ -86,6 +86,9 @@ fn stroke_align_and_arrows_round_trip() {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     };
     {
         let st = s.stroke_style_mut();
@@ -128,6 +131,9 @@ fn blend_tags_round_trip() {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     };
     s.set_blend(Some(7));
     s.set_blend_step(true);
@@ -178,6 +184,9 @@ fn appearance_round_trips_on_shape_and_overrides_legacy() {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     };
     // Two stacked fills override the single legacy red fill.
     s.set_appearance(Some(Appearance {
@@ -235,6 +244,9 @@ fn gradient_fill_round_trips_on_shape() {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     };
     s.set_fill_gradient(Some(grad.clone()));
     let doc = Document {
@@ -594,6 +606,9 @@ fn shape_contour_count_and_access() {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     };
     assert_eq!(rect.contour_count(), 0);
 }
@@ -664,6 +679,9 @@ fn delete_anchor_in_refuses_below_two_points() {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     };
     assert!(!path.delete_anchor_in(0, 0));
     assert_eq!(path.contour(0).unwrap().0.len(), 2);
@@ -690,6 +708,9 @@ fn open_path() -> Shape {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     }
 }
 
@@ -769,6 +790,9 @@ fn axis_aligned_scale_keeps_rect_a_rect() {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     };
     // Scale ×2 about the origin.
     s.apply_affine(&Affine::scale(2.0, 2.0));
@@ -799,6 +823,9 @@ fn flip_keeps_rect_normalized() {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     };
     // Horizontal flip about x = 30 (the rect's centre): bounds unchanged,
     // width/height stay positive.
@@ -832,6 +859,9 @@ fn rotation_converts_rect_to_path() {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     };
     s.apply_affine(&Affine::rotate_about(0.5, 5.0, 5.0));
     assert!(
@@ -863,6 +893,9 @@ fn rotation_preserves_rect_center() {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     };
     let before = s.bounds().unwrap();
     let (cx0, cy0) = (before.x + before.w * 0.5, before.y + before.h * 0.5);
@@ -895,6 +928,9 @@ fn ellipse_to_path_round_trips_bounds() {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     };
     let p = s.to_path();
     let pb = p.bounds().unwrap();
@@ -928,6 +964,9 @@ fn path_handles_transform_by_linear_part() {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     };
     s.apply_affine(&Affine::translate(100.0, 50.0));
     if let Shape::Path {
@@ -1002,6 +1041,9 @@ fn line_ignores_gradient_fill() {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     };
     line.set_fill_gradient(Some(Gradient::two_stop(
         GradientKind::Linear,
@@ -1052,6 +1094,9 @@ fn group_accessor_covers_every_variant() {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     };
     line.set_group(Some(3));
     assert_eq!(line.group(), Some(3));
@@ -1081,6 +1126,9 @@ fn to_path_preserves_group() {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     };
     assert_eq!(r.to_path().group(), Some(42));
 
@@ -1112,6 +1160,9 @@ fn with_outline_inherits_paint_and_clears_clip() {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     };
     s.set_mask(true);
     let ring = vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)];
@@ -1158,6 +1209,9 @@ fn clip_rect(rect: [f32; 4], clip: Option<u64>, mask: bool) -> Shape {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     }
 }
 
@@ -1261,6 +1315,9 @@ fn omask_rect(rect: [f32; 4], fill: [f32; 4], omask: Option<u64>, mask: bool) ->
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     }
 }
 
@@ -1331,6 +1388,9 @@ fn swatch_rect(fill: [f32; 4], stroke: [f32; 4]) -> Shape {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     }
 }
 
@@ -1445,6 +1505,9 @@ fn donut(fill_rule: FillRule) -> Shape {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     }
 }
 
@@ -1575,4 +1638,136 @@ fn compound_subpath_serde_defaults() {
         }
         _ => panic!("expected Compound"),
     }
+}
+
+/// Build a plain 10×10 red rectangle at the origin for the Layers-panel tests.
+fn layer_rect() -> Shape {
+    Shape::Rect {
+        rect: [0.0, 0.0, 10.0, 10.0],
+        fill: [1.0, 0.0, 0.0, 1.0],
+        fill_gradient: None,
+        stroke: [0.0, 0.0, 0.0, 1.0],
+        stroke_w: 1.0,
+        stroke_style: StrokeStyle::default(),
+        appearance: None,
+        visible: true,
+        group: None,
+        clip: None,
+        mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
+        blend: None,
+        blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
+    }
+}
+
+/// A **locked** shape is excluded from selection / hit-testing via the shared
+/// [`Shape::selectable`] gate (it still reports `visible`).
+#[test]
+fn locked_shape_is_not_selectable() {
+    let mut s = layer_rect();
+    assert!(s.selectable(), "an unlocked, visible shape is selectable");
+    s.set_locked(true);
+    assert!(s.locked());
+    assert!(s.visible(), "locking doesn't change visibility");
+    assert!(!s.selectable(), "a locked shape can't be selected / picked");
+    // It still geometrically contains the point — only the *gate* blocks the pick.
+    assert!(s.hit(5.0, 5.0, 1.0), "geometry is unchanged by the lock");
+    s.toggle_locked();
+    assert!(s.selectable(), "unlocking restores selectability");
+}
+
+/// A **hidden** shape is excluded from selection / hit-testing via the shared
+/// gate (the canvas pick paths use `selectable()`, the renderers use `visible()`).
+#[test]
+fn hidden_shape_is_not_selectable() {
+    let mut s = layer_rect();
+    s.toggle_visible();
+    assert!(!s.visible());
+    assert!(!s.selectable(), "a hidden shape can't be picked");
+    // The hit-test geometry itself is unaffected; the gate is what excludes it.
+    assert!(s.hit(5.0, 5.0, 1.0));
+}
+
+/// `selectable()` requires **both** visible and unlocked.
+#[test]
+fn selectable_requires_visible_and_unlocked() {
+    let mut s = layer_rect();
+    s.set_locked(true);
+    s.toggle_visible(); // now hidden AND locked
+    assert!(!s.selectable());
+    s.set_locked(false);
+    assert!(!s.selectable(), "still hidden");
+    s.toggle_visible(); // now visible AND unlocked
+    assert!(s.selectable());
+}
+
+/// The new Layers-panel metadata (name / locked / layer-colour) round-trips
+/// through serde on a Shape, alongside the existing `visible` flag.
+#[test]
+fn layer_metadata_round_trips() {
+    let mut s = layer_rect();
+    s.set_name("Hero badge");
+    s.set_locked(true);
+    s.set_layer_color(Some([0.2, 0.4, 0.6, 1.0]));
+    s.toggle_visible(); // hidden
+    let doc = Document {
+        shapes: vec![s],
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&doc).unwrap();
+    let back: Document = serde_json::from_str(&json).unwrap();
+    let r = &back.shapes[0];
+    assert_eq!(r.name(), Some("Hero badge"));
+    assert_eq!(r.display_name(), "Hero badge");
+    assert!(r.locked());
+    assert!(!r.visible());
+    assert_eq!(r.layer_color(), Some([0.2, 0.4, 0.6, 1.0]));
+}
+
+/// A pre-Layers-panel `.contour` (no `name` / `locked` / `layer_color` keys)
+/// deserializes with the additive defaults: unnamed (falls back to the type
+/// label), unlocked, no layer colour — so older files load unchanged.
+#[test]
+fn legacy_document_defaults_layer_metadata() {
+    let json = r#"{"shapes":[
+        {"Rect":{"rect":[0,0,10,10],"fill":[1,0,0,1],"stroke":[0,0,0,1],"stroke_w":2}}
+    ]}"#;
+    let doc: Document = serde_json::from_str(json).unwrap();
+    let r = &doc.shapes[0];
+    assert_eq!(r.name(), None, "no stored name");
+    assert_eq!(r.display_name(), "Rectangle", "falls back to the type label");
+    assert!(!r.locked(), "unlocked by default");
+    assert_eq!(r.layer_color(), None, "no layer colour by default");
+    assert!(r.selectable(), "a legacy shape is selectable");
+}
+
+/// A blank name clears back to the type label (stored as `None`, not `""`).
+#[test]
+fn blank_name_clears_to_label() {
+    let mut s = layer_rect();
+    s.set_name("Renamed");
+    assert_eq!(s.name(), Some("Renamed"));
+    s.set_name("   ");
+    assert_eq!(s.name(), None, "a blank name is cleared");
+    assert_eq!(s.display_name(), "Rectangle");
+}
+
+/// `to_path` carries the Layers-panel metadata onto the converted path so a
+/// rotated rectangle (which rasterises to a `Path`) keeps its name / lock /
+/// colour.
+#[test]
+fn to_path_preserves_layer_metadata() {
+    let mut s = layer_rect();
+    s.set_name("Box");
+    s.set_locked(true);
+    s.set_layer_color(Some([0.1, 0.2, 0.3, 1.0]));
+    let p = s.to_path();
+    assert_eq!(p.name(), Some("Box"));
+    assert!(p.locked());
+    assert_eq!(p.layer_color(), Some([0.1, 0.2, 0.3, 1.0]));
 }

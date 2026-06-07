@@ -264,6 +264,9 @@ pub fn interpolate_shape(a: &Shape, b: &Shape, t: f32) -> Shape {
         omask_invert: false,
         blend: None,
         blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
     }
 }
 
@@ -328,6 +331,9 @@ mod tests {
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         }
     }
 
@@ -352,6 +358,9 @@ mod tests {
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         }
     }
 
@@ -423,6 +432,9 @@ mod tests {
             omask_invert: false,
             blend: None,
             blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         };
         let pts = resample(&circle, 16);
         assert_eq!(pts.len(), 16);
