@@ -739,6 +739,8 @@ impl ContourApp {
                         omask: None,
                         omask_path: false,
                         omask_invert: false,
+                        blend: None,
+                        blend_step: false,
                     }
                 } else {
                     Shape::Ellipse {
@@ -756,6 +758,8 @@ impl ContourApp {
                         omask: None,
                         omask_path: false,
                         omask_invert: false,
+                        blend: None,
+                        blend_step: false,
                     }
                 })
             }
@@ -777,6 +781,8 @@ impl ContourApp {
                     omask: None,
                     omask_path: false,
                     omask_invert: false,
+                    blend: None,
+                    blend_step: false,
                 })
             }
             _ => None,

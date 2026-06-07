@@ -123,6 +123,11 @@ pub const CLIP_MAKE: &str = ph::CROP;
 /// Release a clipping mask (restore the clipped originals).
 pub const CLIP_RELEASE: &str = ph::SCISSORS;
 
+// --- Blend ------------------------------------------------------------------
+
+/// Make a blend (interpolate intermediate objects between two shapes).
+pub const BLEND: &str = ph::LINE_SEGMENTS;
+
 // --- Boolean ops ------------------------------------------------------------
 
 /// Union of two shapes.

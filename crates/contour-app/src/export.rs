@@ -950,6 +950,8 @@ mod tests {
                     omask: None,
                     omask_path: false,
                     omask_invert: false,
+                    blend: None,
+                    blend_step: false,
                 },
                 Shape::Path {
                     points: vec![(60.0, 60.0), (90.0, 60.0), (90.0, 90.0)],
@@ -968,6 +970,8 @@ mod tests {
                     omask: None,
                     omask_path: false,
                     omask_invert: false,
+                    blend: None,
+                    blend_step: false,
                 },
             ],
             ..Default::default()
@@ -1058,6 +1062,8 @@ mod tests {
                 omask: None,
                 omask_path: false,
                 omask_invert: false,
+                blend: None,
+                blend_step: false,
             }],
             ..Default::default()
         }
@@ -1109,6 +1115,8 @@ mod tests {
                 omask: None,
                 omask_path: false,
                 omask_invert: false,
+                blend: None,
+                blend_step: false,
             }],
             ..Default::default()
         }
@@ -1183,6 +1191,8 @@ mod tests {
             omask: None,
             omask_path: false,
             omask_invert: false,
+            blend: None,
+            blend_step: false,
         };
         s.set_appearance(Some(Appearance {
             fills: vec![
@@ -1228,6 +1238,8 @@ mod tests {
             omask: None,
             omask_path: false,
             omask_invert: false,
+            blend: None,
+            blend_step: false,
         };
         // Bottom red, top opaque green → centre reads green.
         s.set_appearance(Some(Appearance {
@@ -1273,6 +1285,8 @@ mod tests {
             omask: None,
             omask_path: false,
             omask_invert: false,
+            blend: None,
+            blend_step: false,
         };
         // Bottom 60% grey, top 60% grey Multiply → 0.36 grey (much darker than
         // either layer alone, which a source-over top fill could never produce).
@@ -1321,6 +1335,8 @@ mod tests {
             omask: None,
             omask_path: false,
             omask_invert: false,
+            blend: None,
+            blend_step: false,
         };
         s.set_appearance(Some(Appearance {
             fills: vec![
@@ -1366,6 +1382,8 @@ mod tests {
             omask,
             omask_path: mask,
             omask_invert: false,
+            blend: None,
+            blend_step: false,
         }
     }
 
@@ -1445,6 +1463,8 @@ mod tests {
             omask: None,
             omask_path: false,
             omask_invert: false,
+            blend: None,
+            blend_step: false,
         };
         s.set_appearance(Some(Appearance {
             fills: vec![Fill::solid([1.0, 0.0, 0.0, 1.0])],

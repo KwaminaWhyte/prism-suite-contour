@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Blend tool — `Object ▸ Blend ▸ Make / Release / Expand`** (Illustrator's
+  Object Blend, specified-steps mode). Select two objects and Make generates *N*
+  intermediate objects that morph between them, interpolating **position**, **path
+  geometry**, and **appearance** together:
+  - **Geometry.** Both outlines are resampled to a common point count along
+    **arc length** with `kurbo` (`PathSeg::arclen` / `inv_arclen` / `eval`), so
+    two paths with *different anchor counts* still interpolate corresponding
+    points; each step linearly interpolates the matched points (point-by-point),
+    so position and shape blend at once. Closed↔closed stays closed and open↔open
+    stays open; the sample count adapts to the more complex end (clamped 8–256).
+  - **Appearance.** Each step's fill colour, stroke colour, per-channel **opacity**
+    (alpha), and stroke width interpolate linearly in the existing straight-sRGB
+    colour space (reusing the gradient `lerp_color`) — so a red shape blended with
+    a blue one steps through purple, a solid→transparent end fades out, etc.
+  - **Expand-on-create, releasable.** The intermediate shapes are generated as
+    real `Path` objects spliced between the two ends; the two ends plus the steps
+    are tagged with a shared blend-set id (additive `blend` / `blend_step`,
+    `#[serde(default)]`). **Release** deletes the generated steps and restores the
+    two ends; **Expand** detaches the steps into independent objects. One undo
+    step each.
+  - **UI.** A "Blend" submenu under Object with a **Steps** count control (1–64)
+    plus Make / Release / Expand, enable-gated on the selection. New `blend.rs`
+    module holds the pure resample / interpolate / step-generation math, all
+    unit-tested with no egui / GPU context: arc-length resample lands *N* points
+    on a line and on a circle (sub-pixel), interpolating identical shapes
+    reproduces them, a two-line blend's middle is the geometric midpoint, colour /
+    opacity / width midpoints are correct, steps space `t` evenly and exclude the
+    ends, and the `blend` tags round-trip through serde (back-compat verified —
+    pre-blend `.contour` files load un-blended).
+  - **Deferred** (noted as gaps): a persistent **live re-blend** (re-running when
+    an end moves — this pass is expand-on-create); **smooth-color** (spread-steps)
+    mode; **blend along a spine** path; bezier-**handle** interpolation (steps are
+    corner paths today); **point-correspondence rotation** (index-aligned
+    resamples); and **mixed open/closed** topology (blends as an open path).
+
 - **Real blend-mode compositing for the Appearance stack + opacity masks** —
   closes the long-standing "blend modes stored but only Normal composites" gap
   the Appearance / live-effects passes left open, and adds Illustrator's **Make

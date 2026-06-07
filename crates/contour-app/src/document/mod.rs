@@ -11,7 +11,7 @@ mod style;
 #[cfg(test)]
 mod tests;
 
-pub use path::{flatten, handle_at, nearest_segment, rects_intersect};
+pub use path::{bez_path, flatten, handle_at, nearest_segment, rects_intersect};
 pub use style::{LineCap, LineJoin, StrokeStyle};
 
 use crate::appearance::Appearance;
@@ -83,6 +83,16 @@ pub enum Shape {
         /// content of this set. Additive (`#[serde(default)]` → `false`).
         #[serde(default)]
         omask_invert: bool,
+        /// Blend-set membership: shapes sharing a `Some(id)` form one blend run
+        /// (the two ends plus the generated steps). Additive (`#[serde(default)]`
+        /// → `None`), so older files load un-blended.
+        #[serde(default)]
+        blend: Option<u64>,
+        /// Whether this shape is a *generated* intermediate step of its blend set
+        /// (vs. one of the two original ends). Release deletes the steps and keeps
+        /// the ends. Additive (`#[serde(default)]` → `false`).
+        #[serde(default)]
+        blend_step: bool,
     },
     Ellipse {
         rect: [f32; 4],
@@ -109,6 +119,10 @@ pub enum Shape {
         omask_path: bool,
         #[serde(default)]
         omask_invert: bool,
+        #[serde(default)]
+        blend: Option<u64>,
+        #[serde(default)]
+        blend_step: bool,
     },
     Line {
         p0: (f32, f32),
@@ -133,6 +147,10 @@ pub enum Shape {
         omask_path: bool,
         #[serde(default)]
         omask_invert: bool,
+        #[serde(default)]
+        blend: Option<u64>,
+        #[serde(default)]
+        blend_step: bool,
     },
     Path {
         points: Vec<(f32, f32)>,
@@ -169,6 +187,10 @@ pub enum Shape {
         omask_path: bool,
         #[serde(default)]
         omask_invert: bool,
+        #[serde(default)]
+        blend: Option<u64>,
+        #[serde(default)]
+        blend_step: bool,
     },
 }
 
@@ -341,6 +363,55 @@ impl Shape {
         self.set_omask(None);
         self.set_omask_path(false);
         self.set_omask_invert(false);
+    }
+
+    /// The shape's blend-set id, if it belongs to one. Shapes sharing an id form
+    /// one blend run (the two ends plus generated intermediate steps).
+    pub fn blend(&self) -> Option<u64> {
+        match self {
+            Shape::Rect { blend, .. }
+            | Shape::Ellipse { blend, .. }
+            | Shape::Line { blend, .. }
+            | Shape::Path { blend, .. } => *blend,
+        }
+    }
+
+    /// Set (or clear, with `None`) the shape's blend-set membership.
+    pub fn set_blend(&mut self, b: Option<u64>) {
+        match self {
+            Shape::Rect { blend, .. }
+            | Shape::Ellipse { blend, .. }
+            | Shape::Line { blend, .. }
+            | Shape::Path { blend, .. } => *blend = b,
+        }
+    }
+
+    /// Whether this shape is a generated intermediate *step* of its blend set (as
+    /// opposed to one of the two original ends). Release deletes steps, keeps ends.
+    pub fn is_blend_step(&self) -> bool {
+        match self {
+            Shape::Rect { blend_step, .. }
+            | Shape::Ellipse { blend_step, .. }
+            | Shape::Line { blend_step, .. }
+            | Shape::Path { blend_step, .. } => *blend_step,
+        }
+    }
+
+    /// Flag (or unflag) this shape as a generated blend step.
+    pub fn set_blend_step(&mut self, s: bool) {
+        match self {
+            Shape::Rect { blend_step, .. }
+            | Shape::Ellipse { blend_step, .. }
+            | Shape::Line { blend_step, .. }
+            | Shape::Path { blend_step, .. } => *blend_step = s,
+        }
+    }
+
+    /// Clear both blend tags (id + step flag), releasing the shape from any blend
+    /// set. Used by `Object ▸ Blend ▸ Release` on the surviving ends.
+    pub fn clear_blend(&mut self) {
+        self.set_blend(None);
+        self.set_blend_step(false);
     }
 
     /// This shape's clip tag pair, for the pure [`clip`](crate::clip) helpers.
@@ -754,6 +825,9 @@ impl Shape {
             omask: self.omask(),
             omask_path: self.is_omask(),
             omask_invert: self.omask_invert(),
+            // Carry blend tags through so a clipped blend member stays in its set.
+            blend: self.blend(),
+            blend_step: self.is_blend_step(),
         }
     }
 
@@ -779,6 +853,8 @@ impl Shape {
                 omask,
                 omask_path,
                 omask_invert,
+                blend,
+                blend_step,
             } => {
                 let pts = vec![
                     (rect[0], rect[1]),
@@ -804,6 +880,8 @@ impl Shape {
                     omask: *omask,
                     omask_path: *omask_path,
                     omask_invert: *omask_invert,
+                    blend: *blend,
+                    blend_step: *blend_step,
                 }
             }
             Shape::Ellipse {
@@ -821,6 +899,8 @@ impl Shape {
                 omask,
                 omask_path,
                 omask_invert,
+                blend,
+                blend_step,
             } => {
                 // Four anchors at the extrema with the classic 0.5523 cubic
                 // tangent so the path traces a smooth ellipse.
@@ -860,6 +940,8 @@ impl Shape {
                     omask: *omask,
                     omask_path: *omask_path,
                     omask_invert: *omask_invert,
+                    blend: *blend,
+                    blend_step: *blend_step,
                 }
             }
             Shape::Line {
@@ -876,6 +958,8 @@ impl Shape {
                 omask,
                 omask_path,
                 omask_invert,
+                blend,
+                blend_step,
             } => Shape::Path {
                 points: vec![*p0, *p1],
                 closed: false,
@@ -893,6 +977,8 @@ impl Shape {
                 omask: *omask,
                 omask_path: *omask_path,
                 omask_invert: *omask_invert,
+                blend: *blend,
+                blend_step: *blend_step,
             },
         }
     }

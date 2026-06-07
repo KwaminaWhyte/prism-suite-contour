@@ -397,6 +397,142 @@ impl ContourApp {
         changed
     }
 
+    // --- Blend (Object ▸ Blend) ----------------------------------------------
+
+    /// The per-shape blend-set tags in paint order, for the pure [`blend`]
+    /// helpers.
+    pub(super) fn blend_tags(&self) -> Vec<Option<u64>> {
+        self.doc.shapes.iter().map(|s| s.blend()).collect()
+    }
+
+    /// Whether the selection can be blended (exactly two distinct un-blended
+    /// shapes). Drives menu / button enablement.
+    pub(super) fn can_make_blend(&self) -> bool {
+        crate::blend::can_make(&self.blend_tags(), &self.selection)
+    }
+
+    /// Whether the selection touches any blend set (so Release / Expand is useful).
+    pub(super) fn can_release_blend(&self) -> bool {
+        crate::blend::can_release(&self.blend_tags(), &self.selection)
+    }
+
+    /// Make a blend from the two selected objects (Illustrator's
+    /// `Object ▸ Blend ▸ Make`, specified-steps mode): generate `self.blend_steps`
+    /// intermediate shapes that morph between them — interpolating position, path
+    /// geometry (arc-length resampled, point-by-point), and appearance (fill /
+    /// stroke colour + opacity + stroke width) — and insert them, in order,
+    /// between the two ends. The two ends plus the generated steps are tagged with
+    /// a fresh blend-set id so they select / move as a unit and **Release** can
+    /// undo it. **Expand-on-create**: the steps are real objects (a live re-blend
+    /// when an end moves is a noted gap). One undo step; the new run is selected.
+    pub(super) fn make_blend(&mut self) {
+        if !self.can_make_blend() {
+            self.status = "Blend: select exactly two un-blended objects".into();
+            return;
+        }
+        // The two ends in paint order: lower index is the back end (t→0), higher
+        // is the front end (t→1).
+        let mut sel: Vec<usize> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|&i| i < self.doc.shapes.len())
+            .collect();
+        sel.sort_unstable();
+        sel.dedup();
+        let (lo, hi) = (sel[0], sel[1]);
+
+        let steps = self.blend_steps;
+        let mut a = self.doc.shapes[lo].clone();
+        let mut b = self.doc.shapes[hi].clone();
+        let mut generated = crate::blend::make_steps(&a, &b, steps);
+
+        self.checkpoint();
+        let id = crate::blend::next_blend_id(&self.blend_tags());
+
+        // Tag the two ends (set members, not steps) and every generated step.
+        a.set_blend(Some(id));
+        b.set_blend(Some(id));
+        for g in generated.iter_mut() {
+            g.set_blend(Some(id));
+            g.set_blend_step(true);
+        }
+
+        // Gather the whole run into one contiguous block — [a, step1 … stepN, b]
+        // — anchored where the back end was, so the blend reads as a unit even if
+        // the two ends weren't adjacent. Remove the two ends (highest first to
+        // keep indices valid), then splice the ordered block in at the back end's
+        // slot, mirroring how grouping re-stacks a selection.
+        self.doc.shapes.remove(hi);
+        self.doc.shapes.remove(lo);
+        let insert_at = lo; // `lo < hi`, so removing `hi` first leaves `lo` valid.
+        let mut block: Vec<Shape> = Vec::with_capacity(generated.len() + 2);
+        block.push(a);
+        block.extend(generated);
+        block.push(b);
+        let run_len = block.len();
+        for (k, shape) in block.into_iter().enumerate() {
+            self.doc.shapes.insert(insert_at + k, shape);
+        }
+        self.selection = (insert_at..insert_at + run_len).collect();
+        let n_steps = run_len - 2;
+        self.status = format!(
+            "Blended ({n_steps} step{})",
+            if n_steps == 1 { "" } else { "s" }
+        );
+    }
+
+    /// Release every blend set the selection touches (Illustrator's
+    /// `Object ▸ Blend ▸ Release`): delete the generated intermediate steps and
+    /// clear the blend tags on the surviving ends, restoring the two originals.
+    /// One undo step.
+    pub(super) fn release_blend(&mut self) {
+        if !self.can_release_blend() {
+            return;
+        }
+        self.checkpoint();
+        let ids = crate::blend::selected_blend_ids(&self.blend_tags(), &self.selection);
+        // Drop the generated steps of the touched sets (highest index first so the
+        // lower indices stay valid), then clear tags on the surviving ends.
+        let to_remove: Vec<usize> = self
+            .doc
+            .shapes
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                s.is_blend_step() && s.blend().is_some_and(|b| ids.binary_search(&b).is_ok())
+            })
+            .map(|(i, _)| i)
+            .collect();
+        for &i in to_remove.iter().rev() {
+            self.remove_shape(i);
+        }
+        for s in self.doc.shapes.iter_mut() {
+            if s.blend().is_some_and(|b| ids.binary_search(&b).is_ok()) {
+                s.clear_blend();
+            }
+        }
+        self.status = "Released blend".into();
+    }
+
+    /// Expand the touched blend sets (Illustrator's `Object ▸ Blend ▸ Expand`):
+    /// since the steps are already real objects, this simply clears the blend tags
+    /// — including the step flag — so the run becomes a set of plain, independent
+    /// objects. One undo step.
+    pub(super) fn expand_blend(&mut self) {
+        if !self.can_release_blend() {
+            return;
+        }
+        self.checkpoint();
+        let ids = crate::blend::selected_blend_ids(&self.blend_tags(), &self.selection);
+        for s in self.doc.shapes.iter_mut() {
+            if s.blend().is_some_and(|b| ids.binary_search(&b).is_ok()) {
+                s.clear_blend();
+            }
+        }
+        self.status = "Expanded blend".into();
+    }
+
     // --- Undo / redo ---------------------------------------------------------
 
     /// Record the current document as an undo checkpoint *before* applying a
@@ -725,6 +861,8 @@ impl ContourApp {
                 omask: None,
                 omask_path: false,
                 omask_invert: false,
+                blend: None,
+                blend_step: false,
             });
             self.select_only(Some(self.doc.shapes.len() - 1));
         } else {

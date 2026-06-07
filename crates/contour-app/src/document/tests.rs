@@ -35,6 +35,43 @@ fn loads_legacy_document() {
     // A pre-appearance document loads with no explicit stack on any shape.
     assert!(doc.shapes[0].appearance().is_none());
     assert!(doc.shapes[1].appearance().is_none());
+    // A pre-blend document loads with every shape un-blended.
+    assert_eq!(doc.shapes[0].blend(), None);
+    assert!(!doc.shapes[0].is_blend_step());
+}
+
+/// Blend-set tags round-trip through serde on a Shape (back-compat: the new
+/// `blend` / `blend_step` fields are additive, defaulting to un-blended).
+#[test]
+fn blend_tags_round_trip() {
+    let mut s = Shape::Rect {
+        rect: [0.0, 0.0, 10.0, 10.0],
+        fill: [1.0, 0.0, 0.0, 1.0],
+        fill_gradient: None,
+        stroke: [0.0, 0.0, 0.0, 1.0],
+        stroke_w: 2.0,
+        stroke_style: StrokeStyle::default(),
+        appearance: None,
+        visible: true,
+        group: None,
+        clip: None,
+        mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
+        blend: None,
+        blend_step: false,
+    };
+    s.set_blend(Some(7));
+    s.set_blend_step(true);
+    let doc = Document {
+        shapes: vec![s],
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&doc).unwrap();
+    let back: Document = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.shapes[0].blend(), Some(7));
+    assert!(back.shapes[0].is_blend_step());
 }
 
 /// A shape with no explicit `appearance` migrates its legacy single fill/stroke
@@ -72,6 +109,8 @@ fn appearance_round_trips_on_shape_and_overrides_legacy() {
         omask: None,
         omask_path: false,
         omask_invert: false,
+        blend: None,
+        blend_step: false,
     };
     // Two stacked fills override the single legacy red fill.
     s.set_appearance(Some(Appearance {
@@ -410,6 +449,8 @@ fn axis_aligned_scale_keeps_rect_a_rect() {
         omask: None,
         omask_path: false,
         omask_invert: false,
+        blend: None,
+        blend_step: false,
     };
     // Scale ×2 about the origin.
     s.apply_affine(&Affine::scale(2.0, 2.0));
@@ -438,6 +479,8 @@ fn flip_keeps_rect_normalized() {
         omask: None,
         omask_path: false,
         omask_invert: false,
+        blend: None,
+        blend_step: false,
     };
     // Horizontal flip about x = 30 (the rect's centre): bounds unchanged,
     // width/height stay positive.
@@ -469,6 +512,8 @@ fn rotation_converts_rect_to_path() {
         omask: None,
         omask_path: false,
         omask_invert: false,
+        blend: None,
+        blend_step: false,
     };
     s.apply_affine(&Affine::rotate_about(0.5, 5.0, 5.0));
     assert!(
@@ -498,6 +543,8 @@ fn rotation_preserves_rect_center() {
         omask: None,
         omask_path: false,
         omask_invert: false,
+        blend: None,
+        blend_step: false,
     };
     let before = s.bounds().unwrap();
     let (cx0, cy0) = (before.x + before.w * 0.5, before.y + before.h * 0.5);
@@ -528,6 +575,8 @@ fn ellipse_to_path_round_trips_bounds() {
         omask: None,
         omask_path: false,
         omask_invert: false,
+        blend: None,
+        blend_step: false,
     };
     let p = s.to_path();
     let pb = p.bounds().unwrap();
@@ -559,6 +608,8 @@ fn path_handles_transform_by_linear_part() {
         omask: None,
         omask_path: false,
         omask_invert: false,
+        blend: None,
+        blend_step: false,
     };
     s.apply_affine(&Affine::translate(100.0, 50.0));
     if let Shape::Path {
@@ -631,6 +682,8 @@ fn line_ignores_gradient_fill() {
         omask: None,
         omask_path: false,
         omask_invert: false,
+        blend: None,
+        blend_step: false,
     };
     line.set_fill_gradient(Some(Gradient::two_stop(
         GradientKind::Linear,
@@ -679,6 +732,8 @@ fn group_accessor_covers_every_variant() {
         omask: None,
         omask_path: false,
         omask_invert: false,
+        blend: None,
+        blend_step: false,
     };
     line.set_group(Some(3));
     assert_eq!(line.group(), Some(3));
@@ -706,6 +761,8 @@ fn to_path_preserves_group() {
         omask: None,
         omask_path: false,
         omask_invert: false,
+        blend: None,
+        blend_step: false,
     };
     assert_eq!(r.to_path().group(), Some(42));
 
@@ -735,6 +792,8 @@ fn with_outline_inherits_paint_and_clears_clip() {
         omask: None,
         omask_path: false,
         omask_invert: false,
+        blend: None,
+        blend_step: false,
     };
     s.set_mask(true);
     let ring = vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)];
@@ -779,6 +838,8 @@ fn clip_rect(rect: [f32; 4], clip: Option<u64>, mask: bool) -> Shape {
         omask: None,
         omask_path: false,
         omask_invert: false,
+        blend: None,
+        blend_step: false,
     }
 }
 
@@ -880,6 +941,8 @@ fn omask_rect(rect: [f32; 4], fill: [f32; 4], omask: Option<u64>, mask: bool) ->
         omask,
         omask_path: mask,
         omask_invert: false,
+        blend: None,
+        blend_step: false,
     }
 }
 
@@ -948,6 +1011,8 @@ fn swatch_rect(fill: [f32; 4], stroke: [f32; 4]) -> Shape {
         omask: None,
         omask_path: false,
         omask_invert: false,
+        blend: None,
+        blend_step: false,
     }
 }
 

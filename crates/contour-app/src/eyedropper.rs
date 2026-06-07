@@ -97,6 +97,8 @@ mod tests {
             omask: None,
             omask_path: false,
             omask_invert: false,
+            blend: None,
+            blend_step: false,
         }
     }
 
@@ -116,6 +118,8 @@ mod tests {
             omask: None,
             omask_path: false,
             omask_invert: false,
+            blend: None,
+            blend_step: false,
         }
     }
 
@@ -134,6 +138,8 @@ mod tests {
             omask: None,
             omask_path: false,
             omask_invert: false,
+            blend: None,
+            blend_step: false,
         }
     }
 

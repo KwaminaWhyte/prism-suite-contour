@@ -9,6 +9,7 @@ mod app;
 mod appearance;
 mod arrange;
 mod artboard;
+mod blend;
 mod boolean;
 mod canvas;
 mod clip;

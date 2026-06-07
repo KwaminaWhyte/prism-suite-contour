@@ -171,7 +171,7 @@ app-agnostic. Phases 0–1 are largely **done** (see §1); the rest is the road 
 - [ ] **More creation tools** (M): polygon, star, rounded-rect, arc, spiral, rectangular/polar grid, **Pencil** (freehand fit), **Curvature** tool, **Blob brush**, line/segment
 - [ ] **Path editing** (M): join, average, simplify (reduce anchors), smooth, **scissors**, **knife**, reshape, offset path, outline stroke
 - [ ] **Width / Warp-family tools** (M): width, warp, twirl, pucker, bloat, scallop, crystallize, wrinkle
-- [ ] **Blends** (M): blend tool between objects (steps/smooth-color), blend along a spine path
+- [~] **Blends** (M): blend tool between objects (steps/smooth-color), blend along a spine path. *(**Make / Release / Expand** (`Object ▸ Blend`, **specified-steps** mode) Done: generate *N* intermediate objects morphing between two selected shapes — **arc-length resample** both outlines to a common point count via `kurbo` (handles differing anchor counts), point-by-point geometry interpolation, plus fill/stroke colour + opacity + width interpolation (linear, straight sRGB). Expand-on-create (real `Path` steps spliced between the ends); additive `blend` / `blend_step` tags (`#[serde(default)]`); Steps-count UI in the Object menu; resample / interpolate / step math unit-tested. **Still open:** persistent **live re-blend** (re-blend when an end moves), **smooth-color** (spread-steps) mode, **blend along a spine** path, bezier-**handle** interpolation (steps are corner paths), point-correspondence rotation, and **mixed open/closed** topology.)*
 - [ ] **Envelope distort / puppet warp** (L): warp by shape / mesh / top-object
 - [ ] Tests: compound-path fill rules, shape-builder region picking, simplify error bound
 

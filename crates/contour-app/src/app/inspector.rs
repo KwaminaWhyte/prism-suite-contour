@@ -189,6 +189,50 @@ impl ContourApp {
                             }
                         });
                     });
+                    ui.menu_button("Blend", |ui| {
+                        // Specified-steps count for Make Blend.
+                        ui.horizontal(|ui| {
+                            ui.label("Steps");
+                            let mut steps = self.blend_steps as u32;
+                            if ui
+                                .add(egui::DragValue::new(&mut steps).speed(0.2).range(1..=64))
+                                .on_hover_text("Intermediate objects between the two ends")
+                                .changed()
+                            {
+                                self.blend_steps = steps as usize;
+                            }
+                        });
+                        ui.add_enabled_ui(self.can_make_blend(), |ui| {
+                            if ui
+                                .button(format!("{}  Make", icons::BLEND))
+                                .on_hover_text(
+                                    "Interpolate intermediate objects between two selected shapes",
+                                )
+                                .clicked()
+                            {
+                                self.make_blend();
+                                ui.close_menu();
+                            }
+                        });
+                        ui.add_enabled_ui(self.can_release_blend(), |ui| {
+                            if ui
+                                .button("Release")
+                                .on_hover_text("Delete the intermediate steps, keep the two ends")
+                                .clicked()
+                            {
+                                self.release_blend();
+                                ui.close_menu();
+                            }
+                            if ui
+                                .button("Expand")
+                                .on_hover_text("Detach the steps into independent objects")
+                                .clicked()
+                            {
+                                self.expand_blend();
+                                ui.close_menu();
+                            }
+                        });
+                    });
 
                     ui.separator();
                     ui.menu_button("Align", |ui| {
