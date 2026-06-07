@@ -369,11 +369,23 @@ fn scale_grad(g: &Gradient, opacity: f32) -> Gradient {
     g
 }
 
+/// Number of sub-stops to emit per gradient segment when a perceptual gradient is
+/// expanded for SVG / tiny-skia (both interpolate stops in straight-sRGB). 16 is
+/// visually indistinguishable from a continuous linear-light ramp.
+const PERCEPTUAL_SVG_SAMPLES: usize = 16;
+
 /// Emit a `<linearGradient>` / `<radialGradient>` def for `g` mapped onto the
 /// bounding box `bbox`, in user-space coordinates so the geometry is exact.
+///
+/// Perceptual (linear-light) gradients are pre-expanded into many straight-sRGB
+/// sub-stops ([`Gradient::render_stops`]) so SVG's sRGB stop interpolation
+/// reproduces the linear-light ramp. **Angle (conic) gradients have no SVG 1.1
+/// equivalent**, so they are approximated by a `linearGradient` oriented at the
+/// gradient's angle — a documented limitation (canvas + PNG render the true
+/// conic sweep; SVG falls back to a directional ramp).
 fn gradient_def(id: &str, g: &Gradient, bbox: &[f32; 4]) -> String {
     let stops: String = g
-        .sorted_stops()
+        .render_stops(PERCEPTUAL_SVG_SAMPLES)
         .iter()
         .map(|st| {
             let mut s = format!(
@@ -395,7 +407,8 @@ fn gradient_def(id: &str, g: &Gradient, bbox: &[f32; 4]) -> String {
         format!(" spreadMethod=\"{}\"", g.spread.svg())
     };
     match g.kind {
-        GradientKind::Linear => {
+        // Linear, and the Angle fallback (no SVG conic), both emit a linear def.
+        GradientKind::Linear | GradientKind::Angle => {
             let (a, b) = crate::gradient::linear_endpoints(bbox, g.angle);
             format!(
                 "<linearGradient id=\"{id}\" gradientUnits=\"userSpaceOnUse\" \
@@ -1115,6 +1128,10 @@ fn paint_appearance_skia(
                 continue;
             }
             let mut paint = TsPaint::default();
+            // Scratch + owned gradient must outlive `paint` (a conic Pattern
+            // shader borrows the scratch pixmap), so both are declared here.
+            let mut grad_scratch: Option<Pixmap> = None;
+            let grad_owned;
             match &fill.paint {
                 Paint::Solid(c) => {
                     let c = scale_alpha(*c, fill.opacity);
@@ -1124,8 +1141,8 @@ fn paint_appearance_skia(
                     paint.set_color(ts_color(c));
                 }
                 Paint::Gradient(g) => {
-                    let g = scale_grad(g, fill.opacity);
-                    match gradient_shader(&g, bbox) {
+                    grad_owned = scale_grad(g, fill.opacity);
+                    match gradient_shader(&grad_owned, bbox, &mut grad_scratch) {
                         Some(s) => paint.shader = s,
                         None => continue,
                     }
@@ -1143,6 +1160,10 @@ fn paint_appearance_skia(
             continue;
         }
         let mut paint = TsPaint::default();
+        // Scratch + owned gradient must outlive `paint` (conic Pattern borrows
+        // the scratch pixmap).
+        let mut grad_scratch: Option<Pixmap> = None;
+        let grad_owned;
         match &stroke.paint {
             Paint::Solid(c) => {
                 let c = scale_alpha(*c, stroke.opacity);
@@ -1152,8 +1173,8 @@ fn paint_appearance_skia(
                 paint.set_color(ts_color(c));
             }
             Paint::Gradient(g) => {
-                let g = scale_grad(g, stroke.opacity);
-                match gradient_shader(&g, bbox) {
+                grad_owned = scale_grad(g, stroke.opacity);
+                match gradient_shader(&grad_owned, bbox, &mut grad_scratch) {
                     Some(s) => paint.shader = s,
                     None => continue,
                 }
@@ -1232,15 +1253,41 @@ fn ts_spread(mode: SpreadMode) -> TsSpread {
     }
 }
 
+/// Sub-stops emitted per segment when expanding a perceptual gradient for
+/// tiny-skia (which interpolates stops in straight sRGB). Matches the SVG path.
+const PERCEPTUAL_SKIA_SAMPLES: usize = 16;
+
+/// Pure mapping from our [`Gradient`] (modeled on the shared
+/// `prism_core::gradient`) to tiny-skia [`GradientStop`]s: expand for perceptual
+/// interpolation ([`Gradient::render_stops`]), then convert each straight-sRGB
+/// stop colour to a tiny-skia [`Color`](TsColor). Factored out so the mapping is
+/// unit-testable without rasterizing.
+fn ts_stops(g: &Gradient, samples: usize) -> Vec<TsStop> {
+    g.render_stops(samples)
+        .iter()
+        .map(|s| TsStop::new(s.offset, ts_color(s.color)))
+        .collect()
+}
+
 /// Build a tiny-skia gradient [`Shader`] for `g` over the bounding box `bbox`.
 /// Returns `None` if the gradient is degenerate (tiny-skia falls back to the
 /// solid fill in that case).
-fn gradient_shader(g: &Gradient, bbox: &[f32; 4]) -> Option<Shader<'static>> {
-    let stops: Vec<TsStop> = g
-        .sorted_stops()
-        .iter()
-        .map(|s| TsStop::new(s.offset, ts_color(s.color)))
-        .collect();
+///
+/// Perceptual (linear-light) gradients are pre-expanded into straight-sRGB
+/// sub-stops ([`Gradient::render_stops`]) so tiny-skia's sRGB-space stop
+/// interpolation reproduces the linear-light ramp. **Angle (conic) gradients have
+/// no native tiny-skia shader**, so the conic sweep is rasterized into a `bbox`-
+/// sized pixmap via the shared [`prism_core::gradient`] primitive and returned as
+/// a `Pattern` shader (borrowing `scratch`, which must outlive the shader).
+fn gradient_shader<'a>(
+    g: &Gradient,
+    bbox: &[f32; 4],
+    scratch: &'a mut Option<Pixmap>,
+) -> Option<Shader<'a>> {
+    if g.kind == GradientKind::Angle {
+        return conic_pattern(g, bbox, scratch);
+    }
+    let stops = ts_stops(g, PERCEPTUAL_SKIA_SAMPLES);
     if stops.is_empty() {
         return None;
     }
@@ -1267,7 +1314,81 @@ fn gradient_shader(g: &Gradient, bbox: &[f32; 4]) -> Option<Shader<'static>> {
                 Transform::identity(),
             )
         }
+        GradientKind::Angle => unreachable!("handled above"),
     }
+}
+
+/// Rasterize a conic (angle) gradient into a `bbox`-sized pixmap (in document
+/// coordinates, offset to the bbox origin via the returned `Pattern` transform)
+/// and return it as a tiny-skia `Pattern` shader. The per-pixel conic sweep
+/// (with optional dither) reuses [`crate::gradient::angle_param`] + the
+/// gradient's own [`color_at`], so it tracks the perceptual / sRGB toggle and the
+/// canvas preview exactly. `scratch` owns the pixmap so the borrowed shader can
+/// outlive this call.
+fn conic_pattern<'a>(
+    g: &Gradient,
+    bbox: &[f32; 4],
+    scratch: &'a mut Option<Pixmap>,
+) -> Option<Shader<'a>> {
+    let w = bbox[2].ceil().max(1.0) as u32;
+    let h = bbox[3].ceil().max(1.0) as u32;
+    let mut pm = Pixmap::new(w, h)?;
+    {
+        let data = pm.pixels_mut();
+        for y in 0..h {
+            for x in 0..w {
+                // Document-space sample point (pixmap origin == bbox origin).
+                let px = bbox[0] + x as f32 + 0.5;
+                let py = bbox[1] + y as f32 + 0.5;
+                let mut t = crate::gradient::angle_param(bbox, g.angle, px, py);
+                if g.dither {
+                    t = (t + (bayer8(x, y) - 0.5) / 255.0).clamp(0.0, 1.0);
+                }
+                let c = g.color_at(t);
+                let a = c[3].clamp(0.0, 1.0);
+                // tiny-skia `PremultipliedColorU8` expects premultiplied bytes.
+                let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                data[(y * w + x) as usize] =
+                    tiny_skia::PremultipliedColorU8::from_rgba(
+                        to8(c[0] * a),
+                        to8(c[1] * a),
+                        to8(c[2] * a),
+                        to8(a),
+                    )
+                    .unwrap_or_else(|| {
+                        tiny_skia::PremultipliedColorU8::from_rgba(0, 0, 0, 0).unwrap()
+                    });
+            }
+        }
+    }
+    *scratch = Some(pm);
+    let pm_ref = scratch.as_ref().unwrap().as_ref();
+    Some(tiny_skia::Pattern::new(
+        pm_ref,
+        TsSpread::Pad,
+        tiny_skia::FilterQuality::Bilinear,
+        1.0,
+        // Shift the bbox-local pattern into document space.
+        Transform::from_translate(bbox[0], bbox[1]),
+    ))
+}
+
+/// Normalized Bayer 8×8 ordered-dither value in `[0, 1)` for pixel `(x, y)` — the
+/// same matrix the shared `prism_core::gradient` uses, so the dither pattern is
+/// consistent across the suite.
+fn bayer8(x: u32, y: u32) -> f32 {
+    const M: [[u8; 8]; 8] = [
+        [0, 32, 8, 40, 2, 34, 10, 42],
+        [48, 16, 56, 24, 50, 18, 58, 26],
+        [12, 44, 4, 36, 14, 46, 6, 38],
+        [60, 28, 52, 20, 62, 30, 54, 22],
+        [3, 35, 11, 43, 1, 33, 9, 41],
+        [51, 19, 59, 27, 49, 17, 57, 25],
+        [15, 47, 7, 39, 13, 45, 5, 37],
+        [63, 31, 55, 23, 61, 29, 53, 21],
+    ];
+    let v = M[(y & 7) as usize][(x & 7) as usize];
+    (v as f32 + 0.5) / 64.0
 }
 
 /// Map our document [`LineCap`] to tiny-skia's.
@@ -1637,6 +1758,92 @@ mod tests {
         let svg = to_svg(&gradient_doc(GradientKind::Radial), 100.0, 100.0);
         assert!(svg.contains("<radialGradient id=\"grad0_0\""), "svg: {svg}");
         assert!(svg.contains("fill=\"url(#grad0_0)\""), "svg: {svg}");
+    }
+
+    #[test]
+    fn svg_angle_gradient_falls_back_to_linear_def() {
+        // SVG 1.1 has no conic gradient, so Angle is exported as a linear def
+        // (documented limitation) — still a valid, referenced gradient.
+        let svg = to_svg(&gradient_doc(GradientKind::Angle), 100.0, 100.0);
+        assert!(svg.contains("<linearGradient id=\"grad0_0\""), "svg: {svg}");
+        assert!(svg.contains("fill=\"url(#grad0_0)\""), "svg: {svg}");
+        assert!(!svg.contains("<radialGradient"), "angle != radial");
+    }
+
+    #[test]
+    fn svg_perceptual_gradient_expands_into_many_stops() {
+        // A perceptual gradient is pre-expanded into many sRGB sub-stops so SVG's
+        // sRGB stop interpolation reproduces the linear-light ramp; an sRGB one
+        // keeps just its authored stops.
+        let mut doc = gradient_doc(GradientKind::Linear);
+        let count_stops = |svg: &str| svg.matches("<stop offset=").count();
+        if let Some(g) = doc.shapes[0].fill_gradient().cloned() {
+            // sRGB: exactly the 2 authored stops.
+            let mut srgb = g.clone();
+            srgb.interpolation = crate::gradient::Interpolation::Srgb;
+            doc.shapes[0].set_fill_gradient(Some(srgb));
+            let svg = to_svg(&doc, 100.0, 100.0);
+            assert_eq!(count_stops(&svg), 2, "sRGB keeps authored stops");
+            // Perceptual: expanded to PERCEPTUAL_SVG_SAMPLES+1 stops.
+            let mut perc = g;
+            perc.interpolation = crate::gradient::Interpolation::Perceptual;
+            doc.shapes[0].set_fill_gradient(Some(perc));
+            let svg = to_svg(&doc, 100.0, 100.0);
+            assert!(count_stops(&svg) > 2, "perceptual expands the stop list");
+        } else {
+            panic!("gradient_doc should have a gradient");
+        }
+    }
+
+    #[test]
+    fn ts_stops_maps_and_expands_correctly() {
+        // The pure mapping converts every Contour stop into one tiny-skia stop;
+        // its colour-space behaviour is the gradient's `render_stops` expansion
+        // (verified per-colour in gradient.rs). Here we lock the cardinality and
+        // the empty-gradient guard, since tiny-skia's stop fields are private.
+        let srgb = Gradient {
+            interpolation: crate::gradient::Interpolation::Srgb,
+            ..Gradient::two_stop(GradientKind::Linear, [1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 0.5])
+        };
+        assert_eq!(ts_stops(&srgb, 16).len(), 2, "sRGB maps 1:1");
+        assert_eq!(
+            ts_stops(&srgb, 16).len(),
+            srgb.render_stops(16).len(),
+            "one tiny-skia stop per Contour stop"
+        );
+
+        // Perceptual gradient: expanded to samples+1 tiny-skia stops.
+        let perc = Gradient {
+            interpolation: crate::gradient::Interpolation::Perceptual,
+            ..Gradient::two_stop(GradientKind::Linear, [0.0; 4], [1.0, 1.0, 1.0, 1.0])
+        };
+        assert_eq!(ts_stops(&perc, 8).len(), 9, "perceptual expands");
+
+        // An empty gradient yields no stops (the shader builder then bails out).
+        let empty = Gradient {
+            stops: vec![],
+            ..Gradient::default()
+        };
+        assert!(ts_stops(&empty, 16).is_empty());
+    }
+
+    #[test]
+    fn png_renders_angle_gradient_conic_sweep() {
+        // An Angle (conic) gradient sweeps around the centre, so opposite radial
+        // directions land at different parameters → different colours. Compare a
+        // point above the centre with one to the right.
+        let doc = gradient_doc(GradientKind::Angle);
+        let mut pixmap = Pixmap::new(100, 100).unwrap();
+        pixmap.fill(TsColor::WHITE);
+        draw_shape_skia(&mut pixmap, &doc.shapes[0], Transform::identity(), None);
+        let px = |x: u32, y: u32| {
+            let p = pixmap.pixel(x, y).unwrap();
+            (p.red(), p.green(), p.blue())
+        };
+        // Right of centre and below centre sit at different sweep angles.
+        let right = px(95, 50);
+        let down = px(50, 95);
+        assert_ne!(right, down, "conic sweep should vary by angle: {right:?} {down:?}");
     }
 
     #[test]

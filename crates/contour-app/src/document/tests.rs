@@ -201,6 +201,74 @@ fn appearance_round_trips_on_shape_and_overrides_legacy() {
     assert_eq!(back.shapes[0].fill_color(), Some([1.0, 0.0, 0.0, 1.0]));
 }
 
+/// A gradient fill (with the new Angle kind, perceptual interpolation, dither,
+/// multi-stop + per-stop opacity) round-trips through serde on a Shape unchanged.
+#[test]
+fn gradient_fill_round_trips_on_shape() {
+    use crate::gradient::{Gradient, GradientKind, GradientStop, Interpolation, SpreadMode};
+    let grad = Gradient {
+        kind: GradientKind::Angle,
+        stops: vec![
+            GradientStop::new(0.0, [1.0, 0.0, 0.0, 1.0]),
+            GradientStop::new(0.5, [0.0, 1.0, 0.0, 0.5]),
+            GradientStop::new(1.0, [0.0, 0.0, 1.0, 0.0]),
+        ],
+        angle: 45.0,
+        spread: SpreadMode::Reflect,
+        interpolation: Interpolation::Perceptual,
+        dither: true,
+    };
+    let mut s = Shape::Rect {
+        rect: [0.0, 0.0, 10.0, 10.0],
+        fill: [1.0, 0.0, 0.0, 1.0],
+        fill_gradient: None,
+        stroke: [0.0, 0.0, 0.0, 1.0],
+        stroke_w: 2.0,
+        stroke_style: StrokeStyle::default(),
+        appearance: None,
+        visible: true,
+        group: None,
+        clip: None,
+        mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
+        blend: None,
+        blend_step: false,
+    };
+    s.set_fill_gradient(Some(grad.clone()));
+    let doc = Document {
+        shapes: vec![s],
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&doc).unwrap();
+    let back: Document = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.shapes[0].fill_gradient(), Some(&grad));
+}
+
+/// A legacy gradient JSON (predating the `interpolation` / `dither` fields) loads
+/// with the back-compat defaults — sRGB interpolation + dither off — so older
+/// `.contour` files render byte-identically to how they were authored.
+#[test]
+fn legacy_gradient_loads_with_back_compat_defaults() {
+    use crate::gradient::{GradientKind, Interpolation};
+    // Note: no `interpolation` / `dither` keys, mirroring a file saved before the
+    // perceptual/dither feature landed.
+    let json = r#"{"shapes":[
+        {"Rect":{"rect":[0,0,10,10],"fill":[1,0,0,1],"stroke":[0,0,0,1],"stroke_w":1,
+                 "fill_gradient":{"kind":"Linear",
+                   "stops":[{"offset":0.0,"color":[0,0,0,1]},{"offset":1.0,"color":[1,1,1,1]}],
+                   "angle":0.0,"spread":"Pad"}}}
+    ]}"#;
+    let doc: Document = serde_json::from_str(json).unwrap();
+    let g = doc.shapes[0].fill_gradient().expect("gradient loaded");
+    assert_eq!(g.kind, GradientKind::Linear);
+    assert_eq!(g.stops.len(), 2);
+    // The absent fields take their back-compat defaults.
+    assert_eq!(g.interpolation, Interpolation::Srgb);
+    assert!(!g.dither);
+}
+
 /// Guides round-trip through serde and load back as the same variant.
 #[test]
 fn guides_round_trip() {

@@ -11,7 +11,7 @@ use crate::boolean::BoolFillRule;
 use crate::canvas::View;
 use crate::clipboard::Clipboard;
 use crate::document::{Document, Shape, StrokeStyle};
-use crate::gradient::{Gradient, GradientKind, GradientStop, SpreadMode};
+use crate::gradient::{Gradient, GradientKind, GradientStop, Interpolation, SpreadMode};
 use crate::history::History;
 use crate::snap::{SnapConfig, SnapResult};
 use crate::transform::Handle;
@@ -564,7 +564,7 @@ fn gradient_editor(ui: &mut egui::Ui, g: &mut Gradient) -> bool {
         egui::ComboBox::from_id_salt("grad_kind")
             .selected_text(g.kind.label())
             .show_ui(ui, |ui| {
-                for k in [GradientKind::Linear, GradientKind::Radial] {
+                for k in GradientKind::ALL {
                     if ui.selectable_value(&mut g.kind, k, k.label()).changed() {
                         changed = true;
                     }
@@ -581,8 +581,8 @@ fn gradient_editor(ui: &mut egui::Ui, g: &mut Gradient) -> bool {
             });
     });
 
-    // Angle (linear only).
-    if g.kind == GradientKind::Linear {
+    // Angle (drives linear direction and the conic sweep start; radial ignores it).
+    if g.kind == GradientKind::Linear || g.kind == GradientKind::Angle {
         ui.horizontal(|ui| {
             ui.label("Angle");
             if ui
@@ -593,6 +593,31 @@ fn gradient_editor(ui: &mut egui::Ui, g: &mut Gradient) -> bool {
             }
         });
     }
+
+    // Colour-space interpolation + dithering (suite-shared quality controls).
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt("grad_interp")
+            .selected_text(g.interpolation.label())
+            .show_ui(ui, |ui| {
+                for m in Interpolation::ALL {
+                    if ui
+                        .selectable_value(&mut g.interpolation, m, m.label())
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Blend colours perceptually (linear light) or in raw sRGB");
+        if ui
+            .checkbox(&mut g.dither, "Dither")
+            .on_hover_text("Ordered dithering kills 8-bit banding on raster export")
+            .changed()
+        {
+            changed = true;
+        }
+    });
 
     // Stops: each row is offset + colour + a remove button. A stable id per row
     // keeps egui widgets distinct as stops are added/removed.

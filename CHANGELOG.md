@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Gradients — Angle (conic) type + perceptual interpolation + dithering**
+  (extends the Phase 3 "Gradients" item, building on the already-shipped
+  linear/radial multi-stop fills *and* gradient-on-stroke). All three additions
+  are modelled, persisted, edited in the inspector, and rendered on every surface
+  (egui canvas, SVG, PNG), reusing the shared `prism_core::gradient` primitive as
+  the design model (its `Angle` geometry, Bayer dither matrix, and linear-light
+  philosophy):
+  - **Angle (conic) gradient.** A third `GradientKind` that sweeps the ramp
+    around the bounding-box centre starting at the gradient's `angle` (pure
+    `gradient::angle_param`). The canvas previews the true conic via the existing
+    per-vertex mesh sampler; **PNG** rasterizes the conic into a bbox-sized pixmap
+    (per-pixel `color_at`, optional dither) handed to tiny-skia as a `Pattern`
+    shader — since tiny-skia 0.11 has no native conic. **SVG 1.1 has no conic
+    gradient**, so Angle exports as a `linearGradient` oriented at the angle (a
+    documented limitation — canvas/PNG render the real sweep).
+  - **Perceptual interpolation.** A per-gradient `Interpolation` toggle
+    (Perceptual / sRGB). Perceptual blends stop colours in **linear light** (the
+    suite's working space — smoother, no muddy mid-tones, IL-2025 parity);
+    `color_at` blends directly, while the SVG/tiny-skia paths (which only
+    interpolate stops in straight sRGB) consume a pre-expanded, linear-light
+    sub-stop list (`Gradient::render_stops`) so all three surfaces match.
+  - **Dithering.** A per-gradient `dither` toggle applying the suite's shared
+    Bayer-8×8 ordered dither (no RNG, reproducible) on the conic raster path to
+    kill 8-bit banding.
+  - **Model + persistence.** Additive `interpolation: Interpolation` and
+    `dither: bool` on `Gradient`, both `#[serde(default)]` — pre-existing
+    `.contour` files load as **sRGB, un-dithered** (byte-identical to how they
+    were authored), while *new* gradients default to perceptual + dithered to
+    match the shared primitive's default. Carried through the Appearance stack,
+    eyedropper, blend, boolean and clip paint copies for free.
+  - **Inspector.** The gradient editor gains the Angle kind, an Interpolation
+    combo, a Dither checkbox, and exposes the angle slider for Angle gradients
+    (it already drove linear direction).
+  - 13 new unit tests: perceptual vs sRGB blending (linear-light midpoint),
+    `render_stops` expansion (count / monotonic offsets / colour match / no
+    duplicate seams), `angle_param` conic sweep, `.contour` round-trip + legacy
+    back-compat defaults, SVG Angle→linear fallback + perceptual stop expansion,
+    PNG conic-sweep render, and the pure Contour→tiny-skia stop mapping
+    (`ts_stops`). *(Open: separate **opacity stops** as their own editor rail
+    (opacity is carried per-stop in the RGBA colour today), `Reflected`/`Diamond`
+    geometries, a native SVG conic export, and **mesh / freeform** gradients.)*
 - **Stroke options — align stroke + arrowheads** (completes the Phase 3
   "Stroke options" item alongside the already-shipped caps/joins/miter/dashes).
   Two new stroke attributes, modelled, persisted, edited, and rendered end to

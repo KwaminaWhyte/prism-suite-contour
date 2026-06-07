@@ -130,6 +130,7 @@ fn gradient_mesh(doc_pts: &[(f32, f32)], view: &View, g: &Gradient) -> Mesh {
 struct GradientSampler<'a> {
     g: &'a Gradient,
     kind: GradientKind,
+    bbox: [f32; 4],
     // Linear: start point + inverse-squared-length axis vector.
     start: (f32, f32),
     axis: (f32, f32),
@@ -148,6 +149,7 @@ impl<'a> GradientSampler<'a> {
         Self {
             g,
             kind: g.kind,
+            bbox: *bbox,
             start: a,
             axis,
             inv_len2: if len2 > 1e-9 { 1.0 / len2 } else { 0.0 },
@@ -165,6 +167,7 @@ impl<'a> GradientSampler<'a> {
             GradientKind::Radial => {
                 ((p.0 - self.centre.0).powi(2) + (p.1 - self.centre.1).powi(2)).sqrt() * self.inv_r
             }
+            GradientKind::Angle => crate::gradient::angle_param(&self.bbox, self.g.angle, p.0, p.1),
         }
     }
 

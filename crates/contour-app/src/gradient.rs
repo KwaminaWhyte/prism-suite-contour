@@ -12,6 +12,7 @@
 //! (`tiny-skia`) and SVG exporter all consume the same [`Gradient`] so the three
 //! surfaces stay in lock-step.
 
+use prism_core::color::{linear_to_srgb, srgb_to_linear};
 use serde::{Deserialize, Serialize};
 
 /// One colour stop: a straight-sRGB RGBA colour at a parametric `offset` in
@@ -31,7 +32,9 @@ impl GradientStop {
     }
 }
 
-/// Linear (directional) or radial (concentric) gradient geometry.
+/// Linear (directional), radial (concentric), or angle (conic) gradient
+/// geometry. These mirror the suite's shared [`prism_core::gradient::GradientType`]
+/// subset that maps cleanly onto Illustrator's three primary gradient types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum GradientKind {
     /// A directional gradient: stop 0 at one edge, stop 1 at the opposite edge,
@@ -40,13 +43,20 @@ pub enum GradientKind {
     Linear,
     /// A concentric gradient radiating from the bounding-box centre outward.
     Radial,
+    /// A conic (angular) gradient sweeping `angle`° around the box centre — stop 0
+    /// at the start angle, stop 1 a full turn later (Illustrator's *Angle* type).
+    Angle,
 }
 
 impl GradientKind {
+    pub const ALL: [GradientKind; 3] =
+        [GradientKind::Linear, GradientKind::Radial, GradientKind::Angle];
+
     pub fn label(self) -> &'static str {
         match self {
             GradientKind::Linear => "Linear",
             GradientKind::Radial => "Radial",
+            GradientKind::Angle => "Angle",
         }
     }
 }
@@ -85,6 +95,38 @@ impl SpreadMode {
     }
 }
 
+/// How colours are interpolated between stops. Mirrors the suite's linear-light
+/// compositing philosophy: `Perceptual` blends in **linear light** (the suite's
+/// working space — smoother, no muddy mid-tones, IL-2025 parity), `Srgb` blends
+/// in raw straight-sRGB component space (the naive default, kept for fidelity
+/// with older files and SVG `color-interpolation="sRGB"`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Interpolation {
+    /// Interpolate in linear light (perceptually smoother).
+    #[default]
+    Perceptual,
+    /// Interpolate in straight-sRGB component space.
+    Srgb,
+}
+
+impl Interpolation {
+    pub const ALL: [Interpolation; 2] = [Interpolation::Perceptual, Interpolation::Srgb];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Interpolation::Perceptual => "Perceptual",
+            Interpolation::Srgb => "sRGB",
+        }
+    }
+}
+
+/// Serde default for [`Gradient::interpolation`]: older `.contour` files (which
+/// predate the field) blended in straight sRGB, so they load as [`Srgb`] to keep
+/// their appearance byte-identical, while *new* gradients default to `Perceptual`.
+fn legacy_interpolation() -> Interpolation {
+    Interpolation::Srgb
+}
+
 /// A multi-stop gradient fill. Stored on a shape (additively) as an override of
 /// its solid `fill` colour.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -93,16 +135,26 @@ pub struct Gradient {
     /// Colour stops in authoring order (not necessarily sorted by offset;
     /// [`sorted_stops`] returns the render order).
     pub stops: Vec<GradientStop>,
-    /// Linear gradient direction, in degrees clockwise from the +x axis (0° =
-    /// left→right, 90° = top→bottom). Ignored for radial gradients.
+    /// Linear/angle gradient direction, in degrees clockwise from the +x axis
+    /// (0° = left→right, 90° = top→bottom). Ignored for radial gradients.
     pub angle: f32,
     pub spread: SpreadMode,
+    /// Colour-space the stops are blended in. Additive
+    /// (`#[serde(default = "legacy_interpolation")]` → `Srgb` for old files).
+    #[serde(default = "legacy_interpolation")]
+    pub interpolation: Interpolation,
+    /// Apply ordered (Bayer) dithering on raster export to kill 8-bit banding.
+    /// Additive (`#[serde(default)]` → `false` for old files, which never
+    /// dithered).
+    #[serde(default)]
+    pub dither: bool,
 }
 
 impl Default for Gradient {
     fn default() -> Self {
         // A black→white left-to-right linear gradient, like Illustrator's
-        // default swatch.
+        // default swatch — perceptual + dithered, matching the suite's shared
+        // gradient defaults (`prism_core::gradient::Gradient::default`).
         Self {
             kind: GradientKind::Linear,
             stops: vec![
@@ -111,6 +163,8 @@ impl Default for Gradient {
             ],
             angle: 0.0,
             spread: SpreadMode::Pad,
+            interpolation: Interpolation::Perceptual,
+            dither: true,
         }
     }
 }
@@ -123,6 +177,8 @@ impl Gradient {
             stops: vec![GradientStop::new(0.0, a), GradientStop::new(1.0, b)],
             angle: 0.0,
             spread: SpreadMode::default(),
+            interpolation: Interpolation::default(),
+            dither: true,
         }
     }
 
@@ -173,7 +229,7 @@ impl Gradient {
                         } else {
                             (u - a.offset) / span
                         };
-                        return lerp_color(a.color, b.color, f);
+                        return blend_color(a.color, b.color, f, self.interpolation);
                     }
                 }
                 stops[last].color
@@ -210,6 +266,64 @@ pub fn lerp_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     ]
 }
 
+/// Blend two straight-sRGB RGBA colours by `t`, in the requested colour space.
+///
+/// `Srgb` blends the raw components (the naive default). `Perceptual` decodes RGB
+/// to **linear light**, blends there, then re-encodes — the suite's working space,
+/// which avoids the dark muddy mid-tones of sRGB blending (e.g. red→green no
+/// longer dips through murky brown). Alpha is always linear in `t` (it is already
+/// a linear quantity).
+pub fn blend_color(a: [f32; 4], b: [f32; 4], t: f32, interp: Interpolation) -> [f32; 4] {
+    let t = t.clamp(0.0, 1.0);
+    let alpha = a[3] + (b[3] - a[3]) * t;
+    match interp {
+        Interpolation::Srgb => lerp_color(a, b, t),
+        Interpolation::Perceptual => {
+            let mut out = [0.0f32; 4];
+            for c in 0..3 {
+                let la = srgb_to_linear(a[c]);
+                let lb = srgb_to_linear(b[c]);
+                out[c] = linear_to_srgb(la + (lb - la) * t);
+            }
+            out[3] = alpha;
+            out
+        }
+    }
+}
+
+/// Expand this gradient's stops into a denser, **pre-interpolated** list suitable
+/// for renderers that only interpolate linearly in sRGB component space
+/// (tiny-skia, SVG `<stop>`s). For [`Interpolation::Srgb`] the original sorted
+/// stops are returned unchanged (the renderer's own sRGB lerp is already exact).
+/// For [`Interpolation::Perceptual`] each adjacent pair is subdivided into
+/// `samples` straight-sRGB sub-stops computed in linear light, so the renderer's
+/// linear-sRGB lerp reproduces the perceptual ramp to within the sampling
+/// resolution. A two-stop perceptual ramp therefore becomes `samples`+1 stops.
+impl Gradient {
+    pub fn render_stops(&self, samples: usize) -> Vec<GradientStop> {
+        let sorted = self.sorted_stops();
+        if self.interpolation == Interpolation::Srgb || sorted.len() < 2 {
+            return sorted;
+        }
+        let samples = samples.max(2);
+        let mut out: Vec<GradientStop> = Vec::with_capacity(sorted.len() + samples);
+        for pair in sorted.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            // Emit `samples` points across [a.offset, b.offset]; the first point
+            // is the segment start (a). The previous segment's end == this start,
+            // so skip duplicates after the first segment.
+            let start = if out.is_empty() { 0 } else { 1 };
+            for s in start..=samples {
+                let f = s as f32 / samples as f32;
+                let off = a.offset + (b.offset - a.offset) * f;
+                let col = blend_color(a.color, b.color, f, Interpolation::Perceptual);
+                out.push(GradientStop::new(off, col));
+            }
+        }
+        out
+    }
+}
+
 /// The two document-space endpoints of a linear gradient over the axis-aligned
 /// bounding box `[x, y, w, h]` at `angle` degrees (clockwise from +x).
 ///
@@ -232,6 +346,22 @@ pub fn linear_endpoints(bbox: &[f32; 4], angle: f32) -> ((f32, f32), (f32, f32))
         (cx - dx * half, cy - dy * half),
         (cx + dx * half, cy + dy * half),
     )
+}
+
+/// Map a document-space point to the conic (angle) gradient parameter `0..=1`
+/// over the bounding box `bbox`, sweeping counter-clockwise from `angle`° (the
+/// same 0°=+x, 90°=down convention as [`linear_endpoints`]). The centre is the
+/// box centre. Pure; used by the canvas sampler and the angle-stop expansion that
+/// the raster/SVG exporters fall back to (neither tiny-skia 0.11 nor SVG 1.1 has
+/// a native conic shader).
+pub fn angle_param(bbox: &[f32; 4], angle: f32, px: f32, py: f32) -> f32 {
+    let cx = bbox[0] + bbox[2] * 0.5;
+    let cy = bbox[1] + bbox[3] * 0.5;
+    let base = angle.to_radians();
+    // atan2 in screen space (y grows downward); subtract the start angle and wrap
+    // to 0..1 going clockwise so 0°→ start, increasing angle sweeps the ramp.
+    let a = ((py - cy).atan2(px - cx) - base).rem_euclid(std::f32::consts::TAU);
+    a / std::f32::consts::TAU
 }
 
 /// Centre and radius of a radial gradient over the bounding box: centred on the
@@ -261,14 +391,21 @@ mod tests {
         let g = Gradient::default();
         assert_eq!(g.kind, GradientKind::Linear);
         assert_eq!(g.stops.len(), 2);
+        // The default now blends perceptually + dithers, matching the shared
+        // `prism_core::gradient::Gradient::default`.
+        assert_eq!(g.interpolation, Interpolation::Perceptual);
+        assert!(g.dither);
         assert!(approx_color(g.color_at(0.0), [0.0, 0.0, 0.0, 1.0]));
         assert!(approx_color(g.color_at(1.0), [1.0, 1.0, 1.0, 1.0]));
-        // Midpoint is mid-grey.
-        assert!(approx_color(g.color_at(0.5), [0.5, 0.5, 0.5, 1.0]));
+        // The black→white midpoint blends in linear light, so it encodes back to
+        // sRGB ≈ 0.735 (brighter than the naive 0.5).
+        let mid = g.color_at(0.5)[0];
+        assert!((mid - linear_to_srgb(0.5)).abs() < 1e-3, "perceptual mid {mid}");
     }
 
     #[test]
     fn color_at_interpolates_between_stops() {
+        // sRGB interpolation gives the plain component lerp checked below.
         let g = Gradient {
             kind: GradientKind::Linear,
             stops: vec![
@@ -278,6 +415,8 @@ mod tests {
             ],
             angle: 0.0,
             spread: SpreadMode::Pad,
+            interpolation: Interpolation::Srgb,
+            dither: false,
         };
         // Exactly on the middle stop.
         assert!(approx_color(g.color_at(0.5), [0.0, 1.0, 0.0, 1.0]));
@@ -309,6 +448,8 @@ mod tests {
             ],
             angle: 0.0,
             spread: SpreadMode::Pad,
+            interpolation: Interpolation::Srgb,
+            dither: false,
         };
         let s = g.sorted_stops();
         assert!(approx(s[0].offset, 0.0));
@@ -373,7 +514,119 @@ mod tests {
             stops: vec![],
             angle: 0.0,
             spread: SpreadMode::Pad,
+            interpolation: Interpolation::Srgb,
+            dither: false,
         };
         assert!(approx_color(g.color_at(0.5), [0.0, 0.0, 0.0, 0.0]));
+    }
+
+    // ---- perceptual (linear-light) interpolation ---------------------------
+
+    #[test]
+    fn srgb_interpolation_is_component_lerp() {
+        // Black→white midpoint is exactly 0.5 in component space under sRGB blend.
+        let g = Gradient {
+            interpolation: Interpolation::Srgb,
+            ..Gradient::two_stop(GradientKind::Linear, [0.0; 4], [1.0, 1.0, 1.0, 1.0])
+        };
+        assert!(approx(g.color_at(0.5)[0], 0.5));
+    }
+
+    #[test]
+    fn perceptual_interpolation_blends_in_linear_light() {
+        // Black→white: the linear-light midpoint encodes back to ~0.735 in sRGB
+        // (sRGB encode of 0.5), distinctly brighter than the naive 0.5.
+        let g = Gradient {
+            interpolation: Interpolation::Perceptual,
+            ..Gradient::two_stop(GradientKind::Linear, [0.0; 4], [1.0, 1.0, 1.0, 1.0])
+        };
+        let mid = g.color_at(0.5)[0];
+        let expect = linear_to_srgb(0.5);
+        assert!((mid - expect).abs() < 1e-3, "perceptual mid {mid} != {expect}");
+        // Endpoints are exact in either space.
+        assert!(approx(g.color_at(0.0)[0], 0.0));
+        assert!(approx(g.color_at(1.0)[0], 1.0));
+        // Alpha stays a plain linear lerp regardless of colour space.
+        let g2 = Gradient {
+            interpolation: Interpolation::Perceptual,
+            ..Gradient::two_stop(GradientKind::Linear, [1.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 0.0])
+        };
+        assert!(approx(g2.color_at(0.5)[3], 0.5));
+    }
+
+    #[test]
+    fn render_stops_srgb_passthrough() {
+        // sRGB gradients are not expanded — the renderer's own lerp is exact.
+        let g = Gradient {
+            interpolation: Interpolation::Srgb,
+            ..Gradient::two_stop(GradientKind::Linear, [0.0; 4], [1.0; 4])
+        };
+        assert_eq!(g.render_stops(16).len(), 2);
+    }
+
+    #[test]
+    fn render_stops_perceptual_expands_and_tracks_color_at() {
+        // A perceptual two-stop ramp expands to `samples`+1 monotonic stops whose
+        // colours match `color_at` sampled in linear light.
+        let g = Gradient {
+            interpolation: Interpolation::Perceptual,
+            ..Gradient::two_stop(GradientKind::Linear, [0.0; 4], [1.0, 1.0, 1.0, 1.0])
+        };
+        let s = g.render_stops(8);
+        assert_eq!(s.len(), 9, "expanded stop count");
+        // Offsets strictly ascending and bracket the full range.
+        assert!(approx(s[0].offset, 0.0) && approx(s[s.len() - 1].offset, 1.0));
+        for w in s.windows(2) {
+            assert!(w[1].offset >= w[0].offset);
+        }
+        // Each expanded stop's colour equals color_at at that offset.
+        for st in &s {
+            assert!(approx_color(st.color, g.color_at(st.offset)));
+        }
+    }
+
+    #[test]
+    fn render_stops_multi_segment_no_duplicate_seams() {
+        // Three stops, perceptual: segment seams must not be duplicated.
+        let g = Gradient {
+            kind: GradientKind::Linear,
+            stops: vec![
+                GradientStop::new(0.0, [1.0, 0.0, 0.0, 1.0]),
+                GradientStop::new(0.5, [0.0, 1.0, 0.0, 1.0]),
+                GradientStop::new(1.0, [0.0, 0.0, 1.0, 1.0]),
+            ],
+            angle: 0.0,
+            spread: SpreadMode::Pad,
+            interpolation: Interpolation::Perceptual,
+            dither: false,
+        };
+        // 2 segments × 4 samples, sharing the middle seam: 4 + 4 = 8 → 9 stops.
+        let s = g.render_stops(4);
+        assert_eq!(s.len(), 9);
+    }
+
+    // ---- angle (conic) geometry --------------------------------------------
+
+    #[test]
+    fn angle_param_sweeps_around_centre() {
+        // 10×10 box centred at (5,5); 0° start. Points clockwise from +x.
+        let bbox = [0.0, 0.0, 10.0, 10.0];
+        // +x direction → t≈0 (or ≈1 at the wrap).
+        let t0 = angle_param(&bbox, 0.0, 10.0, 5.0);
+        assert!(!(0.02..=0.98).contains(&t0), "t0={t0}");
+        // Straight down (+y screen) → quarter turn.
+        assert!(approx(angle_param(&bbox, 0.0, 5.0, 10.0), 0.25));
+        // -x → half turn.
+        assert!(approx(angle_param(&bbox, 0.0, 0.0, 5.0), 0.5));
+        // A non-zero start angle rotates the whole sweep: starting at 90° (down),
+        // the straight-down point lands at the ramp start (t≈0).
+        let s = angle_param(&bbox, 90.0, 5.0, 10.0);
+        assert!(!(0.02..=0.98).contains(&s), "rotated start t={s}");
+    }
+
+    #[test]
+    fn gradient_kind_all_has_angle() {
+        assert!(GradientKind::ALL.contains(&GradientKind::Angle));
+        assert_eq!(GradientKind::Angle.label(), "Angle");
     }
 }
