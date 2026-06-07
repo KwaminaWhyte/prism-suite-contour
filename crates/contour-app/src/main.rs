@@ -14,6 +14,7 @@ mod canvas;
 mod clip;
 mod clipboard;
 mod document;
+mod effects;
 mod export;
 mod eyedropper;
 mod gradient;

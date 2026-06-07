@@ -266,12 +266,74 @@ impl ShapeGeometry {
 pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected: bool) {
     let appearance = shape.effective_appearance();
     if !appearance.is_empty() {
+        if appearance.has_active_effects() {
+            // egui's painter can't blur: rasterize the fill/stroke stack with
+            // tiny-skia at the current zoom, apply the live effects on that
+            // raster, and composite the processed texture (the same pipeline the
+            // PNG exporter uses). Falls back to the plain painter if rasterizing
+            // fails (degenerate size / texture limit).
+            if paint_shape_with_effects(painter, view, shape, &appearance) {
+                if selected {
+                    paint_selection_ring(painter, view, shape);
+                }
+                return;
+            }
+        }
         let geom = ShapeGeometry::of(shape);
         paint_appearance(painter, view, &geom, &appearance);
     }
     if selected {
         paint_selection_ring(painter, view, shape);
     }
+}
+
+/// Render a shape whose appearance has live effects: rasterize + process via
+/// [`crate::export::render_shape_layer`], upload the result as an egui texture,
+/// and paint it at the matching screen rectangle. Returns `false` (so the caller
+/// can fall back to the plain painter) when the shape has no rasterizable path
+/// or the layer can't be built.
+fn paint_shape_with_effects(
+    painter: &egui::Painter,
+    view: &View,
+    shape: &Shape,
+    appearance: &Appearance,
+) -> bool {
+    let Some((path, fillable)) = crate::export::skia_path_of(shape) else {
+        return false;
+    };
+    let bbox = shape
+        .bounds()
+        .map(|b| [b.x, b.y, b.w, b.h])
+        .unwrap_or([0.0; 4]);
+    let Some(layer) =
+        crate::export::render_shape_layer(&path, fillable, &bbox, appearance, view.zoom)
+    else {
+        return false;
+    };
+    let w = layer.pixmap.width() as usize;
+    let h = layer.pixmap.height() as usize;
+    if w == 0 || h == 0 {
+        return false;
+    }
+    // tiny-skia gives premultiplied RGBA8 — exactly egui's premultiplied image.
+    let image = egui::ColorImage::from_rgba_premultiplied([w, h], layer.pixmap.data());
+    // Per-frame upload; the handle frees the texture after this frame's paint.
+    let tex = painter.ctx().load_texture(
+        "contour-effect-layer",
+        image,
+        egui::TextureOptions::LINEAR,
+    );
+    // The layer's top-left sits at document point `doc_origin`; its pixel size is
+    // already in screen pixels (rasterized at `view.zoom`).
+    let top_left = view.doc_to_screen(layer.doc_origin);
+    let rect = Rect::from_min_size(top_left, Vec2::new(w as f32, h as f32));
+    painter.image(
+        tex.id(),
+        rect,
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
+    true
 }
 
 /// Paint an [`Appearance`] stack over a shape's geometry: fills first

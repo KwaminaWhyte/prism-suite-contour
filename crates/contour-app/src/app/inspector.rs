@@ -3,7 +3,7 @@
 
 use super::{align_button, color_row, gradient_editor, ContourApp, Tool};
 use crate::align::{Align, AlignTo, Distribute};
-use crate::appearance::{BlendMode, Fill, Paint, Stroke as AppStroke};
+use crate::appearance::{BlendMode, Effect, Fill, Paint, Stroke as AppStroke};
 use crate::arrange::{self, Arrange};
 use crate::boolean::BoolOp;
 use crate::document::{LineCap, LineJoin};
@@ -1020,6 +1020,34 @@ impl ContourApp {
             changed |= appearance_stroke_list(ui, &mut ap);
         }
 
+        ui.separator();
+
+        // --- Effects (live, non-destructive; top-to-bottom) -----------------
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Effects").strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button("+", |ui| {
+                    if ui.button("Drop Shadow").clicked() {
+                        ap.effects.push(Effect::drop_shadow());
+                        changed = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("Gaussian Blur").clicked() {
+                        ap.effects.push(Effect::gaussian_blur());
+                        changed = true;
+                        ui.close_menu();
+                    }
+                })
+                .response
+                .on_hover_text("Add a live effect");
+            });
+        });
+        if ap.effects.is_empty() {
+            ui.weak("No effects. Add one with +.");
+        } else {
+            changed |= appearance_effect_list(ui, &mut ap);
+        }
+
         if changed {
             self.checkpoint();
             if let Some(shape) = self.doc.shapes.get_mut(i) {
@@ -1636,6 +1664,123 @@ fn appearance_stroke_list(ui: &mut egui::Ui, ap: &mut crate::appearance::Appeara
     }
     if let Some(i) = lower {
         changed |= ap.lower_stroke(i);
+    }
+    changed
+}
+
+/// Editable list of live [`Effect`]s for the Appearance panel, shown
+/// top-to-bottom (the model stores bottom-to-top, so the list iterates in
+/// reverse). Each effect row carries a label, remove + reorder buttons, and the
+/// effect's own parameter editors. Reorders route through the tested
+/// [`Appearance::raise_effect`] / [`Appearance::lower_effect`]. Returns `true`
+/// if any control changed the stack.
+fn appearance_effect_list(ui: &mut egui::Ui, ap: &mut crate::appearance::Appearance) -> bool {
+    let mut changed = false;
+    let n = ap.effects.len();
+    let mut remove: Option<usize> = None;
+    let mut raise: Option<usize> = None;
+    let mut lower: Option<usize> = None;
+
+    for idx in (0..n).rev() {
+        let effect = &mut ap.effects[idx];
+        ui.push_id(("effect", idx), |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(effect.label()).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("✕").on_hover_text("Remove effect").clicked() {
+                        remove = Some(idx);
+                    }
+                    ui.add_enabled_ui(idx + 1 < n, |ui| {
+                        if ui.small_button("▲").on_hover_text("Move up").clicked() {
+                            raise = Some(idx);
+                        }
+                    });
+                    ui.add_enabled_ui(idx > 0, |ui| {
+                        if ui.small_button("▼").on_hover_text("Move down").clicked() {
+                            lower = Some(idx);
+                        }
+                    });
+                });
+            });
+            changed |= effect_editor(ui, effect);
+        });
+        ui.add_space(2.0);
+    }
+
+    if let Some(i) = remove {
+        ap.effects.remove(i);
+        changed = true;
+    }
+    if let Some(i) = raise {
+        changed |= ap.raise_effect(i);
+    }
+    if let Some(i) = lower {
+        changed |= ap.lower_effect(i);
+    }
+    changed
+}
+
+/// Per-variant parameter editors for one live [`Effect`]. Returns `true` if any
+/// control changed.
+fn effect_editor(ui: &mut egui::Ui, effect: &mut Effect) -> bool {
+    let mut changed = false;
+    match effect {
+        Effect::DropShadow {
+            dx,
+            dy,
+            blur,
+            color,
+            opacity,
+        } => {
+            ui.horizontal(|ui| {
+                ui.label("Offset X");
+                changed |= ui
+                    .add(egui::DragValue::new(dx).speed(0.5).suffix(" px"))
+                    .changed();
+                ui.label("Y");
+                changed |= ui
+                    .add(egui::DragValue::new(dy).speed(0.5).suffix(" px"))
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Blur");
+                changed |= ui
+                    .add(egui::Slider::new(blur, 0.0..=50.0).suffix(" px"))
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Color");
+                let mut col = Color32::from_rgba_unmultiplied(
+                    (color[0] * 255.0) as u8,
+                    (color[1] * 255.0) as u8,
+                    (color[2] * 255.0) as u8,
+                    (color[3] * 255.0) as u8,
+                );
+                if ui.color_edit_button_srgba(&mut col).changed() {
+                    *color = [
+                        col.r() as f32 / 255.0,
+                        col.g() as f32 / 255.0,
+                        col.b() as f32 / 255.0,
+                        col.a() as f32 / 255.0,
+                    ];
+                    changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Opacity");
+                changed |= ui
+                    .add(egui::Slider::new(opacity, 0.0..=1.0).fixed_decimals(2))
+                    .changed();
+            });
+        }
+        Effect::GaussianBlur { radius } => {
+            ui.horizontal(|ui| {
+                ui.label("Radius");
+                changed |= ui
+                    .add(egui::Slider::new(radius, 0.0..=50.0).suffix(" px"))
+                    .changed();
+            });
+        }
     }
     changed
 }

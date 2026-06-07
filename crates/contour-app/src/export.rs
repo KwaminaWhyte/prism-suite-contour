@@ -4,7 +4,7 @@
 //! hidden shapes. SVG emits standard `rect`/`ellipse`/`line`/`path` elements;
 //! PNG rasterizes via `tiny-skia` into a `Pixmap` sized to the artboard.
 
-use crate::appearance::{Appearance, Paint};
+use crate::appearance::{Appearance, Effect, Paint};
 // NOTE: `Paint` here is the Appearance paint enum; tiny-skia's `Paint` is used
 // fully-qualified as `tiny_skia::Paint` in the rasterizer to avoid the clash.
 use crate::document::{self, Document, LineCap, LineJoin, Shape, StrokeStyle};
@@ -83,6 +83,9 @@ fn svg_body(doc: &Document) -> String {
         let appearance = shape.effective_appearance();
         let geom = svg_geom(&shape);
         let mut grad_n = 0usize;
+        // Accumulate this shape's paint elements separately so an effect filter
+        // can wrap the whole stack in one `<g filter="url(#…)">`.
+        let mut shape_body = String::new();
 
         // Fills, bottom-to-top (only on a fillable geometry).
         if geom.fillable {
@@ -103,9 +106,9 @@ fn svg_body(doc: &Document) -> String {
                     Some(id) => format!(" fill=\"url(#{id})\""),
                     None => fill_attr,
                 };
-                body.push_str("  ");
-                body.push_str(&geom.element(&format!("{attrs} stroke=\"none\"")));
-                body.push('\n');
+                shape_body.push_str("  ");
+                shape_body.push_str(&geom.element(&format!("{attrs} stroke=\"none\"")));
+                shape_body.push('\n');
             }
         }
         // Strokes, bottom-to-top.
@@ -128,9 +131,24 @@ fn svg_body(doc: &Document) -> String {
             let mut attrs = String::from(" fill=\"none\"");
             attrs.push_str(&stroke_paint);
             attrs.push_str(&stroke_geom_attrs(stroke.width, &stroke.style));
-            body.push_str("  ");
-            body.push_str(&geom.element(&attrs));
-            body.push('\n');
+            shape_body.push_str("  ");
+            shape_body.push_str(&geom.element(&attrs));
+            shape_body.push('\n');
+        }
+
+        // Live effects: emit a standard SVG `<filter>` (feGaussianBlur /
+        // feDropShadow) and wrap the shape's paint stack in a group referencing
+        // it, so the exported SVG renders the effect natively in any viewer.
+        if appearance.has_active_effects() {
+            let fid = format!("fx{i}");
+            defs.push_str("    ");
+            defs.push_str(&effect_filter_def(&fid, &appearance.effects));
+            defs.push('\n');
+            body.push_str(&format!("  <g filter=\"url(#{fid})\">\n"));
+            body.push_str(&shape_body);
+            body.push_str("  </g>\n");
+        } else {
+            body.push_str(&shape_body);
         }
     }
 
@@ -313,6 +331,54 @@ fn gradient_def(id: &str, g: &Gradient, bbox: &[f32; 4]) -> String {
     }
 }
 
+/// Emit a standard SVG `<filter>` for a live-effect stack, chaining one filter
+/// primitive per active [`Effect`] (bottom-to-top, matching the canvas / PNG
+/// order). Drop Shadow → `feDropShadow`; Gaussian Blur → `feGaussianBlur`. Each
+/// primitive consumes the previous one's `result`, and the filter region is
+/// widened (`x/y/width/height`) so soft edges aren't clipped. SVG's Gaussian
+/// `stdDeviation` ≈ our box-blur radius, so the visual reach matches closely.
+fn effect_filter_def(id: &str, effects: &[Effect]) -> String {
+    let active: Vec<&Effect> = effects.iter().filter(|e| e.is_active()).collect();
+    // Region margin large enough for the widest effect's spill (as a fraction of
+    // the filtered object's bbox — SVG filter regions are in objectBoundingBox
+    // units by default, so a flat 50% padding is a safe generous default).
+    let mut prims = String::new();
+    let mut prev: Option<String> = None;
+    for (n, e) in active.iter().enumerate() {
+        let result = format!("e{n}");
+        let in_attr = match &prev {
+            Some(p) => format!(" in=\"{p}\""),
+            None => " in=\"SourceGraphic\"".to_string(),
+        };
+        match e {
+            Effect::GaussianBlur { radius } => {
+                prims.push_str(&format!(
+                    "<feGaussianBlur{in_attr} stdDeviation=\"{radius}\" result=\"{result}\" />"
+                ));
+            }
+            Effect::DropShadow {
+                dx,
+                dy,
+                blur,
+                color,
+                opacity,
+            } => {
+                let flood = (color[3] * opacity).clamp(0.0, 1.0);
+                prims.push_str(&format!(
+                    "<feDropShadow{in_attr} dx=\"{dx}\" dy=\"{dy}\" stdDeviation=\"{blur}\" \
+                     flood-color=\"{}\" flood-opacity=\"{:.3}\" result=\"{result}\" />",
+                    hex(*color),
+                    flood
+                ));
+            }
+        }
+        prev = Some(result);
+    }
+    format!(
+        "<filter id=\"{id}\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\">{prims}</filter>"
+    )
+}
+
 /// `[f32;4]` straight sRGB -> `#rrggbb`.
 fn hex(c: [f32; 4]) -> String {
     let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -402,49 +468,122 @@ pub fn to_png_artboard(doc: &Document, ab: [f32; 4]) -> Option<Vec<u8>> {
     pixmap.encode_png().ok()
 }
 
-fn draw_shape_skia(pixmap: &mut Pixmap, shape: &Shape, id: Transform) {
-    // Gradient geometry maps onto the shape's document-space bounding box.
-    let bbox = shape
-        .bounds()
-        .map(|b| [b.x, b.y, b.w, b.h])
-        .unwrap_or([0.0; 4]);
-    // Build the shape's tiny-skia path once + whether it has a fillable region,
-    // then walk its effective Appearance stack over that path.
-    let (path, fillable) = match shape {
+/// Build a shape's tiny-skia [`Path`](tiny_skia::Path) (document space) and
+/// whether it has a fillable region. `None` for a degenerate shape. Shared with
+/// the live canvas so its effect raster matches the PNG exporter exactly.
+pub(crate) fn skia_path_of(shape: &Shape) -> Option<(tiny_skia::Path, bool)> {
+    match shape {
         Shape::Rect { rect, .. } => {
             let (x, y, w, h) = norm_rect(rect);
-            match TsRect::from_xywh(x, y, w.max(0.01), h.max(0.01)) {
-                Some(r) => (Some(PathBuilder::from_rect(r)), true),
-                None => (None, true),
-            }
+            TsRect::from_xywh(x, y, w.max(0.01), h.max(0.01))
+                .map(|r| (PathBuilder::from_rect(r), true))
         }
         Shape::Ellipse { rect, .. } => {
             let (x, y, w, h) = norm_rect(rect);
-            let path = TsRect::from_xywh(x, y, w.max(0.01), h.max(0.01)).and_then(|r| {
-                let mut pb = PathBuilder::new();
-                pb.push_oval(r);
-                pb.finish()
-            });
-            (path, true)
+            TsRect::from_xywh(x, y, w.max(0.01), h.max(0.01))
+                .and_then(|r| {
+                    let mut pb = PathBuilder::new();
+                    pb.push_oval(r);
+                    pb.finish()
+                })
+                .map(|p| (p, true))
         }
         Shape::Line { p0, p1, .. } => {
             let mut pb = PathBuilder::new();
             pb.move_to(p0.0, p0.1);
             pb.line_to(p1.0, p1.1);
-            (pb.finish(), false)
+            pb.finish().map(|p| (p, false))
         }
         Shape::Path {
             points,
             closed,
             handles,
             ..
-        } => (build_skia_path(points, handles, *closed), *closed),
-    };
-    let Some(path) = path else {
+        } => build_skia_path(points, handles, *closed).map(|p| (p, *closed)),
+    }
+}
+
+fn draw_shape_skia(pixmap: &mut Pixmap, shape: &Shape, id: Transform) {
+    // Gradient geometry maps onto the shape's document-space bounding box.
+    let bbox = shape
+        .bounds()
+        .map(|b| [b.x, b.y, b.w, b.h])
+        .unwrap_or([0.0; 4]);
+    let Some((path, fillable)) = skia_path_of(shape) else {
         return;
     };
     let appearance = shape.effective_appearance();
-    paint_appearance_skia(pixmap, &path, fillable, &bbox, &appearance, id);
+
+    // Fast path: no live effects → paint the stack straight onto the page.
+    if !appearance.has_active_effects() {
+        paint_appearance_skia(pixmap, &path, fillable, &bbox, &appearance, id);
+        return;
+    }
+
+    // Effects present: rasterize the fill/stroke stack into a padded scratch
+    // pixmap (at the page's pixel scale, here 1 px/doc-unit because the page
+    // `id` transform is a pure translate), apply the effect stack, then draw the
+    // processed raster back onto the page at the right offset. `id` is a pure
+    // `translate(-ox, -oy)` so its translation gives the artboard crop offset.
+    if let Some(layer) = render_shape_layer(&path, fillable, &bbox, &appearance, 1.0) {
+        let tx = id.tx; // = -ox (artboard crop)
+        let ty = id.ty;
+        let dst_x = (layer.doc_origin.0 + tx).round() as i32;
+        let dst_y = (layer.doc_origin.1 + ty).round() as i32;
+        pixmap.draw_pixmap(
+            dst_x,
+            dst_y,
+            layer.pixmap.as_ref(),
+            &tiny_skia::PixmapPaint::default(),
+            Transform::identity(),
+            None,
+        );
+    }
+}
+
+/// A rasterized shape layer + where to place it: the processed `pixmap` and the
+/// **document-space** coordinate of its top-left pixel (`doc_origin`). Callers
+/// map `doc_origin` to their own surface (page pixels for PNG, screen pixels for
+/// the canvas) at the same `scale` they passed in.
+pub(crate) struct ShapeLayer {
+    pub pixmap: Pixmap,
+    pub doc_origin: (f32, f32),
+}
+
+/// Rasterize a shape's effective appearance (fills + strokes) into a padded
+/// scratch pixmap at `scale` px/doc-unit, then apply its live effect stack.
+/// Returns the processed layer + its document-space placement, or `None` for a
+/// degenerate size. Shared by PNG export and the live canvas so the two surfaces
+/// composite effects identically.
+pub(crate) fn render_shape_layer(
+    path: &tiny_skia::Path,
+    fillable: bool,
+    bbox: &[f32; 4],
+    appearance: &Appearance,
+    scale: f32,
+) -> Option<ShapeLayer> {
+    let pad = appearance.effect_pad();
+    // Padded document-space rect covering the artwork + the effects' spill.
+    let dx = bbox[0] - pad;
+    let dy = bbox[1] - pad;
+    let dw = bbox[2] + 2.0 * pad;
+    let dh = bbox[3] + 2.0 * pad;
+    let pw = (dw * scale).ceil().max(1.0) as u32;
+    let ph = (dh * scale).ceil().max(1.0) as u32;
+    // Guard against absurd allocations (e.g. a pathological zoom).
+    if pw > 8192 || ph > 8192 {
+        return None;
+    }
+    let mut layer = crate::effects::transparent_pixmap(pw, ph);
+    // Map document space into the scratch pixmap: translate the padded origin to
+    // (0,0), then scale to pixels.
+    let t = Transform::from_scale(scale, scale).post_translate(-dx * scale, -dy * scale);
+    paint_appearance_skia(&mut layer, path, fillable, bbox, appearance, t);
+    crate::effects::apply_effects(&mut layer, &appearance.effects, scale);
+    Some(ShapeLayer {
+        pixmap: layer,
+        doc_origin: (dx, dy),
+    })
 }
 
 /// Rasterize an [`Appearance`] stack onto `path`: fills bottom-to-top (only when
@@ -874,6 +1013,7 @@ mod tests {
                 AppStroke::solid([0.0, 0.0, 1.0, 1.0], 2.0),
                 AppStroke::solid([1.0, 1.0, 1.0, 1.0], 6.0),
             ],
+            effects: vec![],
         }));
         let doc = Document {
             shapes: vec![s],
@@ -913,6 +1053,7 @@ mod tests {
                 Fill::solid([0.0, 1.0, 0.0, 1.0]),
             ],
             strokes: vec![],
+            effects: vec![],
         }));
         let mut pixmap = Pixmap::new(100, 100).unwrap();
         pixmap.fill(TsColor::WHITE);
@@ -925,5 +1066,111 @@ mod tests {
             p.green(),
             p.blue()
         );
+    }
+
+    // --- Live effects -------------------------------------------------------
+
+    fn effect_shape(effects: Vec<Effect>) -> Shape {
+        use crate::appearance::{Appearance, Fill};
+        let mut s = Shape::Rect {
+            rect: [40.0, 40.0, 40.0, 40.0],
+            fill: [1.0, 0.0, 0.0, 1.0],
+            fill_gradient: None,
+            stroke: [0.0, 0.0, 0.0, 0.0],
+            stroke_w: 0.0,
+            stroke_style: StrokeStyle::default(),
+            appearance: None,
+            visible: true,
+            group: None,
+            clip: None,
+            mask: false,
+        };
+        s.set_appearance(Some(Appearance {
+            fills: vec![Fill::solid([1.0, 0.0, 0.0, 1.0])],
+            strokes: vec![],
+            effects,
+        }));
+        s
+    }
+
+    /// A shape with a drop shadow + blur emits an SVG `<filter>` with the
+    /// matching primitives and wraps the paint stack in a filtered group.
+    #[test]
+    fn svg_emits_effect_filter() {
+        let doc = Document {
+            shapes: vec![effect_shape(vec![
+                Effect::drop_shadow(),
+                Effect::GaussianBlur { radius: 5.0 },
+            ])],
+            ..Default::default()
+        };
+        let svg = to_svg(&doc, 200.0, 200.0);
+        assert!(svg.contains("<filter id=\"fx0\""), "filter def: {svg}");
+        assert!(svg.contains("<feDropShadow"), "drop-shadow primitive: {svg}");
+        assert!(svg.contains("<feGaussianBlur"), "blur primitive: {svg}");
+        assert!(svg.contains("filter=\"url(#fx0)\""), "filtered group: {svg}");
+    }
+
+    /// A shape with no active effect emits no filter (back-compat: plain output).
+    #[test]
+    fn svg_no_filter_without_effects() {
+        let doc = Document {
+            shapes: vec![effect_shape(vec![Effect::GaussianBlur { radius: 0.0 }])],
+            ..Default::default()
+        };
+        let svg = to_svg(&doc, 200.0, 200.0);
+        assert!(!svg.contains("<filter"), "no filter for inactive fx: {svg}");
+    }
+
+    /// A drop-shadow PNG still encodes, and the shadow paints pixels *outside*
+    /// the shape's tight bounds (down-right of it), proving the effect raster is
+    /// composited onto the page.
+    #[test]
+    fn png_drop_shadow_paints_outside_bounds() {
+        let doc = Document {
+            shapes: vec![effect_shape(vec![Effect::DropShadow {
+                dx: 8.0,
+                dy: 8.0,
+                blur: 3.0,
+                color: [0.0, 0.0, 0.0, 1.0],
+                opacity: 1.0,
+            }])],
+            ..Default::default()
+        };
+        let bytes = to_png(&doc, 200.0, 200.0).expect("png should encode");
+        assert_eq!(
+            &bytes[0..8],
+            &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
+        );
+        // Re-rasterize to sample. Shape spans doc (40,40)-(80,80) on a white page;
+        // a point just past the bottom-right corner should be darkened by the
+        // shadow (not pure white).
+        let mut pixmap = Pixmap::new(200, 200).unwrap();
+        pixmap.fill(TsColor::WHITE);
+        draw_shape_skia(&mut pixmap, &doc.shapes[0], Transform::identity());
+        let p = pixmap.pixel(85, 85).unwrap();
+        assert!(
+            p.red() < 250 && p.green() < 250 && p.blue() < 250,
+            "shadow should darken just outside the shape: {},{},{}",
+            p.red(),
+            p.green(),
+            p.blue()
+        );
+    }
+
+    /// An effect layer's placement: the rasterized layer's `doc_origin` sits at
+    /// the padded top-left of the shape (bbox minus the effect padding).
+    #[test]
+    fn render_shape_layer_pads_bounds() {
+        let s = effect_shape(vec![Effect::GaussianBlur { radius: 4.0 }]);
+        let (path, fillable) = skia_path_of(&s).unwrap();
+        let bbox = s.bounds().map(|b| [b.x, b.y, b.w, b.h]).unwrap();
+        let ap = s.effective_appearance();
+        let layer = render_shape_layer(&path, fillable, &bbox, &ap, 1.0).unwrap();
+        // pad = 3·radius = 12, so the origin is shifted up-left by 12 from (40,40).
+        assert!((layer.doc_origin.0 - 28.0).abs() < 1.0, "origin x");
+        assert!((layer.doc_origin.1 - 28.0).abs() < 1.0, "origin y");
+        // The layer is the padded shape (40 + 2·12 = 64 units) → ~64 px at 1×.
+        assert!(layer.pixmap.width() >= 64);
     }
 }

@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Live (non-destructive) effects on the Appearance stack — Drop Shadow +
+  Gaussian Blur** — a new pure, unit-tested `effects` module and an additive
+  `effects: Vec<Effect>` on `Appearance` (`#[serde(default)]`), filling the
+  effect seam the Appearance pass left open and bringing Illustrator's "Effect"
+  menu staples to Contour as re-editable, parameter-driven entries:
+  - An **`Effect`** is non-destructive data on the appearance stack, applied to
+    the *rendered* fill/stroke raster (not the path), bottom-to-top after the
+    paint layers. This pass ships **Drop Shadow** (offset x/y, blur radius,
+    colour, opacity) and **Gaussian Blur** (radius); each effect is editable
+    after the fact and round-trips through serde.
+  - **egui's painter can't blur**, so live effects render the way the PNG
+    exporter already does: the shape's fills + strokes are rasterized with
+    `tiny-skia` into a padded scratch pixmap (the padding leaves room for a
+    shadow / blur to spill past the artwork), the effect stack transforms that
+    raster, and the processed pixmap is composited — uploaded as an egui texture
+    on the **canvas**, drawn straight onto the page on **PNG** export. The blur
+    is a three-pass separable box blur (converges on a Gaussian) running in
+    premultiplied space so soft edges don't halo. Canvas and PNG share one
+    `render_shape_layer` pipeline so the two surfaces match.
+  - **SVG** export emits a standard `<filter>` (`feDropShadow` / `feGaussianBlur`,
+    one primitive per active effect, chained bottom-to-top) and wraps the shape's
+    paint stack in a `<g filter="url(#…)">`, so the effect renders natively in any
+    SVG viewer rather than being baked to pixels.
+  - A new **Effects** section in the Appearance panel: an **add** menu (Drop
+    Shadow / Gaussian Blur), **remove**, **reorder** (move up / down), and
+    per-effect parameter editors (offsets, blur / radius sliders, shadow colour +
+    opacity). Each edit is one undo step.
+  - **Backward compatible.** `effects` is additive (`#[serde(default)]` → empty),
+    so every pre-effects `.contour` file loads with no effects and renders
+    identically; a shape with no *active* effect takes the original plain
+    painter / exporter path unchanged. The effect math (box blur, shadow tint /
+    offset / composite, bounds padding, active-effect detection, reorder) is
+    pinned by unit tests with no egui / GPU context.
+  - **Deferred** (noted as gaps): **Transform** (offset / scale / rotate),
+    **Outer Glow**, and the distort family (warp, zig-zag, roughen, pucker /
+    bloat, round-corners). Effect blend modes also still composite as Normal.
+
 - **Appearance panel (multiple fills / strokes per object, reorderable, with
   per-item opacity / blend / visibility)** — a new pure, unit-tested `appearance`
   module and an additive `appearance: Option<Appearance>` on every shape
@@ -45,8 +82,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     loads.
   - **Deferred this pass** (the struct is the seam where they attach): per-shape
     **blend compositing** (blend modes are stored and editable but only `Normal`
-    composites today), a live **effects** vec, **mesh gradients**, and
-    **patterns**.
+    composites today), **mesh gradients**, and **patterns**. *(The live
+    **effects** vec is now filled — see "Live (non-destructive) effects" above —
+    with Drop Shadow + Gaussian Blur shipping and Transform / Outer Glow /
+    distorts still open.)*
 
 - **Swatches panel (named colour library, global swatches)** — a new pure,
   unit-tested `swatches` module and an additive `swatches: Swatches` palette on

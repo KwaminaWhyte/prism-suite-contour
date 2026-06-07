@@ -159,7 +159,7 @@ app-agnostic. Phases 0–1 are largely **done** (see §1); the rest is the road 
 - [ ] **Gradients** (L): linear / radial / **angle** / **freeform (mesh-free)**; multi-stop + opacity stops; **gradient on stroke**; **dither + perceptual interpolation** (kill banding, smoother blends — IL 2025 parity)
 - [ ] **Mesh gradient** (L): grid of color nodes, smooth multi-direction blends (`Object → Mesh`)
 - [ ] **Patterns** (M): tile from selection, pattern fill/stroke, edit-pattern mode, seamless offsets
-- [ ] **Live effects** (L): non-destructive drop-shadow / blur / glow / transform / distort (warp, zig-zag, roughen, pucker/bloat) / round-corners; raster effects via shared `prism-fx`; effect re-eval on edit
+- [~] **Live effects** (L): non-destructive drop-shadow / blur / glow / transform / distort (warp, zig-zag, roughen, pucker/bloat) / round-corners; raster effects via shared `prism-fx`; effect re-eval on edit. *(**Drop Shadow** + **Gaussian Blur** Done: additive `effects: Vec<Effect>` on `Appearance`; rasterize-blur-composite via `tiny-skia` on canvas + PNG, standard `<filter>` (`feDropShadow`/`feGaussianBlur`) on SVG; add/remove/reorder/edit in the Appearance panel; pure box-blur / shadow math unit-tested. **Still open:** Transform, Outer Glow, the distort family, round-corners, effect blend compositing, and promotion of the raster effects to shared `prism-fx`.)*
 - [ ] **Graphic styles** (S): save/apply an Appearance as a named style
 - [ ] **Blend modes + opacity masks** (M): reuse `prism-core` 18 blend modes; opacity mask from a shape; knockout
 - [ ] Tests: stroke-outline correctness, gradient/mesh sampling, effect re-eval
@@ -222,11 +222,11 @@ app-agnostic. Phases 0–1 are largely **done** (see §1); the rest is the road 
 | Guides / grid / snap / rulers | full | **Planned** | 2 |
 | Pathfinder | union/intersect/difference | **Done** 3 of ~10; rest + compound + Shape Builder **Planned** | 1,4 |
 | Stroke options / width profiles | dashes/arrows/caps/joins/variable | **Planned** | 3 |
-| Appearance (multi fill/stroke/fx) | full non-destructive stack | **Done** (multi fill/stroke, reorder, per-item opacity/blend/visibility); live **effects** + blend **compositing** **Planned** | 3 |
+| Appearance (multi fill/stroke/fx) | full non-destructive stack | **Done** (multi fill/stroke, reorder, per-item opacity/blend/visibility; live **effects**: Drop Shadow + Gaussian Blur); blend **compositing** + remaining effects **Planned** | 3 |
 | Gradients (linear/radial/freeform) | + dither + perceptual | **Planned** | 3 |
 | Mesh gradient | full | **Planned** | 3 |
 | Patterns / symbols / brushes | full | **Planned** | 3,5 |
-| Live effects | non-destructive fx | **Planned** (via `prism-fx`) | 3 |
+| Live effects | non-destructive fx | **Partial** — Drop Shadow + Gaussian Blur (canvas/SVG/PNG); rest **Planned** (via `prism-fx`) | 3 |
 | Blend modes / opacity masks | full | **Planned** (reuse `prism-core`) | 3 |
 | Blends / envelope / puppet warp | full | **Planned** | 4 |
 | Type / area / on-path / variable | full | **Planned** | 5 |
@@ -311,8 +311,8 @@ Skim of PLAN against both apps. Most are already filed in §4 (cross-referenced)
 the genuinely-missing or under-specified ones are added here so nothing slips.
 Record-only — not scheduled into a phase yet.
 
-- [x] **Appearance / Effects panel as a first-class UI** (L) — the panel surface for the Appearance stack (add/reorder/toggle fills & strokes per object). *(Done: stack-aware inspector over an `appearance` module + additive `Option<Appearance>`; canvas + SVG/PNG walk the stack. **Effects** entries still deferred — see "Live shape effects" below.)*
-- [ ] **Live shape effects** (M) — non-destructive effect entries (drop-shadow, blur, glow, round-corners, warp/distort) editable after the fact via the Appearance panel. *(Overlaps §3 "Live effects".)*
+- [x] **Appearance / Effects panel as a first-class UI** (L) — the panel surface for the Appearance stack (add/reorder/toggle fills & strokes per object, plus live effects). *(Done: stack-aware inspector over an `appearance` module + additive `Option<Appearance>`; canvas + SVG/PNG walk the stack; an **Effects** section adds/removes/reorders/edits Drop Shadow + Gaussian Blur.)*
+- [~] **Live shape effects** (M) — non-destructive effect entries (drop-shadow, blur, glow, round-corners, warp/distort) editable after the fact via the Appearance panel. *(**Drop Shadow** + **Gaussian Blur** Done — see §3 "Live effects". Glow / round-corners / warp / distort still open.)*
 - [ ] **Layer effects / fx on layers & groups** (M) — apply the same live effects to a whole layer or group, not just a single object (Affinity's per-layer FX).
 - [ ] **Isolation mode** (M) — double-click a group to edit its contents in isolation, dimming everything else; breadcrumb to exit. *(Listed in §2/§8; surface as its own deliverable.)*
 - [ ] **Recolor Artwork** (M) — remap a selection's colors via a palette/harmony UI, global-color edits, reduce-to-N-colors. *(In §5; the interactive dialog is the missing piece.)*

@@ -77,6 +77,7 @@ fn appearance_round_trips_on_shape_and_overrides_legacy() {
             Fill::solid([0.0, 0.0, 1.0, 0.5]),
         ],
         strokes: vec![],
+        effects: vec![],
     }));
     let doc = Document {
         shapes: vec![s],

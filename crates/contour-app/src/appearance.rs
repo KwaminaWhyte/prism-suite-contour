@@ -168,16 +168,105 @@ impl Stroke {
     }
 }
 
-/// An object's stacked appearance: fills (bottom-to-top) then strokes
-/// (bottom-to-top), painted in that order over the shape's geometry.
+/// A non-destructive **live effect** applied to a shape's rasterized appearance.
+///
+/// Effects sit on top of the fill/stroke stack: the fills + strokes are
+/// rasterized first (via `tiny-skia`, the same path PNG export uses), then each
+/// effect transforms that raster in order, bottom-to-top. Because the effect
+/// works on a *rendered* raster (not the path), an egui painter — which cannot
+/// blur — can still show drop-shadows / blurs by compositing the processed
+/// texture. The parameters here are pure data (no GPU / context), so the model
+/// round-trips through serde and the inspector edits it like any other stack
+/// item; the raster math lives in [`crate::effects`].
+///
+/// Only [`Effect::DropShadow`] and [`Effect::GaussianBlur`] ship this pass;
+/// Transform / Outer Glow / distorts are deferred (see the crate gap notes).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Effect {
+    /// A soft offset shadow drawn *behind* the artwork: the shape's alpha is
+    /// tinted `color`, offset by `(dx, dy)` document units, blurred by `blur`
+    /// (a Gaussian-equivalent radius in document units), scaled by `opacity`,
+    /// and composited under the original artwork.
+    DropShadow {
+        dx: f32,
+        dy: f32,
+        blur: f32,
+        /// Straight-sRGB RGBA shadow colour (alpha is the base shadow strength).
+        color: [f32; 4],
+        /// Extra `0..=1` multiplier on the shadow alpha.
+        opacity: f32,
+    },
+    /// A Gaussian blur of the whole artwork by `radius` document units.
+    GaussianBlur { radius: f32 },
+}
+
+impl Effect {
+    /// A sensible default Drop Shadow (down-right soft black shadow).
+    pub fn drop_shadow() -> Self {
+        Effect::DropShadow {
+            dx: 4.0,
+            dy: 4.0,
+            blur: 4.0,
+            color: [0.0, 0.0, 0.0, 0.75],
+            opacity: 1.0,
+        }
+    }
+
+    /// A default Gaussian Blur.
+    pub fn gaussian_blur() -> Self {
+        Effect::GaussianBlur { radius: 4.0 }
+    }
+
+    /// Short label for the inspector / list rows.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Effect::DropShadow { .. } => "Drop Shadow",
+            Effect::GaussianBlur { .. } => "Gaussian Blur",
+        }
+    }
+
+    /// Whether this effect does any visible work (skippable when not).
+    pub fn is_active(&self) -> bool {
+        match self {
+            Effect::DropShadow {
+                blur,
+                color,
+                opacity,
+                ..
+            } => (color[3] * opacity) > 0.0 && *blur >= 0.0,
+            Effect::GaussianBlur { radius } => *radius > 0.0,
+        }
+    }
+
+    /// How far (document units) this effect can spill past the shape's tight
+    /// bounds, so a rasterizer knows how much padding to add around the artwork
+    /// before applying it. Drop-shadow padding covers the offset plus the blur
+    /// reach; blur padding covers the blur reach. A generous `~3σ` (≈ `3×`
+    /// radius) margin keeps the soft edge from clipping.
+    pub fn bounds_pad(&self) -> f32 {
+        match self {
+            Effect::DropShadow { dx, dy, blur, .. } => {
+                dx.abs().max(dy.abs()) + blur.abs() * 3.0
+            }
+            Effect::GaussianBlur { radius } => radius.abs() * 3.0,
+        }
+    }
+}
+
+/// An object's stacked appearance: fills (bottom-to-top), strokes (bottom-to-top)
+/// painted over the geometry, then live [`Effect`]s applied to the rasterized
+/// result (bottom-to-top).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Appearance {
     #[serde(default)]
     pub fills: Vec<Fill>,
     #[serde(default)]
     pub strokes: Vec<Stroke>,
-    // NOTE: live effects (`effects: Vec<Effect>`) are deferred this pass — see the
-    // crate gap notes. The struct is the seam where they will attach.
+    /// Live, non-destructive effects applied to the rendered fill/stroke raster
+    /// (drop-shadow, blur, …). Additive (`#[serde(default)]` → empty) so every
+    /// pre-existing `.contour` file loads with no effects.
+    #[serde(default)]
+    pub effects: Vec<Effect>,
 }
 
 impl Appearance {
@@ -216,12 +305,35 @@ impl Appearance {
                 ..Stroke::default()
             });
         }
-        Self { fills, strokes }
+        Self {
+            fills,
+            strokes,
+            effects: Vec::new(),
+        }
     }
 
     /// Whether the stack has nothing to paint (no visible fills or strokes).
+    /// Effects alone can't paint (they transform a fill/stroke raster), so an
+    /// effects-only stack is still "empty".
     pub fn is_empty(&self) -> bool {
         self.fills.is_empty() && self.strokes.is_empty()
+    }
+
+    /// Whether any active live effect is present (so the renderer takes the
+    /// rasterize-and-composite path instead of the plain painter path).
+    pub fn has_active_effects(&self) -> bool {
+        self.effects.iter().any(Effect::is_active)
+    }
+
+    /// Total document-unit padding any effect needs around the artwork bounds
+    /// (the max over all active effects' [`Effect::bounds_pad`]). `0.0` when
+    /// there are no effects.
+    pub fn effect_pad(&self) -> f32 {
+        self.effects
+            .iter()
+            .filter(|e| e.is_active())
+            .map(Effect::bounds_pad)
+            .fold(0.0, f32::max)
     }
 
     // --- Reorder / stack editing (pure; the inspector drives these) ----------
@@ -245,6 +357,16 @@ impl Appearance {
     /// Move stroke `i` one step down the stack.
     pub fn lower_stroke(&mut self, i: usize) -> bool {
         move_down(&mut self.strokes, i)
+    }
+
+    /// Move effect `i` one step up the stack (applied later).
+    pub fn raise_effect(&mut self, i: usize) -> bool {
+        move_up(&mut self.effects, i)
+    }
+
+    /// Move effect `i` one step down the stack (applied earlier).
+    pub fn lower_effect(&mut self, i: usize) -> bool {
+        move_down(&mut self.effects, i)
     }
 }
 
@@ -355,6 +477,7 @@ mod tests {
                 Fill::solid([0.0, 1.0, 0.0, 1.0]), // index 2 (top)
             ],
             strokes: vec![],
+            effects: vec![],
         };
         // Raise index 0 (towards top) → swaps with 1.
         assert!(a.raise_fill(0));
@@ -376,6 +499,7 @@ mod tests {
                 Stroke::solid([0.0, 0.0, 0.0, 1.0], 1.0),
                 Stroke::solid([1.0, 1.0, 1.0, 1.0], 4.0),
             ],
+            effects: vec![],
         };
         assert!(a.raise_stroke(0));
         assert_eq!(a.strokes[0].width, 4.0);
@@ -403,6 +527,10 @@ mod tests {
                 blend: BlendMode::Screen,
                 visible: true,
             }],
+            effects: vec![
+                Effect::drop_shadow(),
+                Effect::GaussianBlur { radius: 6.5 },
+            ],
         };
         let json = serde_json::to_string(&a).unwrap();
         let back: Appearance = serde_json::from_str(&json).unwrap();
@@ -427,5 +555,128 @@ mod tests {
         assert!((c[3] - 0.4).abs() < 1e-6);
         // RGB untouched.
         assert_eq!([c[0], c[1], c[2]], [1.0, 0.5, 0.0]);
+    }
+
+    // --- Effects ------------------------------------------------------------
+
+    #[test]
+    fn effect_serde_round_trip() {
+        let fx = vec![
+            Effect::DropShadow {
+                dx: 5.0,
+                dy: -3.0,
+                blur: 8.0,
+                color: [0.1, 0.2, 0.3, 0.6],
+                opacity: 0.9,
+            },
+            Effect::GaussianBlur { radius: 12.5 },
+        ];
+        let json = serde_json::to_string(&fx).unwrap();
+        let back: Vec<Effect> = serde_json::from_str(&json).unwrap();
+        assert_eq!(fx, back);
+    }
+
+    /// An old document's appearance JSON (no `effects` key) loads with an empty
+    /// effects vec — back-compat for every pre-effects `.contour` file.
+    #[test]
+    fn effects_default_empty_on_old_docs() {
+        let json = r#"{"fills":[{"paint":{"Solid":[1,0,0,1]}}],"strokes":[]}"#;
+        let a: Appearance = serde_json::from_str(json).unwrap();
+        assert!(a.effects.is_empty(), "missing effects key defaults to empty");
+        assert!(!a.has_active_effects());
+        assert_eq!(a.effect_pad(), 0.0);
+    }
+
+    #[test]
+    fn full_appearance_with_effects_round_trips() {
+        let a = Appearance {
+            fills: vec![Fill::solid([1.0, 0.0, 0.0, 1.0])],
+            strokes: vec![],
+            effects: vec![Effect::drop_shadow(), Effect::gaussian_blur()],
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        let back: Appearance = serde_json::from_str(&json).unwrap();
+        assert_eq!(a, back);
+        assert!(back.has_active_effects());
+    }
+
+    #[test]
+    fn effect_is_active_logic() {
+        assert!(Effect::drop_shadow().is_active());
+        assert!(Effect::GaussianBlur { radius: 1.0 }.is_active());
+        // A zero-radius blur and a fully-transparent / zero-opacity shadow are
+        // no-ops and must be skipped by the renderer.
+        assert!(!Effect::GaussianBlur { radius: 0.0 }.is_active());
+        assert!(!Effect::DropShadow {
+            dx: 4.0,
+            dy: 4.0,
+            blur: 4.0,
+            color: [0.0, 0.0, 0.0, 0.0],
+            opacity: 1.0,
+        }
+        .is_active());
+        assert!(!Effect::DropShadow {
+            dx: 4.0,
+            dy: 4.0,
+            blur: 4.0,
+            color: [0.0, 0.0, 0.0, 1.0],
+            opacity: 0.0,
+        }
+        .is_active());
+    }
+
+    #[test]
+    fn effect_bounds_pad_covers_offset_and_blur() {
+        // Shadow padding = max(|dx|,|dy|) + 3·blur.
+        let s = Effect::DropShadow {
+            dx: 10.0,
+            dy: -2.0,
+            blur: 4.0,
+            color: [0.0, 0.0, 0.0, 1.0],
+            opacity: 1.0,
+        };
+        assert!((s.bounds_pad() - (10.0 + 12.0)).abs() < 1e-6);
+        // Blur padding = 3·radius.
+        assert!((Effect::GaussianBlur { radius: 5.0 }.bounds_pad() - 15.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn effect_pad_is_max_over_active_effects() {
+        let a = Appearance {
+            fills: vec![Fill::solid([0.0; 4])],
+            strokes: vec![],
+            effects: vec![
+                Effect::GaussianBlur { radius: 2.0 }, // pad 6
+                Effect::DropShadow {
+                    dx: 20.0,
+                    dy: 0.0,
+                    blur: 0.0,
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    opacity: 1.0,
+                }, // pad 20
+                Effect::GaussianBlur { radius: 0.0 }, // inactive → ignored
+            ],
+        };
+        assert_eq!(a.effect_pad(), 20.0);
+    }
+
+    #[test]
+    fn reorder_effects_moves_one_step() {
+        let mut a = Appearance {
+            fills: vec![],
+            strokes: vec![],
+            effects: vec![
+                Effect::GaussianBlur { radius: 1.0 },
+                Effect::GaussianBlur { radius: 2.0 },
+                Effect::GaussianBlur { radius: 3.0 },
+            ],
+        };
+        assert!(a.raise_effect(0));
+        assert_eq!(a.effects[0], Effect::GaussianBlur { radius: 2.0 });
+        assert_eq!(a.effects[1], Effect::GaussianBlur { radius: 1.0 });
+        assert!(a.lower_effect(2));
+        assert_eq!(a.effects[2], Effect::GaussianBlur { radius: 1.0 });
+        assert!(!a.raise_effect(2));
+        assert!(!a.lower_effect(0));
     }
 }
