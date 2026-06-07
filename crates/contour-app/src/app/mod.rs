@@ -22,6 +22,9 @@ use egui::{Color32, Vec2};
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tool {
     Select,
+    /// Edit individual anchor points and their Bézier handles on a path or
+    /// compound path (Illustrator's Direct Selection, `A`).
+    DirectSelect,
     Rect,
     Ellipse,
     Line,
@@ -40,6 +43,7 @@ impl Tool {
     fn icon(self) -> &'static str {
         match self {
             Tool::Select => icons::SELECT,
+            Tool::DirectSelect => icons::DIRECT_SELECT,
             Tool::Rect => icons::RECT,
             Tool::Ellipse => icons::ELLIPSE,
             Tool::Line => icons::LINE,
@@ -52,6 +56,7 @@ impl Tool {
     fn name(self) -> &'static str {
         match self {
             Tool::Select => "Select",
+            Tool::DirectSelect => "Direct Select (A)",
             Tool::Rect => "Rectangle",
             Tool::Ellipse => "Ellipse",
             Tool::Line => "Line",
@@ -96,6 +101,10 @@ struct Keys {
     eyedropper: bool,
     /// Single-key `M` pressed (no modifiers) — activate the Shape Builder tool.
     shape_builder: bool,
+    /// Single-key `A` pressed (no modifiers) — activate the Direct-Select tool.
+    direct_select: bool,
+    /// Single-key `V` pressed (no modifiers) — activate the Select tool.
+    select_tool: bool,
 }
 
 /// While building a pen path, which part of the freshest anchor is being
@@ -113,6 +122,26 @@ enum PathEdit {
     Anchor(usize),
     /// Dragging the out-handle of anchor `i` (the in-handle mirrors).
     Handle(usize),
+}
+
+/// A single editable anchor of the primary shape, addressed by its sub-contour
+/// (`0` for a plain `Path`; the sub-path index for a `Compound`) and its anchor
+/// index within that contour. The Direct-Select tool's selection is a set of
+/// these.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct AnchorRef {
+    contour: usize,
+    anchor: usize,
+}
+
+/// What the Direct-Select tool is dragging this gesture.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DsDrag {
+    /// Moving the selected anchor set together (started on an anchor).
+    Anchors,
+    /// Reshaping a single anchor's tangent by dragging its out- or in-handle
+    /// knob. `out` is true for the out-knob, false for the mirrored in-knob.
+    Handle { anchor: AnchorRef, out: bool },
 }
 
 /// An in-progress free-transform on the selection: which gesture, the pivot it
@@ -174,6 +203,22 @@ struct Interaction {
     /// Shape Builder: the atomic faces of the selected shapes, rebuilt when the
     /// gesture begins, plus the sampled drag path across them.
     sb_drag: Option<ShapeBuilderDrag>,
+    /// Direct-Select: the set of selected anchors of the primary shape (in
+    /// click / marquee order). Drives the on-canvas overlay (selected vs
+    /// unselected anchors), the multi-anchor move, and the Delete key.
+    ds_anchors: Vec<AnchorRef>,
+    /// Direct-Select: the active drag (moving the selected anchors, or reshaping
+    /// a single handle).
+    ds_drag: Option<DsDrag>,
+    /// Direct-Select: last cursor position (document space) during an anchor move,
+    /// so the whole selected set tracks the same delta.
+    ds_last: Option<(f32, f32)>,
+    /// Direct-Select: an in-progress rubber-band over anchors `(anchor, current)`
+    /// in document space, started on empty canvas.
+    ds_marquee: Option<((f32, f32), (f32, f32))>,
+    /// Direct-Select: anchor selection captured when a shift-marquee began, so the
+    /// marquee adds to (rather than replaces) the prior anchor selection.
+    ds_marquee_base: Vec<AnchorRef>,
 }
 
 /// An in-progress Shape Builder gesture: the region graph (atomic faces) of the
@@ -377,6 +422,10 @@ impl eframe::App for ContourApp {
                 eyedropper: !cmd && i.key_pressed(egui::Key::I),
                 // Plain `M` activates the Shape Builder.
                 shape_builder: !cmd && i.key_pressed(egui::Key::M),
+                // Plain `A` activates the Direct-Select tool; plain `V` the Select
+                // tool (Illustrator's tool letters).
+                direct_select: !cmd && i.key_pressed(egui::Key::A),
+                select_tool: !cmd && i.key_pressed(egui::Key::V),
             }
         });
         let Keys {
@@ -394,6 +443,8 @@ impl eframe::App for ContourApp {
             clip: clip_key,
             eyedropper: eyedropper_key,
             shape_builder: shape_builder_key,
+            direct_select: direct_select_key,
+            select_tool: select_tool_key,
         } = keys;
         // `I` switches to the eyedropper (committing any in-progress pen path
         // first, mirroring how clicking a tool button behaves). Guarded so it is
@@ -411,6 +462,19 @@ impl eframe::App for ContourApp {
             }
             self.tool = Tool::ShapeBuilder;
         }
+        // `A` switches to Direct-Select, `V` back to Select (same focus guard).
+        if direct_select_key && self.tool != Tool::DirectSelect && !ctx.wants_keyboard_input() {
+            if self.tool == Tool::Pen {
+                self.commit_pen(false);
+            }
+            self.set_tool(Tool::DirectSelect);
+        }
+        if select_tool_key && self.tool != Tool::Select && !ctx.wants_keyboard_input() {
+            if self.tool == Tool::Pen {
+                self.commit_pen(false);
+            }
+            self.set_tool(Tool::Select);
+        }
         if enter && self.tool == Tool::Pen {
             self.commit_pen(true);
         }
@@ -421,7 +485,13 @@ impl eframe::App for ContourApp {
             self.undo();
         }
         if delete {
-            self.delete_selected();
+            // In Direct-Select with anchors picked, Delete removes those anchors
+            // (re-fitting the path); otherwise it deletes the whole selection.
+            if self.tool == Tool::DirectSelect && !self.inter.ds_anchors.is_empty() {
+                self.delete_selected_anchors();
+            } else {
+                self.delete_selected();
+            }
         }
         if let Some(op) = arrange_key {
             self.arrange_selection(op);

@@ -1,4 +1,7 @@
-use super::path::{delete_anchor, insert_anchor, is_corner, segment_count, toggle_anchor_smooth};
+use super::path::{
+    anchors_in_rect, delete_anchor, handle_endpoints, insert_anchor, is_corner, make_corner,
+    make_smooth, segment_count, toggle_anchor_smooth,
+};
 use super::*;
 use crate::transform::Affine;
 
@@ -373,6 +376,189 @@ fn toggle_anchor_endpoint_uses_single_neighbour() {
     assert!(now_smooth);
     let (hx, hy) = handles[0];
     assert!(hx > 0.0 && hy.abs() < 1e-3);
+}
+
+// --- Direct-Select: marquee, handle math, convert, compound editing ----
+
+#[test]
+fn anchors_in_rect_selects_only_contained_anchors() {
+    let pts = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (50.0, 50.0)];
+    // A box covering the first three anchors but not the far one.
+    let inside = anchors_in_rect(&pts, &[-1.0, -1.0, 12.0, 12.0]);
+    assert_eq!(inside, vec![0, 1, 2]);
+    // Edge-touching counts (anchor exactly on the boundary).
+    let edge = anchors_in_rect(&pts, &[10.0, 0.0, 40.0, 50.0]);
+    assert!(edge.contains(&1) && edge.contains(&3));
+    // A box catching nothing.
+    assert!(anchors_in_rect(&pts, &[100.0, 100.0, 5.0, 5.0]).is_empty());
+}
+
+#[test]
+fn anchors_in_rect_normalises_negative_extent() {
+    let pts = vec![(5.0, 5.0), (50.0, 50.0)];
+    // A box dragged "up-left" (negative w/h) still selects by its real extent.
+    let sel = anchors_in_rect(&pts, &[10.0, 10.0, -10.0, -10.0]);
+    assert_eq!(sel, vec![0]);
+}
+
+#[test]
+fn handle_endpoints_mirror_about_anchor() {
+    let pts = vec![(10.0, 10.0), (50.0, 10.0)];
+    let handles = vec![(5.0, -8.0), (0.0, 0.0)];
+    // Smooth anchor: out = anchor + offset, in = anchor − offset (mirror).
+    let (out, inp) = handle_endpoints(&pts, &handles, 0).expect("has handle");
+    assert_eq!(out, (15.0, 2.0));
+    assert_eq!(inp, (5.0, 18.0));
+    // Corner anchor: no handle endpoints.
+    assert!(handle_endpoints(&pts, &handles, 1).is_none());
+}
+
+#[test]
+fn make_corner_drops_handle_make_smooth_adds_mirror() {
+    let pts = vec![(0.0, 0.0), (100.0, 0.0), (200.0, 0.0)];
+    let mut handles = vec![(0.0, 0.0); 3];
+    // Corner → smooth: middle anchor gets a non-zero (mirrored) tangent.
+    assert!(make_smooth(&pts, &mut handles, false, 1));
+    assert!(!is_corner(&handles, 1));
+    let (hx, hy) = handles[1];
+    assert!(hx > 0.0 && hy.abs() < 1e-3, "smooth tangent ~horizontal");
+    // make_smooth on an already-smooth anchor is a no-op.
+    assert!(!make_smooth(&pts, &mut handles, false, 1));
+    // Smooth → corner: handle zeroed.
+    assert!(make_corner(&mut handles, pts.len(), 1));
+    assert!(is_corner(&handles, 1));
+    // make_corner on an already-corner anchor is a no-op.
+    assert!(!make_corner(&mut handles, pts.len(), 1));
+}
+
+#[test]
+fn shape_contour_count_and_access() {
+    let path = open_path();
+    assert_eq!(path.contour_count(), 1);
+    assert!(path.contour(0).is_some());
+    assert!(path.contour(1).is_none());
+
+    let compound = donut(FillRule::NonZero);
+    assert_eq!(compound.contour_count(), 2);
+    let (pts, _, closed) = compound.contour(1).expect("inner ring");
+    assert!(closed);
+    assert_eq!(pts.len(), 4);
+
+    // Non-editable shapes expose no contours.
+    let rect = Shape::Rect {
+        rect: [0.0, 0.0, 10.0, 10.0],
+        fill: [0.0; 4],
+        fill_gradient: None,
+        stroke: [0.0; 4],
+        stroke_w: 1.0,
+        stroke_style: StrokeStyle::default(),
+        appearance: None,
+        visible: true,
+        group: None,
+        clip: None,
+        mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
+        blend: None,
+        blend_step: false,
+    };
+    assert_eq!(rect.contour_count(), 0);
+}
+
+#[test]
+fn set_anchor_and_handle_move_the_right_point() {
+    let mut path = open_path();
+    assert!(path.set_anchor(0, 1, 42.0, 7.0));
+    let (pts, _, _) = path.contour(0).unwrap();
+    assert_eq!(pts[1], (42.0, 7.0));
+
+    // set_handle places the out-knob at the cursor (offset stored relative to
+    // the anchor).
+    assert!(path.set_handle(0, 1, 52.0, 7.0));
+    let (pts, handles, _) = path.contour(0).unwrap();
+    assert_eq!(handles[1], (52.0 - pts[1].0, 7.0 - pts[1].1));
+}
+
+#[test]
+fn insert_and_delete_anchor_on_compound_subcontour() {
+    let mut compound = donut(FillRule::NonZero);
+    // Insert on the inner ring (contour 1), first segment, midpoint.
+    let before = compound.contour(1).unwrap().0.len();
+    let idx = compound.insert_anchor_in(1, 0, 0.5).expect("inserted");
+    assert_eq!(idx, 1);
+    assert_eq!(compound.contour(1).unwrap().0.len(), before + 1);
+    // Delete it again.
+    assert!(compound.delete_anchor_in(1, idx));
+    assert_eq!(compound.contour(1).unwrap().0.len(), before);
+    // The outer ring (contour 0) is untouched.
+    assert_eq!(compound.contour(0).unwrap().0.len(), 4);
+}
+
+#[test]
+fn convert_anchor_on_compound_toggles_smooth_corner() {
+    let mut compound = donut(FillRule::NonZero);
+    // Inner ring corner → smooth.
+    let smooth = compound.toggle_anchor_smooth_in(1, 0);
+    assert!(smooth);
+    let (_, handles, _) = compound.contour(1).unwrap();
+    assert!(!is_corner(handles, 0));
+    // Back to corner.
+    let smooth = compound.toggle_anchor_smooth_in(1, 0);
+    assert!(!smooth);
+    let (_, handles, _) = compound.contour(1).unwrap();
+    assert!(is_corner(handles, 0));
+}
+
+#[test]
+fn delete_anchor_in_refuses_below_two_points() {
+    // A two-point open path: deleting any anchor would leave a single point.
+    let mut path = Shape::Path {
+        points: vec![(0.0, 0.0), (10.0, 0.0)],
+        closed: false,
+        fill: [0.0; 4],
+        fill_gradient: None,
+        stroke: [0.0; 4],
+        stroke_w: 1.0,
+        stroke_style: StrokeStyle::default(),
+        appearance: None,
+        handles: vec![(0.0, 0.0); 2],
+        visible: true,
+        group: None,
+        clip: None,
+        mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
+        blend: None,
+        blend_step: false,
+    };
+    assert!(!path.delete_anchor_in(0, 0));
+    assert_eq!(path.contour(0).unwrap().0.len(), 2);
+}
+
+/// A simple three-anchor open corner path for the Direct-Select shape tests.
+fn open_path() -> Shape {
+    Shape::Path {
+        points: vec![(0.0, 0.0), (50.0, 0.0), (100.0, 0.0)],
+        closed: false,
+        fill: [0.0; 4],
+        fill_gradient: None,
+        stroke: [0.0, 0.0, 0.0, 1.0],
+        stroke_w: 1.0,
+        stroke_style: StrokeStyle::default(),
+        appearance: None,
+        handles: vec![(0.0, 0.0); 3],
+        visible: true,
+        group: None,
+        clip: None,
+        mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
+        blend: None,
+        blend_step: false,
+    }
 }
 
 // --- Stroke style ------------------------------------------------------

@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Direct-Select tool (`A`) — anchor & handle editing** (closes the Phase 4
+  "Direct-select" item). A dedicated tool that selects and reshapes individual
+  anchor points and their Bézier control handles on a path **and** on the
+  sub-contours of a compound path, end to end:
+  - **Pick & move anchors.** Click an anchor to select it (Shift-click extends),
+    then drag to move it; the whole selected anchor set drags together. Anchors
+    are addressed by a `(contour, anchor)` pair so a `Shape::Path` and every
+    sub-path of a `Shape::Compound` edit through the same code (new
+    `Shape::contour` / `contour_mut` / `set_anchor` / `set_handle` accessors).
+  - **Reshape handles.** A selected anchor shows its mirrored tangent handles;
+    dragging the out- or in-knob bends the adjacent curves live (the in-knob
+    mirrors through the anchor).
+  - **Marquee anchors.** Rubber-band on empty canvas selects every anchor of the
+    primary shape inside the box (Shift adds to the current set) — new pure
+    `anchors_in_rect` helper.
+  - **Add / delete / convert.** Click a path segment to **insert** an anchor
+    (de Casteljau split, shape-preserving, across all sub-contours); **Delete**
+    removes the selected anchors and re-fits the path (refusing to drop a contour
+    below two points); **Alt-click** an anchor **converts** it smooth↔corner
+    (corner = no handle, smooth = mirrored tangent synthesised from the
+    neighbours) via new `make_corner` / `make_smooth` primitives.
+  - **On-canvas overlay.** Pixel-aligned anchor glyphs (round = smooth, square =
+    corner), drawn **selected** (filled accent) vs **unselected** (white with an
+    accent ring), plus handle lines and knobs for each selected anchor — through
+    the existing comp↔screen mapping (`canvas::paint_direct_select`).
+  - All edits route through the existing undo system (drags coalesce into one
+    step; no-op edits record nothing). Keyboard: `A` Direct-Select, `V` Select.
+    9 new pure unit tests (marquee containment, handle mirror math, smooth/corner
+    convert, compound sub-contour insert/delete/convert, min-points guard).
 - **True compound-path object — `Object ▸ Compound Path ▸ Make / Release`**
   (closes the documented "compound-path object" gap left by the Pathfinder pass).
   A new `Shape::Compound` document variant keeps several sub-contours (an outer

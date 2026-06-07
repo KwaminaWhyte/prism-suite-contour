@@ -12,8 +12,8 @@ mod style;
 mod tests;
 
 pub use path::{
-    bez_path, flatten, handle_at, nearest_segment, point_in_rings, rects_intersect, FillRule,
-    SubPath,
+    anchors_in_rect, bez_path, flatten, handle_at, handle_endpoints, nearest_segment,
+    point_in_rings, rects_intersect, FillRule, SubPath,
 };
 pub use style::{LineCap, LineJoin, StrokeStyle};
 
@@ -31,6 +31,16 @@ use serde::{Deserialize, Serialize};
 fn default_true() -> bool {
     true
 }
+
+/// A read-only view of one editable sub-contour: its anchor `points`, per-anchor
+/// out-tangent `handles`, and whether it is `closed`. Returned by
+/// [`Shape::contour`] so the Direct-Select tool treats a `Path` and each
+/// sub-path of a `Compound` uniformly.
+pub type ContourRef<'a> = (&'a [(f32, f32)], &'a [(f32, f32)], bool);
+
+/// A mutable view of one editable sub-contour (anchor points, out-tangent
+/// handles, `closed`). Returned by [`Shape::contour_mut`].
+pub type ContourMut<'a> = (&'a mut Vec<(f32, f32)>, &'a mut Vec<(f32, f32)>, bool);
 
 /// One drawable vector primitive.
 ///
@@ -1160,6 +1170,132 @@ impl Shape {
         } = self
         {
             path::toggle_anchor_smooth(points, handles, *closed, i)
+        } else {
+            false
+        }
+    }
+
+    // --- Direct-select sub-contour access -----------------------------------
+    //
+    // A `Path` is one contour; a `Compound` is several. The Direct-Select tool
+    // edits anchors/handles uniformly across both by addressing a `(contour,
+    // anchor)` pair, so these accessors expose the `(points, handles, closed)`
+    // triple per contour index. `Rect`/`Ellipse`/`Line` are not directly
+    // editable (the tool converts them to paths first), so they expose none.
+
+    /// Number of editable sub-contours: 1 for a `Path`, the sub-path count for a
+    /// `Compound`, 0 for anything else.
+    pub fn contour_count(&self) -> usize {
+        match self {
+            Shape::Path { .. } => 1,
+            Shape::Compound { subpaths, .. } => subpaths.len(),
+            _ => 0,
+        }
+    }
+
+    /// Read-only `(points, handles, closed)` of sub-contour `c`, if it exists.
+    pub fn contour(&self, c: usize) -> Option<ContourRef<'_>> {
+        match self {
+            Shape::Path {
+                points,
+                handles,
+                closed,
+                ..
+            } if c == 0 => Some((points, handles, *closed)),
+            Shape::Compound { subpaths, .. } => subpaths
+                .get(c)
+                .map(|sp| (sp.points.as_slice(), sp.handles.as_slice(), sp.closed)),
+            _ => None,
+        }
+    }
+
+    /// Mutable `(points, handles, closed)` of sub-contour `c`, if it exists.
+    /// `handles` is resized to match `points` first so callers can index it.
+    pub fn contour_mut(&mut self, c: usize) -> Option<ContourMut<'_>> {
+        match self {
+            Shape::Path {
+                points,
+                handles,
+                closed,
+                ..
+            } if c == 0 => {
+                if handles.len() < points.len() {
+                    handles.resize(points.len(), (0.0, 0.0));
+                }
+                Some((points, handles, *closed))
+            }
+            Shape::Compound { subpaths, .. } => subpaths.get_mut(c).map(|sp| {
+                if sp.handles.len() < sp.points.len() {
+                    sp.handles.resize(sp.points.len(), (0.0, 0.0));
+                }
+                let closed = sp.closed;
+                (&mut sp.points, &mut sp.handles, closed)
+            }),
+            _ => None,
+        }
+    }
+
+    /// Move anchor `a` of sub-contour `c` to `(x, y)`. Returns `true` on success.
+    pub fn set_anchor(&mut self, c: usize, a: usize, x: f32, y: f32) -> bool {
+        if let Some((points, _, _)) = self.contour_mut(c) {
+            if let Some(p) = points.get_mut(a) {
+                *p = (x, y);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Set the out-tangent handle of anchor `a` of sub-contour `c` so its out-knob
+    /// sits at `(x, y)` (the in-knob mirrors). Returns `true` on success.
+    pub fn set_handle(&mut self, c: usize, a: usize, x: f32, y: f32) -> bool {
+        if let Some((points, handles, _)) = self.contour_mut(c) {
+            if let (Some(&(ax, ay)), Some(h)) = (points.get(a), handles.get_mut(a)) {
+                *h = (x - ax, y - ay);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Insert an anchor into sub-contour `c` at segment `seg`, parameter `t`.
+    pub fn insert_anchor_in(&mut self, c: usize, seg: usize, t: f32) -> Option<usize> {
+        let closed = self.contour(c)?.2;
+        if let Some((points, handles, _)) = self.contour_mut(c) {
+            path::insert_anchor(points, handles, closed, seg, t)
+        } else {
+            None
+        }
+    }
+
+    /// Delete anchor `a` from sub-contour `c` (keeps ≥2 points). `true` on remove.
+    pub fn delete_anchor_in(&mut self, c: usize, a: usize) -> bool {
+        if let Some((points, handles, _)) = self.contour_mut(c) {
+            path::delete_anchor(points, handles, a)
+        } else {
+            false
+        }
+    }
+
+    /// Toggle anchor `a` of sub-contour `c` smooth↔corner. Returns the new smooth
+    /// state (`true` = now smooth). A smooth anchor carries mirrored tangent
+    /// handles; a corner carries none (its segments are straight unless the
+    /// neighbouring anchor still curves its side).
+    pub fn toggle_anchor_smooth_in(&mut self, c: usize, a: usize) -> bool {
+        let (closed, was_corner) = match self.contour(c) {
+            Some((_, handles, closed)) => (closed, path::is_corner(handles, a)),
+            None => return false,
+        };
+        if let Some((points, handles, _)) = self.contour_mut(c) {
+            if was_corner {
+                // Corner → smooth needs the neighbour points; snapshot them so the
+                // immutable read and the mutable handle write don't alias.
+                let pts = points.clone();
+                path::make_smooth(&pts, handles, closed, a)
+            } else {
+                let n = points.len();
+                !path::make_corner(handles, n, a)
+            }
         } else {
             false
         }

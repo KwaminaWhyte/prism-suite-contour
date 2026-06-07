@@ -2,7 +2,7 @@
 //! tool-input state machine (select / create / pen), plus the transform-box
 //! hit-tests and direct-select anchor editing that drive it.
 
-use super::{ContourApp, GuideDrag, PathEdit, PenDrag, Tool, TransformKind};
+use super::{AnchorRef, ContourApp, DsDrag, GuideDrag, PathEdit, PenDrag, Tool, TransformKind};
 use crate::canvas;
 use crate::document::{self, Guide, Shape};
 use crate::snap::{self, SnapFeatures, SnapResult};
@@ -14,6 +14,8 @@ impl ContourApp {
     /// (which has its own handles). The box is suppressed while *directly*
     /// editing a single path's anchors so the two handle sets don't clash.
     pub(super) fn show_transform_box(&self) -> bool {
+        // The transform box is a Select-tool affordance. Direct-Select shows the
+        // anchor/handle overlay instead.
         if self.tool != Tool::Select || self.inter.path_edit.is_some() {
             return false;
         }
@@ -162,7 +164,9 @@ impl ContourApp {
             }
 
             // Editable anchors/handles for the primary selected path.
-            if let Some(i) = self.primary() {
+            if self.tool == Tool::DirectSelect {
+                self.paint_direct_select(&painter);
+            } else if let Some(i) = self.primary() {
                 if let Some(Shape::Path {
                     points, handles, ..
                 }) = self.doc.shapes.get(i)
@@ -189,6 +193,10 @@ impl ContourApp {
 
             // Rubber-band marquee box (Select tool, drag on empty canvas).
             if let Some(bbox) = self.marquee_rect() {
+                canvas::paint_marquee(&painter, &self.view, &bbox);
+            }
+            // Direct-Select anchor marquee.
+            if let Some(bbox) = self.ds_marquee_rect() {
                 canvas::paint_marquee(&painter, &self.view, &bbox);
             }
 
@@ -301,6 +309,7 @@ impl ContourApp {
 
         match self.tool {
             Tool::Select => self.handle_select(response, doc_pos),
+            Tool::DirectSelect => self.handle_direct_select(response, doc_pos),
             Tool::Rect | Tool::Ellipse | Tool::Line => self.handle_create_drag(response, doc_pos),
             Tool::Pen => self.handle_pen(response, doc_pos),
             Tool::Artboard => self.handle_artboard(response, doc_pos),
@@ -740,6 +749,412 @@ impl ContourApp {
         }
     }
 
+    // --- Direct-Select tool --------------------------------------------------
+
+    /// Switch the active tool, clearing the Direct-Select anchor selection when
+    /// leaving (or entering) it so stale anchors never linger on another tool.
+    pub(super) fn set_tool(&mut self, tool: Tool) {
+        if tool != self.tool {
+            self.clear_ds_selection();
+        }
+        self.tool = tool;
+    }
+
+    /// Drop the Direct-Select anchor selection and any in-progress DS gesture.
+    pub(super) fn clear_ds_selection(&mut self) {
+        self.inter.ds_anchors.clear();
+        self.inter.ds_drag = None;
+        self.inter.ds_last = None;
+        self.inter.ds_marquee = None;
+        self.inter.ds_marquee_base.clear();
+    }
+
+    /// The index of the shape the Direct-Select tool edits: the primary
+    /// selection if it is an editable (`Path` / `Compound`) shape, else `None`.
+    fn ds_target(&self) -> Option<usize> {
+        let i = self.primary()?;
+        let s = self.doc.shapes.get(i)?;
+        (s.contour_count() > 0).then_some(i)
+    }
+
+    /// Direct-Select input: pick / drag anchors and handles of the primary path
+    /// (or compound path), marquee-select anchors on empty canvas, and edit the
+    /// path with add (click a segment) / delete (Delete key) / convert
+    /// (Alt-click an anchor) — all routed through the undo system.
+    fn handle_direct_select(&mut self, response: &egui::Response, doc_pos: Option<(f32, f32)>) {
+        let alt = response.ctx.input(|i| i.modifiers.alt);
+        let shift = response.ctx.input(|i| i.modifiers.shift);
+
+        // Alt-click an anchor converts it smooth↔corner (before a drag begins).
+        if alt && response.clicked() {
+            if let Some((x, y)) = doc_pos {
+                if self.ds_convert_anchor(x, y) {
+                    return;
+                }
+            }
+        }
+
+        if response.drag_started() {
+            if let Some((x, y)) = doc_pos {
+                // 1. A handle knob of an already-selected anchor takes priority.
+                if let Some((anchor, out)) = self.ds_hit_handle(x, y) {
+                    self.begin_interaction();
+                    self.inter.ds_drag = Some(DsDrag::Handle { anchor, out });
+                    return;
+                }
+                // 2. An anchor: select it (extend with shift) and start a move.
+                if let Some(a) = self.ds_hit_anchor(x, y) {
+                    if shift {
+                        self.toggle_ds_anchor(a);
+                    } else if !self.inter.ds_anchors.contains(&a) {
+                        self.inter.ds_anchors = vec![a];
+                    }
+                    self.begin_interaction();
+                    self.inter.ds_drag = Some(DsDrag::Anchors);
+                    self.inter.ds_last = Some((x, y));
+                    return;
+                }
+                // 3. Empty canvas: rubber-band over anchors. Shift adds to the
+                //    current anchor selection; a plain marquee replaces it.
+                self.inter.ds_marquee_base = if shift {
+                    self.inter.ds_anchors.clone()
+                } else {
+                    Vec::new()
+                };
+                self.inter.ds_marquee = Some(((x, y), (x, y)));
+            }
+        }
+
+        if response.dragged() {
+            if let Some((x, y)) = doc_pos {
+                if let Some(((ax, ay), _)) = self.inter.ds_marquee {
+                    self.inter.ds_marquee = Some(((ax, ay), (x, y)));
+                    self.update_ds_marquee();
+                } else if let Some(DsDrag::Handle { anchor, out }) = self.inter.ds_drag {
+                    self.ds_drag_handle(anchor, out, x, y);
+                } else if self.inter.ds_drag == Some(DsDrag::Anchors) {
+                    if let Some((lx, ly)) = self.inter.ds_last {
+                        self.ds_move_anchors(x - lx, y - ly);
+                        self.inter.ds_last = Some((x, y));
+                    }
+                } else {
+                    // No anchor/handle grabbed: pan the canvas.
+                    self.view.pan += response.drag_delta();
+                }
+            }
+        }
+
+        if response.drag_stopped() {
+            // A marquee never mutates the document, so it commits no undo entry;
+            // anchor / handle drags coalesce into one (commit drops no-op drags).
+            self.inter.ds_marquee = None;
+            self.inter.ds_marquee_base.clear();
+            let was_edit = self.inter.ds_drag.take().is_some();
+            self.inter.ds_last = None;
+            if was_edit {
+                self.commit_interaction();
+            }
+        }
+
+        // A plain click (press-release, no drag): select / toggle the anchor it
+        // lands on, add an anchor when it lands on a segment, or — on empty
+        // canvas — re-pick the path under the cursor and clear the anchor set.
+        if response.clicked() {
+            if let Some((x, y)) = doc_pos {
+                if alt {
+                    return; // handled above
+                }
+                // A click on a handle knob keeps the selection (no drag occurred).
+                if self.ds_hit_handle(x, y).is_some() {
+                    return;
+                }
+                // Click an anchor: select it (Shift toggles in the multi-set).
+                if let Some(a) = self.ds_hit_anchor(x, y) {
+                    if shift {
+                        self.toggle_ds_anchor(a);
+                    } else {
+                        self.inter.ds_anchors = vec![a];
+                    }
+                    return;
+                }
+                if self.ds_insert_anchor(x, y) {
+                    return;
+                }
+                if shift {
+                    return;
+                }
+                // Click empty space: pick the path under the cursor (so the tool
+                // can move between paths) and drop the anchor selection.
+                let tol = 4.0 / self.view.zoom;
+                let hit = self
+                    .doc
+                    .shapes
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, s)| s.visible() && s.hit(x, y, tol) && s.contour_count() > 0)
+                    .map(|(i, _)| i);
+                if let Some(i) = hit {
+                    if Some(i) != self.primary() {
+                        self.select_only(Some(i));
+                    }
+                }
+                self.inter.ds_anchors.clear();
+            }
+        }
+    }
+
+    /// The current Direct-Select marquee as a normalised document `[x, y, w, h]`.
+    pub(super) fn ds_marquee_rect(&self) -> Option<[f32; 4]> {
+        self.inter.ds_marquee.map(|(a, b)| {
+            let x = a.0.min(b.0);
+            let y = a.1.min(b.1);
+            [x, y, (a.0 - b.0).abs(), (a.1 - b.1).abs()]
+        })
+    }
+
+    /// Recompute the selected-anchor set from the active marquee: every anchor of
+    /// the primary shape caught in the box, on top of the captured base.
+    fn update_ds_marquee(&mut self) {
+        let Some(rect) = self.ds_marquee_rect() else {
+            return;
+        };
+        let Some(i) = self.ds_target() else { return };
+        let mut sel = self.inter.ds_marquee_base.clone();
+        if let Some(shape) = self.doc.shapes.get(i) {
+            for c in 0..shape.contour_count() {
+                if let Some((points, _, _)) = shape.contour(c) {
+                    for a in document::anchors_in_rect(points, &rect) {
+                        let r = AnchorRef {
+                            contour: c,
+                            anchor: a,
+                        };
+                        if !sel.contains(&r) {
+                            sel.push(r);
+                        }
+                    }
+                }
+            }
+        }
+        self.inter.ds_anchors = sel;
+    }
+
+    /// Find the anchor of the primary shape nearest `(x, y)` within tolerance,
+    /// across every sub-contour. Anchors are picked over segments.
+    fn ds_hit_anchor(&self, x: f32, y: f32) -> Option<AnchorRef> {
+        let i = self.ds_target()?;
+        let shape = self.doc.shapes.get(i)?;
+        let tol = 6.0 / self.view.zoom;
+        let mut best: Option<(AnchorRef, f32)> = None;
+        for c in 0..shape.contour_count() {
+            let (points, _, _) = shape.contour(c)?;
+            for (a, &p) in points.iter().enumerate() {
+                let d = (x - p.0).hypot(y - p.1);
+                if d <= tol && best.is_none_or(|(_, bd)| d < bd) {
+                    best = Some((
+                        AnchorRef {
+                            contour: c,
+                            anchor: a,
+                        },
+                        d,
+                    ));
+                }
+            }
+        }
+        best.map(|(r, _)| r)
+    }
+
+    /// Find a tangent handle knob (of a currently-selected anchor) near `(x, y)`.
+    /// Only selected anchors expose their handles, mirroring Illustrator where
+    /// the handles appear once an anchor is picked. Returns the anchor plus
+    /// whether the out-knob (`true`) or the mirrored in-knob (`false`) was hit.
+    fn ds_hit_handle(&self, x: f32, y: f32) -> Option<(AnchorRef, bool)> {
+        let i = self.ds_target()?;
+        let shape = self.doc.shapes.get(i)?;
+        let tol = 6.0 / self.view.zoom;
+        let mut best: Option<((AnchorRef, bool), f32)> = None;
+        for &r in &self.inter.ds_anchors {
+            let Some((points, handles, _)) = shape.contour(r.contour) else {
+                continue;
+            };
+            if let Some((out, inp)) = document::handle_endpoints(points, handles, r.anchor) {
+                let do_ = (x - out.0).hypot(y - out.1);
+                if do_ <= tol && best.is_none_or(|(_, bd)| do_ < bd) {
+                    best = Some(((r, true), do_));
+                }
+                let di = (x - inp.0).hypot(y - inp.1);
+                if di <= tol && best.is_none_or(|(_, bd)| di < bd) {
+                    best = Some(((r, false), di));
+                }
+            }
+        }
+        best.map(|(rb, _)| rb)
+    }
+
+    /// Toggle anchor `a` in the Direct-Select selection (shift-click).
+    fn toggle_ds_anchor(&mut self, a: AnchorRef) {
+        if let Some(pos) = self.inter.ds_anchors.iter().position(|&r| r == a) {
+            self.inter.ds_anchors.remove(pos);
+        } else {
+            self.inter.ds_anchors.push(a);
+        }
+    }
+
+    /// Move every selected anchor by `(dx, dy)` (the multi-anchor drag).
+    fn ds_move_anchors(&mut self, dx: f32, dy: f32) {
+        let Some(i) = self.ds_target() else { return };
+        // Collect the new positions first (immutable reads), then apply.
+        let moves: Vec<(usize, usize, f32, f32)> = {
+            let Some(shape) = self.doc.shapes.get(i) else {
+                return;
+            };
+            self.inter
+                .ds_anchors
+                .iter()
+                .filter_map(|r| {
+                    shape
+                        .contour(r.contour)
+                        .and_then(|(pts, _, _)| pts.get(r.anchor).copied())
+                        .map(|(px, py)| (r.contour, r.anchor, px + dx, py + dy))
+                })
+                .collect()
+        };
+        if let Some(shape) = self.doc.shapes.get_mut(i) {
+            for (c, a, nx, ny) in moves {
+                shape.set_anchor(c, a, nx, ny);
+            }
+        }
+    }
+
+    /// Reshape a single anchor's tangent by dragging its out- or in-handle knob to
+    /// `(x, y)`. Both knobs mirror through the anchor (the model stores one
+    /// symmetric out-offset), so dragging the in-knob to `(x, y)` is the same as
+    /// putting the out-knob at the mirror.
+    fn ds_drag_handle(&mut self, anchor: AnchorRef, out: bool, x: f32, y: f32) {
+        let Some(i) = self.ds_target() else { return };
+        let Some(shape) = self.doc.shapes.get_mut(i) else {
+            return;
+        };
+        if out {
+            shape.set_handle(anchor.contour, anchor.anchor, x, y);
+        } else {
+            // Mirror the cursor about the anchor so the out-handle lands opposite.
+            if let Some((pts, _, _)) = shape.contour(anchor.contour) {
+                if let Some(&(ax, ay)) = pts.get(anchor.anchor) {
+                    let (mx, my) = (2.0 * ax - x, 2.0 * ay - y);
+                    shape.set_handle(anchor.contour, anchor.anchor, mx, my);
+                }
+            }
+        }
+    }
+
+    /// Alt-click convert: toggle the anchor under `(x, y)` smooth↔corner. Returns
+    /// `true` if an anchor was hit (undoable).
+    fn ds_convert_anchor(&mut self, x: f32, y: f32) -> bool {
+        let Some(i) = self.ds_target() else {
+            return false;
+        };
+        let Some(a) = self.ds_hit_anchor(x, y) else {
+            return false;
+        };
+        self.checkpoint();
+        if let Some(shape) = self.doc.shapes.get_mut(i) {
+            let smooth = shape.toggle_anchor_smooth_in(a.contour, a.anchor);
+            self.status = if smooth {
+                "Converted to smooth".into()
+            } else {
+                "Converted to corner".into()
+            };
+            // Keep just this anchor selected so its (new) handles are grabbable.
+            if !self.inter.ds_anchors.contains(&a) {
+                self.inter.ds_anchors = vec![a];
+            }
+        }
+        true
+    }
+
+    /// Insert an anchor on the segment of the primary shape under `(x, y)`, across
+    /// every sub-contour. Returns `true` if one was added (undoable). The new
+    /// anchor becomes the sole selection.
+    fn ds_insert_anchor(&mut self, x: f32, y: f32) -> bool {
+        let Some(i) = self.ds_target() else {
+            return false;
+        };
+        let tol = 6.0 / self.view.zoom;
+        // Find the nearest segment across all sub-contours.
+        let mut best: Option<(usize, usize, f32, f32)> = None; // (contour, seg, t, dist)
+        if let Some(shape) = self.doc.shapes.get(i) {
+            for c in 0..shape.contour_count() {
+                if let Some((points, _, closed)) = shape.contour(c) {
+                    if let Some((seg, t)) = document::nearest_segment(points, closed, x, y, tol) {
+                        // Distance is re-derived: project the cursor on the chord.
+                        let n = points.len();
+                        let a = points[seg];
+                        let b = points[(seg + 1) % n];
+                        let d = point_seg_dist(x, y, a, b);
+                        if best.is_none_or(|(_, _, _, bd)| d < bd) {
+                            best = Some((c, seg, t, d));
+                        }
+                    }
+                }
+            }
+        }
+        let Some((c, seg, t, _)) = best else {
+            return false;
+        };
+        self.checkpoint();
+        if let Some(shape) = self.doc.shapes.get_mut(i) {
+            if let Some(idx) = shape.insert_anchor_in(c, seg, t) {
+                self.status = "Added anchor".into();
+                self.inter.ds_anchors = vec![AnchorRef {
+                    contour: c,
+                    anchor: idx,
+                }];
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Delete every selected anchor of the primary shape (Delete key), re-fitting
+    /// the path. Anchors are removed high-index-first per contour so indices stay
+    /// valid. Refuses to drop a contour below two points. One undo step; a delete
+    /// that removes nothing records no history (via the begin/commit no-op drop).
+    pub(super) fn delete_selected_anchors(&mut self) {
+        let Some(i) = self.ds_target() else { return };
+        if self.inter.ds_anchors.is_empty() {
+            return;
+        }
+        // Group anchors by contour, descending index, deduped.
+        use std::collections::BTreeMap;
+        let mut by_contour: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for r in &self.inter.ds_anchors {
+            by_contour.entry(r.contour).or_default().push(r.anchor);
+        }
+        // Snapshot first; commit drops the checkpoint if nothing actually changed.
+        self.begin_interaction();
+        let mut removed = 0;
+        if let Some(shape) = self.doc.shapes.get_mut(i) {
+            for (c, mut anchors) in by_contour {
+                anchors.sort_unstable();
+                anchors.dedup();
+                for a in anchors.into_iter().rev() {
+                    if shape.delete_anchor_in(c, a) {
+                        removed += 1;
+                    }
+                }
+            }
+        }
+        self.inter.ds_anchors.clear();
+        self.commit_interaction();
+        if removed > 0 {
+            self.status = format!(
+                "Deleted {removed} {}",
+                if removed == 1 { "anchor" } else { "anchors" }
+            );
+        }
+    }
+
     fn handle_create_drag(&mut self, response: &egui::Response, doc_pos: Option<(f32, f32)>) {
         // Snap both the start corner and the live corner so a fresh shape lands
         // on the grid / guides / other objects.
@@ -1020,6 +1435,30 @@ impl ContourApp {
         true
     }
 
+    /// Paint the Direct-Select overlay: every anchor of the primary editable
+    /// shape (selected vs unselected), plus tangent handle lines + knobs for each
+    /// selected anchor. No-op when the primary isn't an editable shape.
+    fn paint_direct_select(&self, painter: &egui::Painter) {
+        let Some(i) = self.ds_target() else { return };
+        let Some(shape) = self.doc.shapes.get(i) else {
+            return;
+        };
+        for c in 0..shape.contour_count() {
+            let Some((points, handles, _)) = shape.contour(c) else {
+                continue;
+            };
+            // Which anchors of this contour are selected (their handles show).
+            let selected: Vec<usize> = self
+                .inter
+                .ds_anchors
+                .iter()
+                .filter(|r| r.contour == c)
+                .map(|r| r.anchor)
+                .collect();
+            canvas::paint_direct_select(&self.view, painter, points, handles, &selected);
+        }
+    }
+
     fn draw_preview(&self, painter: &egui::Painter) {
         // Rubber-band preview for create-drag.
         if let (Some(a), Some(b)) = (self.inter.drag_start, self.inter.drag_now) {
@@ -1051,4 +1490,22 @@ impl ContourApp {
             );
         }
     }
+}
+
+/// Distance from `(px, py)` to the chord `a..b` (clamped to the segment). Used to
+/// rank candidate segments when adding an anchor across a compound path's
+/// sub-contours.
+fn point_seg_dist(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (ax, ay) = a;
+    let (bx, by) = b;
+    let dx = bx - ax;
+    let dy = by - ay;
+    let len2 = dx * dx + dy * dy;
+    if len2 <= 1e-9 {
+        return (px - ax).hypot(py - ay);
+    }
+    let t = (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0);
+    let cx = ax + t * dx;
+    let cy = ay + t * dy;
+    (px - cx).hypot(py - cy)
 }

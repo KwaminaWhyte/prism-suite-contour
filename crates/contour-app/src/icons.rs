@@ -33,6 +33,8 @@ pub fn install(ctx: &egui::Context) {
 
 /// Select / move tool (arrow cursor).
 pub const SELECT: &str = ph::CURSOR;
+/// Direct-Select tool (edit individual anchors / handles).
+pub const DIRECT_SELECT: &str = ph::CURSOR_CLICK;
 /// Rectangle tool.
 pub const RECT: &str = ph::SQUARE;
 /// Ellipse tool.

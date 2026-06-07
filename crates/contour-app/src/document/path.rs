@@ -147,6 +147,83 @@ pub fn handle_at(handles: &[(f32, f32)], i: usize) -> (f32, f32) {
     handles.get(i).copied().unwrap_or((0.0, 0.0))
 }
 
+/// The document-space positions of anchor `i`'s tangent control knobs: the
+/// out-handle (`anchor + offset`) and the mirrored in-handle (`anchor − offset`),
+/// or `None` when the anchor is a corner (no handle to grab). The Direct-Select
+/// tool hit-tests and draws these.
+pub fn handle_endpoints(
+    points: &[(f32, f32)],
+    handles: &[(f32, f32)],
+    i: usize,
+) -> Option<((f32, f32), (f32, f32))> {
+    let p = *points.get(i)?;
+    let (hx, hy) = handle_at(handles, i);
+    if hx == 0.0 && hy == 0.0 {
+        return None;
+    }
+    Some(((p.0 + hx, p.1 + hy), (p.0 - hx, p.1 - hy)))
+}
+
+/// Indices of every anchor whose point lies inside the (normalised) document-
+/// space rectangle `[x, y, w, h]`. The marquee (rubber-band) anchor pick: the
+/// Direct-Select tool selects all anchors caught in the dragged box. Edge-
+/// touching counts as inside (matching [`rects_intersect`]).
+pub fn anchors_in_rect(points: &[(f32, f32)], rect: &[f32; 4]) -> Vec<usize> {
+    let x0 = rect[0].min(rect[0] + rect[2]);
+    let y0 = rect[1].min(rect[1] + rect[3]);
+    let x1 = rect[0].max(rect[0] + rect[2]);
+    let y1 = rect[1].max(rect[1] + rect[3]);
+    points
+        .iter()
+        .enumerate()
+        .filter(|(_, &(px, py))| px >= x0 && px <= x1 && py >= y0 && py <= y1)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Turn anchor `i` into a **corner** by clearing its tangent handle (the
+/// adjacent segments become straight to/from this point unless their *other*
+/// endpoint still carries a handle, which keeps that side curved). Returns `true`
+/// if the anchor changed (it had a handle to drop).
+pub fn make_corner(handles: &mut Vec<(f32, f32)>, n: usize, i: usize) -> bool {
+    if i >= n {
+        return false;
+    }
+    if handles.len() < n {
+        handles.resize(n, (0.0, 0.0));
+    }
+    if is_corner(handles, i) {
+        return false;
+    }
+    handles[i] = (0.0, 0.0);
+    true
+}
+
+/// Turn anchor `i` into a **smooth** point by synthesising a symmetric tangent
+/// from its neighbours (parallel to the `prev → next` chord, scaled to ~1/3 of
+/// it — the classic Catmull-Rom default). Returns `true` if a handle was set.
+/// A no-op (returns `false`) if the anchor is already smooth or the neighbours
+/// are degenerate.
+pub fn make_smooth(
+    points: &[(f32, f32)],
+    handles: &mut Vec<(f32, f32)>,
+    closed: bool,
+    i: usize,
+) -> bool {
+    let n = points.len();
+    if i >= n {
+        return false;
+    }
+    if handles.len() < n {
+        handles.resize(n, (0.0, 0.0));
+    }
+    if !is_corner(handles, i) {
+        return false;
+    }
+    // Reuse the corner→smooth branch of the toggle (it only acts on corners).
+    toggle_anchor_smooth(points, handles, closed, i)
+}
+
 /// Whether anchor `i` is a corner (no tangent handle) given the handle list.
 pub fn is_corner(handles: &[(f32, f32)], i: usize) -> bool {
     let (hx, hy) = handle_at(handles, i);

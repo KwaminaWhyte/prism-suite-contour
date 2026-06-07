@@ -766,6 +766,7 @@ impl ContourApp {
                         ui.vertical_centered(|ui| {
                             for tool in [
                                 Tool::Select,
+                                Tool::DirectSelect,
                                 Tool::Rect,
                                 Tool::Ellipse,
                                 Tool::Line,
@@ -784,7 +785,7 @@ impl ContourApp {
                                     if self.tool == Tool::Pen && tool != Tool::Pen {
                                         self.commit_pen(false);
                                     }
-                                    self.tool = tool;
+                                    self.set_tool(tool);
                                 }
                                 ui.add_space(4.0);
                             }
@@ -871,6 +872,17 @@ impl ContourApp {
                             ui.weak("Drag an anchor or handle to reshape.");
                             ui.weak("Dbl-click a segment to add an anchor.");
                             ui.weak("Dbl-click an anchor to delete it.");
+                            ui.weak("Alt-click an anchor: smooth ⇄ corner.");
+                        }
+
+                        // Direct-Select tool hint.
+                        if self.tool == Tool::DirectSelect {
+                            ui.separator();
+                            ui.label(egui::RichText::new("Direct Select (A)").strong());
+                            ui.weak("Click / marquee anchors; drag to move them.");
+                            ui.weak("Drag a handle knob to reshape the curve.");
+                            ui.weak("Click a segment to add an anchor.");
+                            ui.weak("Delete removes the selected anchors.");
                             ui.weak("Alt-click an anchor: smooth ⇄ corner.");
                         }
 

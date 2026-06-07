@@ -722,6 +722,62 @@ pub fn paint_path_handles(
     }
 }
 
+/// Draw the Direct-Select overlay for one (sub-)contour: every anchor as a glyph
+/// (smooth anchors round, corner anchors square), distinguishing **selected**
+/// anchors (filled accent) from unselected ones (white with an accent ring), and
+/// for each selected anchor its mirrored tangent handle lines + knobs. Mirrors
+/// the Illustrator Direct-Selection look. `selected` lists the selected anchor
+/// indices of this contour.
+pub fn paint_direct_select(
+    view: &View,
+    painter: &egui::Painter,
+    points: &[(f32, f32)],
+    handles: &[(f32, f32)],
+    selected: &[usize],
+) {
+    let accent = theme::accent();
+    // Handle lines + knobs first (under the anchor glyphs), only for selected
+    // anchors so the canvas stays readable.
+    for &i in selected {
+        if let Some(((ox, oy), (ix, iy))) = document::handle_endpoints(points, handles, i) {
+            let Some(&p) = points.get(i) else { continue };
+            let anchor = view.doc_to_screen(p);
+            let out = view.doc_to_screen((ox, oy));
+            let inp = view.doc_to_screen((ix, iy));
+            let line = Stroke::new(1.0, accent);
+            painter.line_segment([anchor, out], line);
+            painter.line_segment([anchor, inp], line);
+            painter.circle_filled(out, 3.5, accent);
+            painter.circle_filled(inp, 3.5, accent);
+        }
+    }
+    for (i, &p) in points.iter().enumerate() {
+        let anchor = view.doc_to_screen(p);
+        let h = document::handle_at(handles, i);
+        let smooth = h.0 != 0.0 || h.1 != 0.0;
+        let is_sel = selected.contains(&i);
+        let ring = Stroke::new(1.5, accent);
+        if smooth {
+            // Round glyph for a smooth anchor.
+            if is_sel {
+                painter.circle_filled(anchor, 4.0, accent);
+            } else {
+                painter.circle_filled(anchor, 4.0, Color32::WHITE);
+                painter.circle_stroke(anchor, 4.0, ring);
+            }
+        } else {
+            // Square glyph for a corner anchor.
+            let sq = Rect::from_center_size(anchor, Vec2::splat(7.0));
+            if is_sel {
+                painter.rect_filled(sq, 0.0, accent);
+            } else {
+                painter.rect_filled(sq, 0.0, Color32::WHITE);
+                painter.rect_stroke(sq, 0.0, ring, egui::StrokeKind::Outside);
+            }
+        }
+    }
+}
+
 /// Highlight the Shape Builder regions the drag has crossed: fill each picked
 /// face's ring(s) with a translucent accent (red-ish for a subtract drag, accent
 /// for a unite drag) and trace the drag path so the user sees what the gesture

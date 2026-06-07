@@ -141,7 +141,7 @@ app-agnostic. Phases 0–1 are largely **done** (see §1); the rest is the road 
 - [x] Pathfinder v1: Union / Intersect / Difference (`i_overlay`)
 - [x] Export: SVG + PNG (`tiny-skia`)
 - [x] **Undo/redo** (M) — snapshot history stack over the document (`history.rs`); Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z (or Ctrl+Y), Edit-menu entries. Coalesces drags (move / anchor-edit) into single entries; drops no-op drags; capped depth
-- [ ] **Direct-select** (M) — drag anchors/handles; add/delete/convert anchor (smooth↔corner); marquee anchors
+- [x] **Direct-select** (M) — drag anchors/handles; add/delete/convert anchor (smooth↔corner); marquee anchors. *(Done: a dedicated **Direct-Select tool** (`A`; `V` switches back to Select) that picks, marquees, and drags individual anchors of a `Path` **and** of every sub-contour of a `Compound` (addressed by a `(contour, anchor)` pair via new `Shape::contour` / `contour_mut` / `set_anchor` / `set_handle`). Selected anchors expose **mirrored Bézier handles** you drag to reshape the curve live; **click a segment** inserts an anchor (de Casteljau, shape-preserving), **Delete** removes the selected anchors and re-fits the path (min-2-points guard), **Alt-click** converts smooth↔corner (corner = no handle, smooth = neighbour-derived mirrored tangent). **Marquee** rubber-bands anchors (Shift adds). On-canvas overlay draws selected vs unselected glyphs (round=smooth, square=corner) plus handle lines/knobs, pixel-aligned via the existing view mapping. All edits route through the undo system (drags coalesce; no-ops drop). New pure helpers `anchors_in_rect` / `handle_endpoints` / `make_corner` / `make_smooth` with 9 unit tests. **Still open:** **broken/independent** handles (the model stores one symmetric out-offset per anchor, so a corner with two independent tangents isn't representable yet — corner means "no handles"); a toolbar/menu convert action (only Alt-click today); anchor editing on `Rect`/`Ellipse`/`Line` without first converting them to paths.)*
 
 ### Phase 2 — Selection, organize, transform  *(the daily-driver core)*
 - [ ] Selection (M): multi-select (shift/marquee), group-select, **groups** + isolation mode, lasso, magic-wand (same fill/stroke), select-same, lock/hide per layer
@@ -274,7 +274,7 @@ selection/layers/transform (Ph2) → appearance/strokes/gradients (Ph3)**.
 ## 7. Immediate next steps
 
 1. [x] **Undo/redo** command stack — unblocks confident editing of everything else. *(Done: `history.rs` snapshot stack, wired into every mutation.)*
-2. [ ] **Direct-select** anchor/handle editing UI (model already stores handles).
+2. [x] **Direct-select** anchor/handle editing UI (model already stores handles). *(Done — dedicated Direct-Select tool (`A`); see Phase 4.)*
 3. [ ] **Phase 2 core** — multi-select, groups, real layers panel, transform handles, snapping.
 4. [ ] **Appearance + stroke options + gradients** (Phase 3) — Illustrator's non-destructive edge.
 5. [ ] Coordinate the **`prism-vector`** promotion with Pigment/Pulse owners before moving path/boolean code into a shared crate.
