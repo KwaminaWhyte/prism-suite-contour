@@ -165,7 +165,7 @@ app-agnostic. Phases 0–1 are largely **done** (see §1); the rest is the road 
 - [ ] Tests: stroke-outline correctness, gradient/mesh sampling, effect re-eval
 
 ### Phase 4 — Pathfinder, shapes, path tools  *(complete the geometry surface)*
-- [ ] **Full Pathfinder** (M): add Exclude, Minus-Back, Divide, Trim, Merge, Crop, Outline; **compound paths** (even-odd/non-zero)
+- [~] **Full Pathfinder** (M): add Exclude, Minus-Back, Divide, Trim, Merge, Crop, Outline; **compound paths** (even-odd/non-zero). *(Done: all ten Pathfinder ops in `boolean.rs` on `i_overlay` — the original Union / Intersect / Minus Front (Difference) plus **Exclude** (Xor), **Minus Back** (InverseDifference), **Divide**, **Trim**, **Merge**, **Crop** and **Outline** (unfilled stroked boundary). `apply` now returns a **batch** of `Shape::Path`s, so an op that yields disjoint regions or a ring-with-hole expands into separate paths (the whole batch replaces the two operands and is re-selected) instead of dropping all but the largest contour. A user-selectable **fill rule** (non-zero vs **even-odd**) threads through every op so nested input fills the Illustrator way; even-odd carves holes. New `Object ▸ Pathfinder` submenu (fill-rule toggle + all ops, enable-gated on exactly two selected shapes); per-op icons. 13 unit tests cover each op's area/face count and the fill-rule hole carving. **Still open:** a true **compound-path object** (one path that keeps its holes as sub-contours instead of expanding to separate rings) and the interactive **Shape Builder**.)*
 - [ ] **Shape Builder tool** (L): interactive merge/subtract by dragging across regions
 - [ ] **Live shapes** (M): editable rounded-rect corners, polygon/star sides & radius, arc/spiral/grid; live corner widget
 - [ ] **More creation tools** (M): polygon, star, rounded-rect, arc, spiral, rectangular/polar grid, **Pencil** (freehand fit), **Curvature** tool, **Blob brush**, line/segment
@@ -220,7 +220,7 @@ app-agnostic. Phases 0–1 are largely **done** (see §1); the rest is the road 
 | Selection / groups / layers | multi/group/isolation, layer tree | **Planned** | 2 |
 | Transform / align / distribute | rotate/scale/reflect/shear/free | **Planned** | 2 |
 | Guides / grid / snap / rulers | full | **Planned** | 2 |
-| Pathfinder | union/intersect/difference | **Done** 3 of ~10; rest + compound + Shape Builder **Planned** | 1,4 |
+| Pathfinder | union/intersect/difference/exclude/minus-back/divide/trim/merge/crop/outline + even-odd/non-zero | **Done** all 10 ops + fill rules (results expand to multiple paths); true compound-path object + Shape Builder **Planned** | 1,4 |
 | Stroke options / width profiles | dashes/arrows/caps/joins/variable | **Planned** | 3 |
 | Appearance (multi fill/stroke/fx) | full non-destructive stack | **Done** (multi fill/stroke, reorder, per-item opacity/blend/visibility; blend **compositing** real now — 12 separable modes; live **effects**: Drop Shadow + Gaussian Blur); per-object/HSL blend + remaining effects **Planned** | 3 |
 | Gradients (linear/radial/freeform) | + dither + perceptual | **Planned** | 3 |

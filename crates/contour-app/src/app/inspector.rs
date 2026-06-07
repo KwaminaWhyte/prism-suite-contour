@@ -5,7 +5,7 @@ use super::{align_button, color_row, gradient_editor, ContourApp, Tool};
 use crate::align::{Align, AlignTo, Distribute};
 use crate::appearance::{BlendMode, Effect, Fill, Paint, Stroke as AppStroke};
 use crate::arrange::{self, Arrange};
-use crate::boolean::BoolOp;
+use crate::boolean::{BoolFillRule, BoolOp};
 use crate::document::{LineCap, LineJoin};
 use crate::gradient::{Gradient, GradientKind};
 use crate::workspace::{self, Panel};
@@ -96,29 +96,60 @@ impl ContourApp {
                 });
                 ui.menu_button("Object", |ui| {
                     let two = self.selection.len() == 2;
-                    ui.add_enabled_ui(two, |ui| {
-                        if ui.button(format!("{}  Union", icons::UNITE)).clicked() {
-                            self.apply_bool(BoolOp::Union);
-                            ui.close_menu();
-                        }
-                        if ui
-                            .button(format!("{}  Intersect", icons::INTERSECT))
-                            .clicked()
-                        {
-                            self.apply_bool(BoolOp::Intersect);
-                            ui.close_menu();
-                        }
-                        if ui
-                            .button(format!("{}  Difference", icons::EXCLUDE))
-                            .clicked()
-                        {
-                            self.apply_bool(BoolOp::Difference);
-                            ui.close_menu();
+                    ui.menu_button(format!("{}  Pathfinder", icons::UNITE), |ui| {
+                        // Compound-path fill rule the ops interpret nested input
+                        // with (non-zero vs even-odd). Drives every op below.
+                        ui.horizontal(|ui| {
+                            ui.label("Fill rule");
+                            ui.selectable_value(
+                                &mut self.bool_fill_rule,
+                                BoolFillRule::NonZero,
+                                "Non-zero",
+                            )
+                            .on_hover_text("Overlapping same-direction rings stay filled");
+                            ui.selectable_value(
+                                &mut self.bool_fill_rule,
+                                BoolFillRule::EvenOdd,
+                                "Even-odd",
+                            )
+                            .on_hover_text("A ring inside another carves a hole (donut rule)");
+                        });
+                        ui.separator();
+                        ui.add_enabled_ui(two, |ui| {
+                            // Shape modes: combine the two operands into new area.
+                            let modes = [
+                                (icons::UNITE, BoolOp::Union),
+                                (icons::INTERSECT, BoolOp::Intersect),
+                                (icons::EXCLUDE_OVERLAP, BoolOp::Exclude),
+                                (icons::EXCLUDE, BoolOp::Difference),
+                                (icons::MINUS_BACK, BoolOp::MinusBack),
+                            ];
+                            for (icon, op) in modes {
+                                if ui.button(format!("{icon}  {}", op.label())).clicked() {
+                                    self.apply_bool(op);
+                                    ui.close_menu();
+                                }
+                            }
+                            ui.separator();
+                            // Pathfinders: split / trim the operands into faces.
+                            let finders = [
+                                (icons::DIVIDE, BoolOp::Divide),
+                                (icons::TRIM, BoolOp::Trim),
+                                (icons::MERGE, BoolOp::Merge),
+                                (icons::CROP, BoolOp::Crop),
+                                (icons::OUTLINE, BoolOp::Outline),
+                            ];
+                            for (icon, op) in finders {
+                                if ui.button(format!("{icon}  {}", op.label())).clicked() {
+                                    self.apply_bool(op);
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        if !two {
+                            ui.weak("Select exactly 2 shapes");
                         }
                     });
-                    if !two {
-                        ui.weak("Boolean: select exactly 2");
-                    }
 
                     ui.separator();
                     ui.add_enabled_ui(self.can_group(), |ui| {

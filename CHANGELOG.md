@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Full Pathfinder — `Object ▸ Pathfinder`** (completes Illustrator's Pathfinder
+  set on `i_overlay`). The boolean layer grows from three ops to the full ten,
+  plus a selectable compound-path fill rule:
+  - **All ten ops.** The original Union / Intersect / **Minus Front** (Difference)
+    gain **Exclude** (symmetric difference), **Minus Back** (subtract the back
+    shape from the front), **Divide** (split the pair into every non-overlapping
+    region — overlap + each crescent — as separate filled faces), **Trim** (keep
+    the front whole and remove the hidden part of the back), **Merge** (weld the
+    abutting faces into one region with the back colour), **Crop** (keep only the
+    part inside the front shape) and **Outline** (emit the combined boundary as
+    unfilled, hairline-stroked paths). Each face inherits the right operand's paint
+    (front vs back) the way Illustrator colours a Pathfinder result.
+  - **Results expand to multiple paths.** `boolean::apply` now returns a **batch**
+    of `Shape::Path`s instead of a single path: an op that produces disjoint
+    regions or a ring-with-a-hole (e.g. a Difference where the front sits fully
+    inside the back) is expanded into separate paths — the single-ring document
+    model's equivalent of Illustrator's expanded Pathfinder output — instead of
+    silently dropping all but the largest contour as before. The two operands are
+    replaced by the whole batch in one undo step, and every produced path is
+    re-selected.
+  - **Compound-path fill rule.** A non-zero ↔ **even-odd** toggle threads through
+    every op as the `i_overlay` fill rule, so nested / self-intersecting input
+    fills the Illustrator way: under non-zero a same-wound inner ring is absorbed
+    (solid), under even-odd it carves a hole. The choice lives on the app and is
+    set from the Pathfinder submenu.
+  - **UI.** A new **`Object ▸ Pathfinder`** submenu holds the fill-rule toggle, the
+    five shape-mode ops, and the five pathfinder ops, each with its own icon,
+    enable-gated on exactly two selected shapes. The status line reports the op and
+    how many paths it produced.
+  - **Tests.** `boolean.rs` grows from 3 to 13 unit tests (all pure, no egui / GPU):
+    each op is checked by **total filled area** and **face count** (Union = 175,
+    Intersect/Crop = 25, Exclude = 150, Minus Back = 75, Divide = three faces
+    tiling 175, Trim/Merge = 175, an enclosing Difference = outer ring + hole ring
+    of 900 / 100), Minus Back inheriting the front paint, Outline emitting
+    transparent-fill / visible-stroke paths, the **fill-rule hole carving** (a
+    same-wound ring-in-ring fills solid under non-zero, carves a 100-area hole
+    under even-odd), and an open path / line yielding no result.
+  - **Deferred** (noted as gaps): a true **compound-path object** — one path that
+    keeps its holes as sub-contours rather than expanding to separate rings — and
+    the interactive **Shape Builder** tool (drag across regions to merge / subtract).
+
 - **Blend tool — `Object ▸ Blend ▸ Make / Release / Expand`** (Illustrator's
   Object Blend, specified-steps mode). Select two objects and Make generates *N*
   intermediate objects that morph between them, interpolating **position**, **path

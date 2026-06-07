@@ -911,8 +911,12 @@ impl ContourApp {
         }
     }
 
-    /// Apply a boolean op to exactly two selected shapes (subject = first added,
-    /// clip = second/primary), replacing both with the single result path.
+    /// Apply a Pathfinder op to exactly two selected shapes (subject = back /
+    /// first added, clip = front / second / primary), replacing both with the
+    /// resulting batch of paths. Most ops yield one path, but those that produce
+    /// disjoint regions or holes (Difference, Exclude, Divide, Trim, …) yield
+    /// several — the single-ring model expands them into separate paths, the way
+    /// Illustrator expands a Pathfinder result. The whole batch is selected.
     pub(super) fn apply_bool(&mut self, op: BoolOp) {
         if self.selection.len() != 2 {
             self.status = "Boolean op needs exactly two selected shapes".into();
@@ -924,19 +928,22 @@ impl ContourApp {
         }
         let subj = self.doc.shapes[a].clone();
         let clip = self.doc.shapes[b].clone();
-        match boolean::apply(&subj, &clip, op) {
-            Some(result) => {
-                self.checkpoint();
-                // Remove the higher index first so the lower stays valid.
-                let (hi, lo) = if a > b { (a, b) } else { (b, a) };
-                self.doc.shapes.remove(hi);
-                self.doc.shapes.remove(lo);
-                self.doc.shapes.push(result);
-                self.select_only(Some(self.doc.shapes.len() - 1));
-                self.status = "Boolean op applied".into();
-            }
-            None => self.status = "Boolean op produced no geometry".into(),
+        let results = boolean::apply(&subj, &clip, op, self.bool_fill_rule);
+        if results.is_empty() {
+            self.status = format!("{} produced no geometry", op.label());
+            return;
         }
+        self.checkpoint();
+        // Remove the higher index first so the lower stays valid.
+        let (hi, lo) = if a > b { (a, b) } else { (b, a) };
+        self.doc.shapes.remove(hi);
+        self.doc.shapes.remove(lo);
+        let first = self.doc.shapes.len();
+        let n = results.len();
+        self.doc.shapes.extend(results);
+        // Select every path the op produced.
+        self.selection = (first..first + n).collect();
+        self.status = format!("{} applied ({n} path{})", op.label(), if n == 1 { "" } else { "s" });
     }
 
     /// Reference rectangle the Align operations measure against.

@@ -134,5 +134,19 @@ pub const BLEND: &str = ph::LINE_SEGMENTS;
 pub const UNITE: &str = ph::UNITE;
 /// Intersection of two shapes.
 pub const INTERSECT: &str = ph::INTERSECT;
-/// Difference (subtract) of two shapes.
+/// Difference (subtract front) of two shapes.
 pub const EXCLUDE: &str = ph::EXCLUDE;
+/// Exclude (symmetric difference) of two shapes.
+pub const EXCLUDE_OVERLAP: &str = ph::EXCLUDE_SQUARE;
+/// Minus Back (subtract the back shape from the front).
+pub const MINUS_BACK: &str = ph::SUBTRACT;
+/// Divide into every non-overlapping region.
+pub const DIVIDE: &str = ph::DIVIDE;
+/// Trim hidden parts of the back shape.
+pub const TRIM: &str = ph::SCISSORS;
+/// Merge abutting faces into one region.
+pub const MERGE: &str = ph::STACK;
+/// Crop to the overlap region.
+pub const CROP: &str = ph::FRAME_CORNERS;
+/// Outline the combined boundary as strokes.
+pub const OUTLINE: &str = ph::BEZIER_CURVE;
