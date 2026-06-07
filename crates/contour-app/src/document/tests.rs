@@ -43,6 +43,70 @@ fn loads_legacy_document() {
     assert!(!doc.shapes[0].is_blend_step());
 }
 
+/// A pre-stroke-options `.contour` (a `stroke_style` with only caps/joins/dash)
+/// loads with the new align / arrowhead fields at their defaults (center align,
+/// no arrowheads, 1× scale) — so older files render unchanged.
+#[test]
+fn loads_legacy_stroke_style_with_default_align_and_arrows() {
+    // `stroke_style` carries the original fields only; align / start_arrow /
+    // end_arrow / arrow_scale are absent and must default.
+    let json = r#"{"shapes":[
+        {"Line":{"p0":[0,0],"p1":[10,0],"stroke":[0,0,0,1],"stroke_w":2,
+                 "stroke_style":{"cap":"Round","join":"Miter","miter_limit":4,"dash":[12,6],"dash_offset":0}}}
+    ]}"#;
+    let doc: Document = serde_json::from_str(json).unwrap();
+    let st = doc.shapes[0].stroke_style();
+    assert_eq!(st.cap, LineCap::Round);
+    assert!(st.is_dashed(), "legacy dash preserved");
+    // New fields default cleanly.
+    assert_eq!(st.align, StrokeAlign::Center);
+    assert_eq!(st.start_arrow, Arrowhead::None);
+    assert_eq!(st.end_arrow, Arrowhead::None);
+    assert_eq!(st.arrow_scale, 1.0);
+    assert!(!st.has_arrows());
+}
+
+/// The new stroke-options fields (align + arrowheads + scale) round-trip through
+/// serde on a Shape's `stroke_style`.
+#[test]
+fn stroke_align_and_arrows_round_trip() {
+    let mut s = Shape::Line {
+        p0: (0.0, 0.0),
+        p1: (10.0, 0.0),
+        stroke: [0.0, 0.0, 0.0, 1.0],
+        stroke_w: 2.0,
+        stroke_style: StrokeStyle::default(),
+        appearance: None,
+        visible: true,
+        group: None,
+        clip: None,
+        mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
+        blend: None,
+        blend_step: false,
+    };
+    {
+        let st = s.stroke_style_mut();
+        st.align = StrokeAlign::Outside;
+        st.start_arrow = Arrowhead::Circle;
+        st.end_arrow = Arrowhead::Triangle;
+        st.arrow_scale = 1.75;
+    }
+    let doc = Document {
+        shapes: vec![s],
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&doc).unwrap();
+    let back: Document = serde_json::from_str(&json).unwrap();
+    let st = back.shapes[0].stroke_style();
+    assert_eq!(st.align, StrokeAlign::Outside);
+    assert_eq!(st.start_arrow, Arrowhead::Circle);
+    assert_eq!(st.end_arrow, Arrowhead::Triangle);
+    assert_eq!(st.arrow_scale, 1.75);
+}
+
 /// Blend-set tags round-trip through serde on a Shape (back-compat: the new
 /// `blend` / `blend_step` fields are additive, defaulting to un-blended).
 #[test]

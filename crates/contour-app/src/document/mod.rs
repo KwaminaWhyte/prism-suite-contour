@@ -15,7 +15,7 @@ pub use path::{
     anchors_in_rect, bez_path, flatten, handle_at, handle_endpoints, nearest_segment,
     point_in_rings, rects_intersect, FillRule, SubPath,
 };
-pub use style::{LineCap, LineJoin, StrokeStyle};
+pub use style::{Arrowhead, LineCap, LineJoin, StrokeAlign, StrokeStyle};
 
 use crate::appearance::Appearance;
 use crate::artboard::{self, Artboard};

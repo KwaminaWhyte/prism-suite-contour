@@ -442,10 +442,25 @@ impl Appearance {
                 .any(|s| s.visible && s.opacity > 0.0 && s.width > 0.0 && s.blend.is_separable_blend())
     }
 
+    /// Whether any *visible* stroke needs the baked stroke-decoration geometry
+    /// (a non-center [`align`](StrokeStyle::align) or an arrowhead marker). The
+    /// egui painter can't express either, so the canvas takes the tiny-skia
+    /// rasterize path — matching PNG export — when this is true.
+    pub fn needs_stroke_decor(&self) -> bool {
+        use crate::document::StrokeAlign;
+        self.strokes.iter().any(|s| {
+            s.visible
+                && s.opacity > 0.0
+                && s.width > 0.0
+                && (s.style.align != StrokeAlign::Center || s.style.has_arrows())
+        })
+    }
+
     /// Whether this appearance needs the rasterize-and-composite render path
-    /// (because it has active effects **or** a non-`Normal` blend layer).
+    /// (because it has active effects, a non-`Normal` blend layer, **or** a
+    /// stroke decoration the egui painter can't draw — align / arrowheads).
     pub fn needs_raster(&self) -> bool {
-        self.has_active_effects() || self.has_blend_compositing()
+        self.has_active_effects() || self.has_blend_compositing() || self.needs_stroke_decor()
     }
 
     /// Total document-unit padding any effect needs around the artwork bounds

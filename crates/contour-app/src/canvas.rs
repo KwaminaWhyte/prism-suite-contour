@@ -341,6 +341,7 @@ fn paint_shape_with_effects(
         .map(|b| [b.x, b.y, b.w, b.h])
         .unwrap_or([0.0; 4]);
     let mask = omask.and_then(crate::export::OpacityMaskInput::of);
+    let contour = crate::export::StrokeContour::of(shape);
     let Some(layer) = crate::export::render_shape_layer_masked(
         &path,
         fillable,
@@ -349,6 +350,7 @@ fn paint_shape_with_effects(
         appearance,
         view.zoom,
         mask.as_ref(),
+        contour.as_ref(),
     ) else {
         return false;
     };

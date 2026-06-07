@@ -25,6 +25,7 @@ mod icons;
 mod opacity_mask;
 mod shapebuilder;
 mod snap;
+mod stroke;
 mod swatches;
 mod theme;
 mod transform;

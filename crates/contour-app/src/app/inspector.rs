@@ -6,7 +6,7 @@ use crate::align::{Align, AlignTo, Distribute};
 use crate::appearance::{BlendMode, Effect, Fill, Paint, Stroke as AppStroke};
 use crate::arrange::{self, Arrange};
 use crate::boolean::{BoolFillRule, BoolOp};
-use crate::document::{LineCap, LineJoin};
+use crate::document::{Arrowhead, LineCap, LineJoin, StrokeAlign};
 use crate::gradient::{Gradient, GradientKind};
 use crate::workspace::{self, Panel};
 use crate::{icons, theme};
@@ -1100,6 +1100,61 @@ impl ContourApp {
                 ui.label("Offset");
                 if ui
                     .add(egui::Slider::new(&mut s.dash_offset, 0.0..=40.0).suffix(" px"))
+                    .changed()
+                {
+                    changed = true;
+                }
+            });
+        }
+
+        // Align stroke (center / inside / outside).
+        ui.horizontal(|ui| {
+            ui.label("Align");
+            egui::ComboBox::from_id_salt("stroke_align")
+                .selected_text(s.align.label())
+                .show_ui(ui, |ui| {
+                    for a in StrokeAlign::ALL {
+                        if ui.selectable_value(&mut s.align, a, a.label()).changed() {
+                            changed = true;
+                        }
+                    }
+                });
+        });
+
+        // Arrowheads (start / end markers + scale).
+        ui.horizontal(|ui| {
+            ui.label("Start");
+            egui::ComboBox::from_id_salt("arrow_start")
+                .selected_text(s.start_arrow.label())
+                .show_ui(ui, |ui| {
+                    for a in Arrowhead::ALL {
+                        if ui
+                            .selectable_value(&mut s.start_arrow, a, a.label())
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    }
+                });
+            ui.label("End");
+            egui::ComboBox::from_id_salt("arrow_end")
+                .selected_text(s.end_arrow.label())
+                .show_ui(ui, |ui| {
+                    for a in Arrowhead::ALL {
+                        if ui
+                            .selectable_value(&mut s.end_arrow, a, a.label())
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    }
+                });
+        });
+        if s.has_arrows() {
+            ui.horizontal(|ui| {
+                ui.label("Arrow size");
+                if ui
+                    .add(egui::Slider::new(&mut s.arrow_scale, 0.25..=4.0).suffix("×"))
                     .changed()
                 {
                     changed = true;

@@ -134,9 +134,24 @@ fn svg_body(doc: &Document) -> String {
             attrs.push_str(&stroke_paint);
             attrs.push_str(&stroke_geom_attrs(stroke.width, &stroke.style));
             attrs.push_str(&blend_style_attr(stroke.blend));
-            shape_body.push_str("  ");
-            shape_body.push_str(&geom.element(&attrs));
-            shape_body.push('\n');
+            // Align-stroke offset and/or arrowhead markers: when present, emit the
+            // baked geometry (a `<path>` for the offset / trimmed centerline plus
+            // separate marker paths) so the SVG matches the canvas + PNG. The plain
+            // case keeps emitting the shared `<rect>`/`<ellipse>`/`<line>`/`<path>`.
+            let contour = StrokeContour::of(&shape);
+            let svg_decor = contour
+                .as_ref()
+                .and_then(|c| svg_stroke_decor(c, stroke, &attrs, &stroke_paint));
+            match svg_decor {
+                Some(markup) => {
+                    shape_body.push_str(&markup);
+                }
+                None => {
+                    shape_body.push_str("  ");
+                    shape_body.push_str(&geom.element(&attrs));
+                    shape_body.push('\n');
+                }
+            }
         }
 
         // Opacity mask: emit a luminance `<mask>` def (the mask shape painted in
@@ -533,6 +548,90 @@ fn path_d(points: &[(f32, f32)], handles: &[(f32, f32)], closed: bool) -> String
     d
 }
 
+/// An SVG path `d` for a flat polyline (closed appends `Z`).
+fn polyline_d(pts: &[(f32, f32)], closed: bool) -> String {
+    if pts.is_empty() {
+        return String::new();
+    }
+    let mut d = format!("M {} {}", pts[0].0, pts[0].1);
+    for p in &pts[1..] {
+        d.push_str(&format!(" L {} {}", p.0, p.1));
+    }
+    if closed {
+        d.push_str(" Z");
+    }
+    d
+}
+
+/// SVG markup for a decorated stroke layer (align offset and/or arrowheads), or
+/// `None` when the layer needs no decoration (the caller emits the shared
+/// element). `stroke_attrs` is the full stroke attribute string (paint + width +
+/// caps/joins/dashes + blend); `stroke_paint` is just the colour attribute (for
+/// the marker fills / arms). Emits the offset / trimmed centerline as one
+/// `<path>` plus a `<path>` per arrowhead marker.
+fn svg_stroke_decor(
+    contour: &StrokeContour,
+    stroke: &crate::appearance::Stroke,
+    stroke_attrs: &str,
+    stroke_paint: &str,
+) -> Option<String> {
+    use crate::document::StrokeAlign;
+    let style = &stroke.style;
+    let needs_align = style.align != StrokeAlign::Center;
+    let needs_arrows = style.has_arrows() && !contour.closed;
+    if !needs_align && !needs_arrows {
+        return None;
+    }
+    let flat = if needs_align {
+        crate::stroke::aligned_geometry(
+            &contour.points,
+            &contour.handles,
+            contour.closed,
+            stroke.width,
+            style.align,
+        )
+    } else {
+        crate::document::flatten(&contour.points, &contour.handles, contour.closed)
+    };
+    let mut line = flat.clone();
+    let mut markers = String::new();
+    // The arrow fill/arm colour: reuse the stroke paint colour attribute as a
+    // `fill` for filled heads and a `stroke` for the chevron arms.
+    let fill_color = stroke_paint.replacen("stroke=", "fill=", 1);
+    if needs_arrows {
+        let (decos, trimmed) = crate::stroke::arrow_decorations(&flat, style, stroke.width);
+        if !decos.is_empty() {
+            line = trimmed;
+            for g in decos {
+                if g.fill {
+                    markers.push_str(&format!(
+                        "  <path d=\"{}\"{} stroke=\"none\" />\n",
+                        polyline_d(&g.polygon, true),
+                        fill_color
+                    ));
+                }
+                for arm in g.strokes {
+                    markers.push_str(&format!(
+                        "  <path d=\"{}\" fill=\"none\"{} stroke-width=\"{}\" stroke-linecap=\"{}\" />\n",
+                        polyline_d(&arm, false),
+                        stroke_paint,
+                        stroke.width,
+                        style.cap.svg()
+                    ));
+                }
+            }
+        }
+    }
+    let close_main = contour.closed && needs_align && !needs_arrows;
+    let mut out = format!(
+        "  <path d=\"{}\"{} />\n",
+        polyline_d(&line, close_main),
+        stroke_attrs
+    );
+    out.push_str(&markers);
+    Some(out)
+}
+
 // --- PNG ---------------------------------------------------------------------
 
 fn ts_color(c: [f32; 4]) -> TsColor {
@@ -633,6 +732,119 @@ pub(crate) fn skia_path_of(shape: &Shape) -> Option<(tiny_skia::Path, bool)> {
     }
 }
 
+/// Build a tiny-skia [`Path`](tiny_skia::Path) from a flat polyline (open unless
+/// `closed`), or `None` if degenerate.
+fn skia_polyline(pts: &[(f32, f32)], closed: bool) -> Option<tiny_skia::Path> {
+    if pts.len() < 2 {
+        return None;
+    }
+    let mut pb = PathBuilder::new();
+    pb.move_to(pts[0].0, pts[0].1);
+    for p in &pts[1..] {
+        pb.line_to(p.0, p.1);
+    }
+    if closed {
+        pb.close();
+    }
+    pb.finish()
+}
+
+/// A shape's editable stroke contour (`Rect`/`Ellipse`/`Line` reduced to a
+/// `Path`): the flattenable anchor points, their bezier handles, and whether the
+/// contour is closed. Passed into the rasterizer so it can build per-stroke
+/// align / arrowhead geometry (each stroke layer has its own width + style).
+/// `None` for a compound path (multi-contour align/arrows is out of scope) or a
+/// degenerate shape — those stroke the shared centered path as before.
+#[derive(Clone)]
+pub(crate) struct StrokeContour {
+    pub points: Vec<(f32, f32)>,
+    pub handles: Vec<(f32, f32)>,
+    pub closed: bool,
+}
+
+impl StrokeContour {
+    /// Extract the stroke contour from a shape, or `None` for a compound /
+    /// empty shape (which falls back to centered stroking).
+    pub fn of(shape: &Shape) -> Option<StrokeContour> {
+        if matches!(shape, Shape::Compound { .. }) {
+            return None;
+        }
+        match shape.to_path() {
+            Shape::Path {
+                points,
+                handles,
+                closed,
+                ..
+            } if points.len() >= 2 => Some(StrokeContour {
+                points,
+                handles,
+                closed,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Per-stroke baked decorations: an align-offset / arrow-trimmed stroke path and
+/// the arrowhead marker geometry. Built per stroke layer from a [`StrokeContour`]
+/// + that layer's width + style.
+#[derive(Default)]
+struct StrokeDecor {
+    /// The path the main stroke follows (align-offset and/or arrow-trimmed).
+    /// `None` means stroke the shared centered path unchanged.
+    path: Option<tiny_skia::Path>,
+    /// Filled arrowhead outlines (triangle / circle).
+    arrow_fills: Vec<Vec<(f32, f32)>>,
+    /// Open arrowhead arms (the chevron), stroked at the stroke width.
+    arrow_strokes: Vec<Vec<(f32, f32)>>,
+}
+
+impl StrokeDecor {
+    /// Build the decor for one stroke layer over `contour` at `width` + `style`.
+    /// Returns an empty decor (cheap, `path == None`) when nothing special is
+    /// needed (centered align, no arrows).
+    fn build(contour: &StrokeContour, width: f32, style: &StrokeStyle) -> StrokeDecor {
+        use crate::document::StrokeAlign;
+        let needs_align = style.align != StrokeAlign::Center;
+        let needs_arrows = style.has_arrows() && !contour.closed;
+        if width <= 0.0 || (!needs_align && !needs_arrows) {
+            return StrokeDecor::default();
+        }
+        let mut decor = StrokeDecor::default();
+        // Align: flatten + offset the centerline.
+        let flat = if needs_align {
+            crate::stroke::aligned_geometry(
+                &contour.points,
+                &contour.handles,
+                contour.closed,
+                width,
+                style.align,
+            )
+        } else {
+            crate::document::flatten(&contour.points, &contour.handles, contour.closed)
+        };
+        let mut stroke_line = flat.clone();
+        // Arrowheads (open paths only): bake markers + trim the line for filled
+        // heads.
+        if needs_arrows {
+            let (decos, trimmed) = crate::stroke::arrow_decorations(&flat, style, width);
+            if !decos.is_empty() {
+                for g in decos {
+                    if g.fill {
+                        decor.arrow_fills.push(g.polygon);
+                    }
+                    for arm in g.strokes {
+                        decor.arrow_strokes.push(arm);
+                    }
+                }
+                stroke_line = trimmed;
+            }
+        }
+        decor.path = skia_polyline(&stroke_line, contour.closed && needs_align && !needs_arrows);
+        decor
+    }
+}
+
 /// The tiny-skia fill rule a shape rasterizes with — `EvenOdd` for an even-odd
 /// compound path, `Winding` (non-zero) for everything else (single rings always
 /// fill solid).
@@ -683,11 +895,21 @@ fn draw_shape_skia(pixmap: &mut Pixmap, shape: &Shape, id: Transform, omask: Opt
     let fill_rule = skia_fill_rule_of(shape);
     let appearance = shape.effective_appearance();
     let mask = omask.and_then(OpacityMaskInput::of);
+    let contour = StrokeContour::of(shape);
 
     // Fast path: no live effects, no opacity mask → paint the stack straight onto
     // the page (blend layers still composite, handled inside paint_appearance_skia).
     if !appearance.has_active_effects() && mask.is_none() {
-        paint_appearance_skia(pixmap, &path, fillable, fill_rule, &bbox, &appearance, id);
+        paint_appearance_skia(
+            pixmap,
+            &path,
+            fillable,
+            fill_rule,
+            &bbox,
+            &appearance,
+            id,
+            contour.as_ref(),
+        );
         return;
     }
 
@@ -697,9 +919,16 @@ fn draw_shape_skia(pixmap: &mut Pixmap, shape: &Shape, id: Transform, omask: Opt
     // and the mask, then draw the processed raster back onto the page at the right
     // offset. `id` is a pure `translate(-ox, -oy)` so its translation gives the
     // artboard crop offset.
-    if let Some(layer) =
-        render_shape_layer_masked(&path, fillable, fill_rule, &bbox, &appearance, 1.0, mask.as_ref())
-    {
+    if let Some(layer) = render_shape_layer_masked(
+        &path,
+        fillable,
+        fill_rule,
+        &bbox,
+        &appearance,
+        1.0,
+        mask.as_ref(),
+        contour.as_ref(),
+    ) {
         let tx = id.tx; // = -ox (artboard crop)
         let ty = id.ty;
         let dst_x = (layer.doc_origin.0 + tx).round() as i32;
@@ -780,6 +1009,7 @@ pub(crate) fn render_shape_layer(
         appearance,
         scale,
         None,
+        None,
     )
 }
 
@@ -788,6 +1018,7 @@ pub(crate) fn render_shape_layer(
 /// layer + its document-space placement, or `None` for a degenerate size. Shared
 /// by PNG export and the live canvas so the two surfaces composite effects,
 /// blends and masks identically.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_shape_layer_masked(
     path: &tiny_skia::Path,
     fillable: bool,
@@ -796,6 +1027,7 @@ pub(crate) fn render_shape_layer_masked(
     appearance: &Appearance,
     scale: f32,
     mask: Option<&OpacityMaskInput>,
+    contour: Option<&StrokeContour>,
 ) -> Option<ShapeLayer> {
     let pad = appearance.effect_pad();
     // Padded document-space rect covering the artwork + the effects' spill.
@@ -813,7 +1045,7 @@ pub(crate) fn render_shape_layer_masked(
     // Map document space into the scratch pixmap: translate the padded origin to
     // (0,0), then scale to pixels.
     let t = Transform::from_scale(scale, scale).post_translate(-dx * scale, -dy * scale);
-    paint_appearance_skia(&mut layer, path, fillable, fill_rule, bbox, appearance, t);
+    paint_appearance_skia(&mut layer, path, fillable, fill_rule, bbox, appearance, t, contour);
     crate::effects::apply_effects(&mut layer, &appearance.effects, scale);
     // Opacity mask: rasterize the mask shape's luminance into a same-size scratch
     // (same transform, so it registers pixel-for-pixel with the artwork), then
@@ -829,6 +1061,7 @@ pub(crate) fn render_shape_layer_masked(
             &m.bbox,
             &m.appearance,
             t,
+            None,
         );
         crate::effects::apply_luminance_mask(&mut layer, &mask_pm, m.invert);
     }
@@ -848,6 +1081,7 @@ pub(crate) fn render_shape_layer_masked(
 /// Porter-Duff blend math in [`crate::effects::composite_blended`], so it blends
 /// against everything painted beneath it — closing the long-standing "stored but
 /// not composited" Appearance gap.
+#[allow(clippy::too_many_arguments)]
 fn paint_appearance_skia(
     pixmap: &mut Pixmap,
     path: &tiny_skia::Path,
@@ -856,6 +1090,7 @@ fn paint_appearance_skia(
     bbox: &[f32; 4],
     appearance: &Appearance,
     transform: Transform,
+    contour: Option<&StrokeContour>,
 ) {
     let (w, h) = (pixmap.width(), pixmap.height());
     // Paint one layer's `paint`+`draw` either straight (Normal) or via a blended
@@ -935,8 +1170,48 @@ fn paint_appearance_skia(
                 .normalized_dash()
                 .and_then(|runs| StrokeDash::new(runs, stroke.style.dash_offset)),
         };
+        // Per-stroke align / arrowhead decorations (each layer has its own width
+        // + style). Empty (path == None) for a centered, arrow-less stroke.
+        let decor = contour.map(|c| StrokeDecor::build(c, stroke.width, &stroke.style));
+        // Align-stroke offset / arrow-trimmed path replaces the centered shared
+        // path for stroking; falls back to the shared path.
+        let stroke_path: &tiny_skia::Path = decor
+            .as_ref()
+            .and_then(|d| d.path.as_ref())
+            .unwrap_or(path);
+        // The arrowhead markers are filled / stroked with the stroke colour
+        // (solid stroke path), no dashes.
+        let head_paint = {
+            let mut p = TsPaint::default();
+            p.anti_alias = true;
+            if let Paint::Solid(c) = &stroke.paint {
+                p.set_color(ts_color(scale_alpha(*c, stroke.opacity)));
+            } else {
+                p.shader = paint.shader.clone();
+            }
+            p
+        };
+        let arm_stroke = Stroke {
+            width: stroke.width.max(0.01),
+            miter_limit: stroke.style.miter_limit.max(1.0),
+            line_cap: ts_cap(stroke.style.cap),
+            line_join: ts_join(stroke.style.join),
+            dash: None,
+        };
         let draw = |pm: &mut Pixmap| {
-            pm.stroke_path(path, &paint, &s, transform, None);
+            pm.stroke_path(stroke_path, &paint, &s, transform, None);
+            if let Some(d) = decor.as_ref() {
+                for poly in &d.arrow_fills {
+                    if let Some(p) = skia_polyline(poly, true) {
+                        pm.fill_path(&p, &head_paint, TsFillRule::Winding, transform, None);
+                    }
+                }
+                for arm in &d.arrow_strokes {
+                    if let Some(p) = skia_polyline(arm, false) {
+                        pm.stroke_path(&p, &head_paint, &arm_stroke, transform, None);
+                    }
+                }
+            }
         };
         paint_layer(pixmap, stroke.blend, &draw);
     }
@@ -1170,6 +1445,7 @@ mod tests {
                     miter_limit: 4.0,
                     dash: vec![12.0, 6.0],
                     dash_offset: 3.0,
+                    ..StrokeStyle::default()
                 },
                 appearance: None,
                 visible: true,
@@ -1209,6 +1485,104 @@ mod tests {
         // Dashed/round-cap stroking must not crash the rasterizer.
         let bytes = to_png(&dashed_rect(), 120.0, 100.0).expect("png should encode");
         assert!(bytes.len() > 8);
+    }
+
+    // --- Align stroke + arrowheads ------------------------------------------
+
+    /// An open line with an end triangle arrowhead and a start circle.
+    fn arrowed_line() -> Document {
+        Document {
+            shapes: vec![Shape::Line {
+                p0: (20.0, 50.0),
+                p1: (180.0, 50.0),
+                stroke: [0.0, 0.0, 0.0, 1.0],
+                stroke_w: 6.0,
+                stroke_style: StrokeStyle {
+                    start_arrow: crate::document::Arrowhead::Circle,
+                    end_arrow: crate::document::Arrowhead::Triangle,
+                    arrow_scale: 1.5,
+                    ..StrokeStyle::default()
+                },
+                appearance: None,
+                visible: true,
+                group: None,
+                clip: None,
+                mask: false,
+                omask: None,
+                omask_path: false,
+                omask_invert: false,
+                blend: None,
+                blend_step: false,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// A rect stroked with the requested align.
+    fn aligned_rect(align: crate::document::StrokeAlign) -> Document {
+        Document {
+            shapes: vec![Shape::Rect {
+                rect: [40.0, 40.0, 100.0, 80.0],
+                fill: [0.0, 0.0, 0.0, 0.0],
+                fill_gradient: None,
+                stroke: [0.0, 0.0, 0.0, 1.0],
+                stroke_w: 12.0,
+                stroke_style: StrokeStyle {
+                    align,
+                    ..StrokeStyle::default()
+                },
+                appearance: None,
+                visible: true,
+                group: None,
+                clip: None,
+                mask: false,
+                omask: None,
+                omask_path: false,
+                omask_invert: false,
+                blend: None,
+                blend_step: false,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn svg_emits_arrowhead_marker_geometry() {
+        let svg = to_svg(&arrowed_line(), 200.0, 100.0);
+        // The decorated line emits its centerline + the markers as `<path>`s
+        // (baked geometry), not the bare `<line>` element.
+        assert!(
+            svg.matches("<path").count() >= 3,
+            "expected baked centerline + 2 marker paths, got: {svg}"
+        );
+    }
+
+    #[test]
+    fn png_encodes_arrowheads() {
+        let bytes = to_png(&arrowed_line(), 200.0, 100.0).expect("png should encode");
+        assert!(bytes.len() > 8);
+    }
+
+    #[test]
+    fn svg_align_emits_offset_path_not_bare_rect() {
+        use crate::document::StrokeAlign;
+        // A non-center align replaces the `<rect>` stroke element with a baked
+        // offset `<path>`; center keeps the plain `<rect>`.
+        let outside = to_svg(&aligned_rect(StrokeAlign::Outside), 200.0, 200.0);
+        assert!(outside.contains("<path"), "outside should bake a path: {outside}");
+        let center = to_svg(&aligned_rect(StrokeAlign::Center), 200.0, 200.0);
+        // Center keeps the rect element (no baked stroke path needed).
+        assert!(center.contains("<rect"), "center keeps rect: {center}");
+    }
+
+    #[test]
+    fn png_align_inside_vs_outside_differ() {
+        use crate::document::StrokeAlign;
+        // Inside vs outside place the stroke band on opposite sides of the path,
+        // so the rasterized output must differ.
+        let inside = to_png(&aligned_rect(StrokeAlign::Inside), 200.0, 200.0).unwrap();
+        let outside = to_png(&aligned_rect(StrokeAlign::Outside), 200.0, 200.0).unwrap();
+        assert_ne!(inside, outside, "inside/outside align should render differently");
     }
 
     fn gradient_doc(kind: GradientKind) -> Document {

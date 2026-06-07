@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Stroke options — align stroke + arrowheads** (completes the Phase 3
+  "Stroke options" item alongside the already-shipped caps/joins/miter/dashes).
+  Two new stroke attributes, modelled, persisted, edited, and rendered end to
+  end on all three surfaces (egui canvas, SVG, PNG):
+  - **Align stroke (Center / Inside / Outside).** Center is the existing
+    behaviour. Inside / Outside shift the stroke band fully to one side of the
+    path by offsetting the **centerline** by ±`w/2` along its outward normal and
+    stroking the offset contour centered — a pure, renderer-agnostic emulation
+    (`stroke::offset_contour` / `aligned_geometry`) that keeps every renderer's
+    existing cap/join/dash machinery untouched. Winding-independent (a CCW path's
+    "Outside" is still its exterior, via a signed-area sign flip).
+  - **Arrowheads (None / Triangle / Open / Circle), start and end, scalable.**
+    Markers are **baked geometry** (a filled / stroked outline at the endpoint,
+    oriented along the path tangent, sized to the stroke width × a scale slider) —
+    the most portable form, drawn identically on canvas, SVG, and PNG with no
+    `<marker>` defs. Filled heads trim the line back so the base meets it cleanly
+    (`stroke::arrowhead` / `arrow_decorations` / `trim_polyline`). Open paths
+    only (Illustrator marks open ends).
+  - **Model + persistence.** Additive `align: StrokeAlign`, `start_arrow` /
+    `end_arrow: Arrowhead`, `arrow_scale: f32` on `StrokeStyle`, all
+    `#[serde(default)]` (scale defaults to `1.0`) — pre-existing `.contour` files
+    load as a centered, arrow-less stroke and render unchanged. Carried through
+    the Appearance stack's per-stroke `style`, the eyedropper, blend, boolean and
+    clip paint copies for free.
+  - **Rendering.** The shared tiny-skia raster path (canvas + PNG) builds
+    per-stroke align/arrow geometry (`export::StrokeContour` / `StrokeDecor`);
+    the egui painter can express neither, so a shape with a non-center align or
+    an arrowhead now routes through the raster path (new
+    `Appearance::needs_stroke_decor` → `needs_raster`), keeping canvas == PNG.
+    SVG emits the baked offset / trimmed centerline plus per-marker `<path>`s.
+  - 27 new pure unit tests (offset-contour correctness incl. right-angle miter
+    and winding independence, arrowhead tip/base/scale geometry, endpoint-tangent
+    + line-trim math, align Inside/Outside grow/shrink) + `.contour` back-compat
+    & round-trip + SVG-marker / PNG-align export tests. *(Open: **width profiles**
+    / variable-width strokes, and align / arrowheads on **compound** paths and
+    each Appearance stroke layer **individually in the inspector** — the panel
+    edits the topmost stroke's options today, the model already supports per-layer.)*
 - **Direct-Select tool (`A`) — anchor & handle editing** (closes the Phase 4
   "Direct-select" item). A dedicated tool that selects and reshapes individual
   anchor points and their Bézier control handles on a path **and** on the
