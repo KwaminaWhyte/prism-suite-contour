@@ -155,13 +155,13 @@ app-agnostic. Phases 0–1 are largely **done** (see §1); the rest is the road 
 
 ### Phase 3 — Appearance, strokes, gradients  *(non-destructive depth — Illustrator's edge)*
 - [ ] **Stroke options** (M): caps/joins/miter, **dashes**, **arrowheads**, align stroke (center/in/out), **width profiles** (variable-width via `kurbo` offset)
-- [x] **Appearance panel** (L) — multiple fills/strokes per object; reorder; per-item opacity/blend/visibility; stack-aware inspector; canvas + SVG/PNG export walk the stack bottom-to-top. Additive `appearance: Option<Appearance>` (`#[serde(default)]`) with on-demand legacy migration (single fill/stroke → one-element vecs). *(Done. **Still open:** per-shape blend **compositing** — modes stored/editable but only Normal composites; live **effects** vec; **mesh gradients**; **patterns**. Group-level appearance also still open.)*
+- [x] **Appearance panel** (L) — multiple fills/strokes per object; reorder; per-item opacity/blend/visibility; stack-aware inspector; canvas + SVG/PNG export walk the stack bottom-to-top. Additive `appearance: Option<Appearance>` (`#[serde(default)]`) with on-demand legacy migration (single fill/stroke → one-element vecs). *(Done, **incl. blend compositing**: per-fill/stroke blend modes now really composite — separable Porter-Duff math (Multiply/Screen/Overlay/Darken/Lighten/ColorDodge/ColorBurn/HardLight/SoftLight/Difference/Exclusion) on premultiplied RGBA8 via the shared `tiny-skia` raster path on canvas + PNG, `mix-blend-mode` on SVG. **Still open:** a true **per-object** blend mode (per-fill/stroke today); non-separable **HSL** modes; live **effects** beyond Drop Shadow + Gaussian Blur; **mesh gradients**; **patterns**; group-level appearance.)*
 - [ ] **Gradients** (L): linear / radial / **angle** / **freeform (mesh-free)**; multi-stop + opacity stops; **gradient on stroke**; **dither + perceptual interpolation** (kill banding, smoother blends — IL 2025 parity)
 - [ ] **Mesh gradient** (L): grid of color nodes, smooth multi-direction blends (`Object → Mesh`)
 - [ ] **Patterns** (M): tile from selection, pattern fill/stroke, edit-pattern mode, seamless offsets
 - [~] **Live effects** (L): non-destructive drop-shadow / blur / glow / transform / distort (warp, zig-zag, roughen, pucker/bloat) / round-corners; raster effects via shared `prism-fx`; effect re-eval on edit. *(**Drop Shadow** + **Gaussian Blur** Done: additive `effects: Vec<Effect>` on `Appearance`; rasterize-blur-composite via `tiny-skia` on canvas + PNG, standard `<filter>` (`feDropShadow`/`feGaussianBlur`) on SVG; add/remove/reorder/edit in the Appearance panel; pure box-blur / shadow math unit-tested. **Still open:** Transform, Outer Glow, the distort family, round-corners, effect blend compositing, and promotion of the raster effects to shared `prism-fx`.)*
 - [ ] **Graphic styles** (S): save/apply an Appearance as a named style
-- [ ] **Blend modes + opacity masks** (M): reuse `prism-core` 18 blend modes; opacity mask from a shape; knockout
+- [~] **Blend modes + opacity masks** (M): **Done** — 12 separable blend modes (Multiply…Exclusion) really composite on the Appearance stack via a `tiny-skia` premultiplied Porter-Duff raster path (canvas + PNG; `mix-blend-mode` on SVG), and **opacity masks** (`Object ▸ Opacity Mask ▸ Make / Release / Invert`) drive an object's alpha by another shape's luminance (additive `omask` tags, serde-default; luminance→alpha multiply in the raster path; SVG `<mask>` def). **Still open:** per-*object* blend mode, non-separable **HSL** modes, **group/layer** masks, and **knockout**
 - [ ] Tests: stroke-outline correctness, gradient/mesh sampling, effect re-eval
 
 ### Phase 4 — Pathfinder, shapes, path tools  *(complete the geometry surface)*
@@ -222,12 +222,12 @@ app-agnostic. Phases 0–1 are largely **done** (see §1); the rest is the road 
 | Guides / grid / snap / rulers | full | **Planned** | 2 |
 | Pathfinder | union/intersect/difference | **Done** 3 of ~10; rest + compound + Shape Builder **Planned** | 1,4 |
 | Stroke options / width profiles | dashes/arrows/caps/joins/variable | **Planned** | 3 |
-| Appearance (multi fill/stroke/fx) | full non-destructive stack | **Done** (multi fill/stroke, reorder, per-item opacity/blend/visibility; live **effects**: Drop Shadow + Gaussian Blur); blend **compositing** + remaining effects **Planned** | 3 |
+| Appearance (multi fill/stroke/fx) | full non-destructive stack | **Done** (multi fill/stroke, reorder, per-item opacity/blend/visibility; blend **compositing** real now — 12 separable modes; live **effects**: Drop Shadow + Gaussian Blur); per-object/HSL blend + remaining effects **Planned** | 3 |
 | Gradients (linear/radial/freeform) | + dither + perceptual | **Planned** | 3 |
 | Mesh gradient | full | **Planned** | 3 |
 | Patterns / symbols / brushes | full | **Planned** | 3,5 |
 | Live effects | non-destructive fx | **Partial** — Drop Shadow + Gaussian Blur (canvas/SVG/PNG); rest **Planned** (via `prism-fx`) | 3 |
-| Blend modes / opacity masks | full | **Planned** (reuse `prism-core`) | 3 |
+| Blend modes / opacity masks | full | **Done** — 12 separable blend modes composite (canvas/PNG/SVG); opacity masks (luminance→alpha, invert); per-object/HSL/group-mask/knockout **Planned** | 3 |
 | Blends / envelope / puppet warp | full | **Planned** | 4 |
 | Type / area / on-path / variable | full | **Planned** | 5 |
 | Color: swatches/spot/CMYK/recolor | full | **Planned** (shared `prism-color`) | 5,6 |

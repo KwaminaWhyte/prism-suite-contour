@@ -286,6 +286,117 @@ impl ContourApp {
         self.status = "Released clipping mask".into();
     }
 
+    // --- Opacity masks -------------------------------------------------------
+
+    /// The per-shape opacity-mask tags in paint order, for the pure
+    /// [`opacity_mask`](crate::opacity_mask) helpers.
+    pub(super) fn omask_tags(&self) -> Vec<crate::opacity_mask::OMaskTag> {
+        self.doc
+            .shapes
+            .iter()
+            .map(|s| crate::opacity_mask::OMaskTag::new(s.omask(), s.is_omask()))
+            .collect()
+    }
+
+    /// Whether the selection can be made into an opacity mask (≥2 distinct
+    /// unmasked shapes). Drives menu / button enablement.
+    pub(super) fn can_make_omask(&self) -> bool {
+        crate::opacity_mask::can_make(&self.omask_tags(), &self.selection)
+    }
+
+    /// Whether the selection touches any opacity-mask set (so Release is useful).
+    pub(super) fn can_release_omask(&self) -> bool {
+        crate::opacity_mask::can_release(&self.omask_tags(), &self.selection)
+    }
+
+    /// Make an opacity mask from the selection (Illustrator's
+    /// `Object ▸ Opacity Mask ▸ Make`): the **topmost** selected shape becomes the
+    /// luminance mask and the shapes below it are masked by it. Tags all members
+    /// with a fresh opacity-mask id, flags the top one as the mask path, and
+    /// gathers them into one contiguous block anchored at the top (mirroring how
+    /// clipping masks re-stack). One undo step; the selection is remapped to the
+    /// moved block so the set stays selected.
+    pub(super) fn make_omask(&mut self) {
+        if !self.can_make_omask() {
+            self.status = "Opacity mask: select two or more unmasked objects".into();
+            return;
+        }
+        self.checkpoint();
+        let id = crate::opacity_mask::next_omask_id(&self.omask_tags());
+
+        let mut sel: Vec<usize> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|&i| i < self.doc.shapes.len())
+            .collect();
+        sel.sort_unstable();
+        sel.dedup();
+
+        // The topmost (frontmost) selected shape is the mask.
+        let top = *sel.last().expect("non-empty");
+        for &i in &sel {
+            self.doc.shapes[i].set_omask(Some(id));
+            self.doc.shapes[i].set_omask_path(i == top);
+        }
+
+        // Gather the members into one contiguous block ending at the top's slot,
+        // preserving relative order (mask stays last = frontmost).
+        let insert_at = (0..=top).filter(|i| !sel.contains(i)).count();
+        let mut block: Vec<Shape> = Vec::with_capacity(sel.len());
+        for &i in sel.iter().rev() {
+            block.push(self.doc.shapes.remove(i));
+        }
+        block.reverse();
+        for (k, shape) in block.into_iter().enumerate() {
+            self.doc.shapes.insert(insert_at + k, shape);
+        }
+        self.selection = (insert_at..insert_at + sel.len()).collect();
+        self.status = "Made opacity mask".into();
+    }
+
+    /// Release every opacity-mask set the selection touches (Illustrator's
+    /// `Object ▸ Opacity Mask ▸ Release`): clears the mask tags on all members so
+    /// the originals reappear at full opacity. One undo step.
+    pub(super) fn release_omask(&mut self) {
+        if !self.can_release_omask() {
+            return;
+        }
+        self.checkpoint();
+        let tags = self.omask_tags();
+        let ids = crate::opacity_mask::selected_omask_ids(&tags, &self.selection);
+        for s in self.doc.shapes.iter_mut() {
+            if s.omask().is_some_and(|c| ids.binary_search(&c).is_ok()) {
+                s.clear_omask();
+            }
+        }
+        self.status = "Released opacity mask".into();
+    }
+
+    /// Toggle the **invert** flag on the masked content of every opacity-mask set
+    /// the selection touches (the mask path itself carries no invert). One undo
+    /// step. Returns whether anything changed.
+    pub(super) fn toggle_omask_invert(&mut self) -> bool {
+        if !self.can_release_omask() {
+            return false;
+        }
+        self.checkpoint();
+        let tags = self.omask_tags();
+        let ids = crate::opacity_mask::selected_omask_ids(&tags, &self.selection);
+        let mut changed = false;
+        for s in self.doc.shapes.iter_mut() {
+            if s.omask().is_some_and(|c| ids.binary_search(&c).is_ok()) && !s.is_omask() {
+                let inv = !s.omask_invert();
+                s.set_omask_invert(inv);
+                changed = true;
+            }
+        }
+        if changed {
+            self.status = "Toggled opacity-mask invert".into();
+        }
+        changed
+    }
+
     // --- Undo / redo ---------------------------------------------------------
 
     /// Record the current document as an undo checkpoint *before* applying a
@@ -611,6 +722,9 @@ impl ContourApp {
                 group: None,
                 clip: None,
                 mask: false,
+                omask: None,
+                omask_path: false,
+                omask_invert: false,
             });
             self.select_only(Some(self.doc.shapes.len() - 1));
         } else {

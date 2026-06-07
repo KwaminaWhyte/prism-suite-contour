@@ -4,7 +4,7 @@
 //! hidden shapes. SVG emits standard `rect`/`ellipse`/`line`/`path` elements;
 //! PNG rasterizes via `tiny-skia` into a `Pixmap` sized to the artboard.
 
-use crate::appearance::{Appearance, Effect, Paint};
+use crate::appearance::{Appearance, BlendMode, Effect, Paint};
 // NOTE: `Paint` here is the Appearance paint enum; tiny-skia's `Paint` is used
 // fully-qualified as `tiny_skia::Paint` in the rasterizer to avoid the clash.
 use crate::document::{self, Document, LineCap, LineJoin, Shape, StrokeStyle};
@@ -102,12 +102,14 @@ fn svg_body(doc: &Document) -> String {
                     defs.push('\n');
                     id
                 });
-                let attrs = match grad_id {
+                let mut attrs = match grad_id {
                     Some(id) => format!(" fill=\"url(#{id})\""),
                     None => fill_attr,
                 };
+                attrs.push_str(" stroke=\"none\"");
+                attrs.push_str(&blend_style_attr(fill.blend));
                 shape_body.push_str("  ");
-                shape_body.push_str(&geom.element(&format!("{attrs} stroke=\"none\"")));
+                shape_body.push_str(&geom.element(&attrs));
                 shape_body.push('\n');
             }
         }
@@ -131,20 +133,45 @@ fn svg_body(doc: &Document) -> String {
             let mut attrs = String::from(" fill=\"none\"");
             attrs.push_str(&stroke_paint);
             attrs.push_str(&stroke_geom_attrs(stroke.width, &stroke.style));
+            attrs.push_str(&blend_style_attr(stroke.blend));
             shape_body.push_str("  ");
             shape_body.push_str(&geom.element(&attrs));
             shape_body.push('\n');
         }
 
+        // Opacity mask: emit a luminance `<mask>` def (the mask shape painted in
+        // greyscale; white reveals, black hides) and reference it on the content's
+        // group, so the SVG masks natively. Inverted masks add an `invert` filter.
+        let mask_attr = doc.opacity_mask_of(i).map(|(mask_shape, invert)| {
+            let mid = format!("om{i}");
+            defs.push_str("    ");
+            defs.push_str(&opacity_mask_def(&mid, &mask_shape, invert));
+            defs.push('\n');
+            format!(" mask=\"url(#{mid})\"")
+        });
+
         // Live effects: emit a standard SVG `<filter>` (feGaussianBlur /
         // feDropShadow) and wrap the shape's paint stack in a group referencing
         // it, so the exported SVG renders the effect natively in any viewer.
-        if appearance.has_active_effects() {
+        let filter_attr = if appearance.has_active_effects() {
             let fid = format!("fx{i}");
             defs.push_str("    ");
             defs.push_str(&effect_filter_def(&fid, &appearance.effects));
             defs.push('\n');
-            body.push_str(&format!("  <g filter=\"url(#{fid})\">\n"));
+            Some(format!(" filter=\"url(#{fid})\""))
+        } else {
+            None
+        };
+
+        if filter_attr.is_some() || mask_attr.is_some() {
+            // One group carries both the filter and the mask (mask outside the
+            // filter so the effect spill is masked too, matching the raster path).
+            let attrs = format!(
+                "{}{}",
+                filter_attr.unwrap_or_default(),
+                mask_attr.unwrap_or_default()
+            );
+            body.push_str(&format!("  <g{attrs}>\n"));
             body.push_str(&shape_body);
             body.push_str("  </g>\n");
         } else {
@@ -379,6 +406,48 @@ fn effect_filter_def(id: &str, effects: &[Effect]) -> String {
     )
 }
 
+/// Emit a luminance `<mask>` def for an opacity mask: the mask shape is painted
+/// (its effective fill swatch as the greyscale luminance source) inside a
+/// `mask-type="luminance"` element, so any SVG viewer multiplies the masked
+/// content's alpha by the mask's luminance — white reveals, black hides. An
+/// inverted mask wraps the painted geometry so `1 − luminance` drives the alpha
+/// (achieved by flooding the mask region white and subtracting the shape).
+fn opacity_mask_def(id: &str, mask_shape: &Shape, invert: bool) -> String {
+    let geom = svg_geom(mask_shape);
+    let ap = mask_shape.effective_appearance();
+    // Representative greyscale colour: the top visible fill's swatch (or white so
+    // a stroke-only mask still reveals where it paints).
+    let swatch = ap
+        .fills
+        .iter()
+        .rev()
+        .find(|f| f.visible && f.opacity > 0.0)
+        .map(|f| f.paint.swatch())
+        .unwrap_or([1.0, 1.0, 1.0, 1.0]);
+    let body = if invert {
+        // White backdrop minus the mask shape painted black → inverted luminance.
+        format!(
+            "<rect x=\"-100%\" y=\"-100%\" width=\"300%\" height=\"300%\" fill=\"#ffffff\" />\
+             {}",
+            geom.element(" fill=\"#000000\" stroke=\"none\"")
+        )
+    } else {
+        geom.element(&format!(" fill=\"{}\" stroke=\"none\"", hex(swatch)))
+    };
+    format!("<mask id=\"{id}\" mask-type=\"luminance\">{body}</mask>")
+}
+
+/// A `style="mix-blend-mode:…"` attribute for a non-`Normal` paint layer (empty
+/// for `Normal`), so an exported fill / stroke composites in any SVG viewer the
+/// same way the canvas and PNG do. `Normal` emits nothing (the default).
+fn blend_style_attr(blend: BlendMode) -> String {
+    if blend.is_separable_blend() {
+        format!(" style=\"mix-blend-mode:{}\"", blend.css())
+    } else {
+        String::new()
+    }
+}
+
 /// `[f32;4]` straight sRGB -> `#rrggbb`.
 fn hex(c: [f32; 4]) -> String {
     let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -458,11 +527,14 @@ pub fn to_png_artboard(doc: &Document, ab: [f32; 4]) -> Option<Vec<u8>> {
 
     let base = Transform::from_translate(-ox, -oy);
     // Clipping masks resolved: mask paths drop out, clipped content is cropped.
-    for (_, shape) in doc.render_shapes() {
+    // Opacity masks resolved: the mask path drops out and its luminance is applied
+    // to its content shape's alpha (via `render_shapes` / `opacity_mask_of`).
+    for (i, shape) in doc.render_shapes() {
         if !shape.visible() {
             continue;
         }
-        draw_shape_skia(&mut pixmap, &shape, base);
+        let mask = doc.opacity_mask_of(i);
+        draw_shape_skia(&mut pixmap, &shape, base, mask.as_ref());
     }
 
     pixmap.encode_png().ok()
@@ -503,7 +575,7 @@ pub(crate) fn skia_path_of(shape: &Shape) -> Option<(tiny_skia::Path, bool)> {
     }
 }
 
-fn draw_shape_skia(pixmap: &mut Pixmap, shape: &Shape, id: Transform) {
+fn draw_shape_skia(pixmap: &mut Pixmap, shape: &Shape, id: Transform, omask: Option<&(Shape, bool)>) {
     // Gradient geometry maps onto the shape's document-space bounding box.
     let bbox = shape
         .bounds()
@@ -513,19 +585,24 @@ fn draw_shape_skia(pixmap: &mut Pixmap, shape: &Shape, id: Transform) {
         return;
     };
     let appearance = shape.effective_appearance();
+    let mask = omask.and_then(OpacityMaskInput::of);
 
-    // Fast path: no live effects → paint the stack straight onto the page.
-    if !appearance.has_active_effects() {
+    // Fast path: no live effects, no opacity mask → paint the stack straight onto
+    // the page (blend layers still composite, handled inside paint_appearance_skia).
+    if !appearance.has_active_effects() && mask.is_none() {
         paint_appearance_skia(pixmap, &path, fillable, &bbox, &appearance, id);
         return;
     }
 
-    // Effects present: rasterize the fill/stroke stack into a padded scratch
-    // pixmap (at the page's pixel scale, here 1 px/doc-unit because the page
-    // `id` transform is a pure translate), apply the effect stack, then draw the
-    // processed raster back onto the page at the right offset. `id` is a pure
-    // `translate(-ox, -oy)` so its translation gives the artboard crop offset.
-    if let Some(layer) = render_shape_layer(&path, fillable, &bbox, &appearance, 1.0) {
+    // Effects and/or an opacity mask present: rasterize the fill/stroke stack into
+    // a padded scratch pixmap (at the page's pixel scale, here 1 px/doc-unit
+    // because the page `id` transform is a pure translate), apply the effect stack
+    // and the mask, then draw the processed raster back onto the page at the right
+    // offset. `id` is a pure `translate(-ox, -oy)` so its translation gives the
+    // artboard crop offset.
+    if let Some(layer) =
+        render_shape_layer_masked(&path, fillable, &bbox, &appearance, 1.0, mask.as_ref())
+    {
         let tx = id.tx; // = -ox (artboard crop)
         let ty = id.ty;
         let dst_x = (layer.doc_origin.0 + tx).round() as i32;
@@ -550,17 +627,67 @@ pub(crate) struct ShapeLayer {
     pub doc_origin: (f32, f32),
 }
 
+/// A resolved opacity-mask input for the rasterizer: the mask shape's tiny-skia
+/// `path`, whether it has a fillable region, its document-space `bbox` (for any
+/// gradient), its effective `appearance` (the luminance source), and whether the
+/// mask is inverted. The mask is rasterized into the same scratch as the artwork
+/// and multiplied into its alpha by luminance. Owns its appearance so callers can
+/// build it from a transient [`Shape::effective_appearance`].
+pub(crate) struct OpacityMaskInput {
+    pub path: tiny_skia::Path,
+    pub fillable: bool,
+    pub bbox: [f32; 4],
+    pub appearance: Appearance,
+    pub invert: bool,
+}
+
+impl OpacityMaskInput {
+    /// Build the mask input for a resolved `(mask_shape, invert)` pair, or `None`
+    /// if the mask shape is degenerate. Shared by PNG export and the canvas.
+    pub(crate) fn of(mask: &(Shape, bool)) -> Option<Self> {
+        let (mask_shape, invert) = mask;
+        let (path, fillable) = skia_path_of(mask_shape)?;
+        let bbox = mask_shape
+            .bounds()
+            .map(|b| [b.x, b.y, b.w, b.h])
+            .unwrap_or([0.0; 4]);
+        Some(Self {
+            path,
+            fillable,
+            bbox,
+            appearance: mask_shape.effective_appearance(),
+            invert: *invert,
+        })
+    }
+}
+
 /// Rasterize a shape's effective appearance (fills + strokes) into a padded
 /// scratch pixmap at `scale` px/doc-unit, then apply its live effect stack.
-/// Returns the processed layer + its document-space placement, or `None` for a
-/// degenerate size. Shared by PNG export and the live canvas so the two surfaces
-/// composite effects identically.
+/// A thin no-mask wrapper over [`render_shape_layer_masked`], retained for the
+/// export tests.
+#[cfg(test)]
 pub(crate) fn render_shape_layer(
     path: &tiny_skia::Path,
     fillable: bool,
     bbox: &[f32; 4],
     appearance: &Appearance,
     scale: f32,
+) -> Option<ShapeLayer> {
+    render_shape_layer_masked(path, fillable, bbox, appearance, scale, None)
+}
+
+/// Rasterize a shape's effective appearance into a padded scratch pixmap, then
+/// apply its live effect stack and, last, any opacity mask. Returns the processed
+/// layer + its document-space placement, or `None` for a degenerate size. Shared
+/// by PNG export and the live canvas so the two surfaces composite effects,
+/// blends and masks identically.
+pub(crate) fn render_shape_layer_masked(
+    path: &tiny_skia::Path,
+    fillable: bool,
+    bbox: &[f32; 4],
+    appearance: &Appearance,
+    scale: f32,
+    mask: Option<&OpacityMaskInput>,
 ) -> Option<ShapeLayer> {
     let pad = appearance.effect_pad();
     // Padded document-space rect covering the artwork + the effects' spill.
@@ -580,6 +707,15 @@ pub(crate) fn render_shape_layer(
     let t = Transform::from_scale(scale, scale).post_translate(-dx * scale, -dy * scale);
     paint_appearance_skia(&mut layer, path, fillable, bbox, appearance, t);
     crate::effects::apply_effects(&mut layer, &appearance.effects, scale);
+    // Opacity mask: rasterize the mask shape's luminance into a same-size scratch
+    // (same transform, so it registers pixel-for-pixel with the artwork), then
+    // multiply it into the artwork's alpha. Applied last so it masks the final
+    // composited result (artwork + effects), as Illustrator does.
+    if let Some(m) = mask {
+        let mut mask_pm = crate::effects::transparent_pixmap(pw, ph);
+        paint_appearance_skia(&mut mask_pm, &m.path, m.fillable, &m.bbox, &m.appearance, t);
+        crate::effects::apply_luminance_mask(&mut layer, &mask_pm, m.invert);
+    }
     Some(ShapeLayer {
         pixmap: layer,
         doc_origin: (dx, dy),
@@ -588,8 +724,14 @@ pub(crate) fn render_shape_layer(
 
 /// Rasterize an [`Appearance`] stack onto `path`: fills bottom-to-top (only when
 /// `fillable`), then strokes bottom-to-top, each scaled by its per-item opacity.
-/// Only [`BlendMode::Normal`] is composited (tiny-skia source-over); other modes
-/// rasterize as Normal.
+///
+/// **Blend modes really composite now.** A `Normal` layer is drawn straight onto
+/// `pixmap` with `tiny-skia` source-over (the fast path). A non-`Normal` layer is
+/// rasterized alone into a transparent scratch pixmap (same size as `pixmap`,
+/// same transform) and then composited onto `pixmap` with the separable
+/// Porter-Duff blend math in [`crate::effects::composite_blended`], so it blends
+/// against everything painted beneath it — closing the long-standing "stored but
+/// not composited" Appearance gap.
 fn paint_appearance_skia(
     pixmap: &mut Pixmap,
     path: &tiny_skia::Path,
@@ -598,6 +740,23 @@ fn paint_appearance_skia(
     appearance: &Appearance,
     transform: Transform,
 ) {
+    let (w, h) = (pixmap.width(), pixmap.height());
+    // Paint one layer's `paint`+`draw` either straight (Normal) or via a blended
+    // scratch composite. `draw` rasterizes onto whichever pixmap it is handed.
+    let paint_layer = |pixmap: &mut Pixmap,
+                       blend: crate::appearance::BlendMode,
+                       draw: &dyn Fn(&mut Pixmap)| {
+        if !blend.is_separable_blend() {
+            draw(pixmap);
+            return;
+        }
+        // Non-Normal: isolate this layer on a transparent scratch, then blend it
+        // over the accumulated backdrop.
+        let mut scratch = crate::effects::transparent_pixmap(w, h);
+        draw(&mut scratch);
+        crate::effects::composite_blended(pixmap, &scratch, blend);
+    };
+
     if fillable {
         for fill in &appearance.fills {
             if !fill.visible || fill.opacity <= 0.0 {
@@ -621,7 +780,10 @@ fn paint_appearance_skia(
                 }
             }
             paint.anti_alias = true;
-            pixmap.fill_path(path, &paint, TsFillRule::Winding, transform, None);
+            let draw = |pm: &mut Pixmap| {
+                pm.fill_path(path, &paint, TsFillRule::Winding, transform, None);
+            };
+            paint_layer(pixmap, fill.blend, &draw);
         }
     }
     for stroke in &appearance.strokes {
@@ -656,7 +818,10 @@ fn paint_appearance_skia(
                 .normalized_dash()
                 .and_then(|runs| StrokeDash::new(runs, stroke.style.dash_offset)),
         };
-        pixmap.stroke_path(path, &paint, &s, transform, None);
+        let draw = |pm: &mut Pixmap| {
+            pm.stroke_path(path, &paint, &s, transform, None);
+        };
+        paint_layer(pixmap, stroke.blend, &draw);
     }
 }
 
@@ -782,6 +947,9 @@ mod tests {
                     group: None,
                     clip: None,
                     mask: false,
+                    omask: None,
+                    omask_path: false,
+                    omask_invert: false,
                 },
                 Shape::Path {
                     points: vec![(60.0, 60.0), (90.0, 60.0), (90.0, 90.0)],
@@ -797,6 +965,9 @@ mod tests {
                     group: None,
                     clip: None,
                     mask: false,
+                    omask: None,
+                    omask_path: false,
+                    omask_invert: false,
                 },
             ],
             ..Default::default()
@@ -884,6 +1055,9 @@ mod tests {
                 group: None,
                 clip: None,
                 mask: false,
+                omask: None,
+                omask_path: false,
+                omask_invert: false,
             }],
             ..Default::default()
         }
@@ -932,6 +1106,9 @@ mod tests {
                 group: None,
                 clip: None,
                 mask: false,
+                omask: None,
+                omask_path: false,
+                omask_invert: false,
             }],
             ..Default::default()
         }
@@ -974,7 +1151,7 @@ mod tests {
         // Re-rasterize to a pixmap directly so we can sample pixels.
         let mut pixmap = Pixmap::new(100, 100).unwrap();
         pixmap.fill(TsColor::WHITE);
-        draw_shape_skia(&mut pixmap, &doc.shapes[0], Transform::identity());
+        draw_shape_skia(&mut pixmap, &doc.shapes[0], Transform::identity(), None);
         let px = |x: u32, y: u32| {
             let p = pixmap.pixel(x, y).unwrap();
             (p.red(), p.green(), p.blue())
@@ -1003,6 +1180,9 @@ mod tests {
             group: None,
             clip: None,
             mask: false,
+            omask: None,
+            omask_path: false,
+            omask_invert: false,
         };
         s.set_appearance(Some(Appearance {
             fills: vec![
@@ -1045,6 +1225,9 @@ mod tests {
             group: None,
             clip: None,
             mask: false,
+            omask: None,
+            omask_path: false,
+            omask_invert: false,
         };
         // Bottom red, top opaque green → centre reads green.
         s.set_appearance(Some(Appearance {
@@ -1057,7 +1240,7 @@ mod tests {
         }));
         let mut pixmap = Pixmap::new(100, 100).unwrap();
         pixmap.fill(TsColor::WHITE);
-        draw_shape_skia(&mut pixmap, &s, Transform::identity());
+        draw_shape_skia(&mut pixmap, &s, Transform::identity(), None);
         let p = pixmap.pixel(50, 50).unwrap();
         assert!(
             p.green() > p.red() && p.green() > p.blue(),
@@ -1066,6 +1249,181 @@ mod tests {
             p.green(),
             p.blue()
         );
+    }
+
+    // --- Blend-mode compositing ---------------------------------------------
+
+    /// A stacked PNG with a Multiply top fill must darken where it overlaps the
+    /// bottom fill (Multiply composites against the backdrop, not source-over).
+    #[test]
+    fn png_blend_multiply_darkens_against_backdrop() {
+        use crate::appearance::{Appearance, BlendMode, Fill};
+        let mut s = Shape::Rect {
+            rect: [0.0, 0.0, 100.0, 100.0],
+            fill: [1.0, 1.0, 1.0, 1.0],
+            fill_gradient: None,
+            stroke: [0.0, 0.0, 0.0, 0.0],
+            stroke_w: 0.0,
+            stroke_style: StrokeStyle::default(),
+            appearance: None,
+            visible: true,
+            group: None,
+            clip: None,
+            mask: false,
+            omask: None,
+            omask_path: false,
+            omask_invert: false,
+        };
+        // Bottom 60% grey, top 60% grey Multiply → 0.36 grey (much darker than
+        // either layer alone, which a source-over top fill could never produce).
+        s.set_appearance(Some(Appearance {
+            fills: vec![
+                Fill::solid([0.6, 0.6, 0.6, 1.0]),
+                Fill {
+                    paint: Paint::Solid([0.6, 0.6, 0.6, 1.0]),
+                    opacity: 1.0,
+                    blend: BlendMode::Multiply,
+                    visible: true,
+                },
+            ],
+            strokes: vec![],
+            effects: vec![],
+        }));
+        let mut pixmap = Pixmap::new(100, 100).unwrap();
+        pixmap.fill(TsColor::WHITE);
+        draw_shape_skia(&mut pixmap, &s, Transform::identity(), None);
+        let p = pixmap.pixel(50, 50).unwrap();
+        let expected = (0.36_f32 * 255.0).round() as i32;
+        assert!(
+            (p.red() as i32 - expected).abs() <= 6,
+            "multiply should darken to ~{expected}, got {}",
+            p.red()
+        );
+    }
+
+    /// SVG export tags a non-Normal paint layer with `mix-blend-mode` so it
+    /// composites in any viewer; a Normal layer emits no blend style.
+    #[test]
+    fn svg_emits_mix_blend_mode_for_non_normal() {
+        use crate::appearance::{Appearance, BlendMode, Fill};
+        let mut s = Shape::Rect {
+            rect: [0.0, 0.0, 50.0, 50.0],
+            fill: [1.0, 0.0, 0.0, 1.0],
+            fill_gradient: None,
+            stroke: [0.0, 0.0, 0.0, 0.0],
+            stroke_w: 0.0,
+            stroke_style: StrokeStyle::default(),
+            appearance: None,
+            visible: true,
+            group: None,
+            clip: None,
+            mask: false,
+            omask: None,
+            omask_path: false,
+            omask_invert: false,
+        };
+        s.set_appearance(Some(Appearance {
+            fills: vec![
+                Fill::solid([1.0, 0.0, 0.0, 1.0]), // Normal: no style
+                Fill {
+                    paint: Paint::Solid([0.0, 0.0, 1.0, 1.0]),
+                    opacity: 1.0,
+                    blend: BlendMode::Screen,
+                    visible: true,
+                },
+            ],
+            strokes: vec![],
+            effects: vec![],
+        }));
+        let doc = Document {
+            shapes: vec![s],
+            ..Default::default()
+        };
+        let svg = to_svg(&doc, 100.0, 100.0);
+        assert!(
+            svg.contains("mix-blend-mode:screen"),
+            "non-normal layer gets a blend style: {svg}"
+        );
+        // Exactly one blend style (the Normal layer emits none).
+        assert_eq!(svg.matches("mix-blend-mode").count(), 1, "svg: {svg}");
+    }
+
+    // --- Opacity masks ------------------------------------------------------
+
+    fn omask_rect(rect: [f32; 4], fill: [f32; 4], omask: Option<u64>, mask: bool) -> Shape {
+        Shape::Rect {
+            rect,
+            fill,
+            fill_gradient: None,
+            stroke: [0.0, 0.0, 0.0, 0.0],
+            stroke_w: 0.0,
+            stroke_style: StrokeStyle::default(),
+            appearance: None,
+            visible: true,
+            group: None,
+            clip: None,
+            mask: false,
+            omask,
+            omask_path: mask,
+            omask_invert: false,
+        }
+    }
+
+    /// PNG: a content shape masked by a half-covering white rect is opaque under
+    /// the mask and erased outside it (luminance·coverage drives alpha).
+    #[test]
+    fn png_opacity_mask_reveals_under_mask_hides_outside() {
+        let mut doc = Document::new();
+        doc.shapes.clear();
+        // Red content fills the left 100×100; a white mask covers only its left
+        // half (0..50). Under the mask → red shows; right of it → erased to white.
+        doc.shapes
+            .push(omask_rect([0.0, 0.0, 100.0, 100.0], [1.0, 0.0, 0.0, 1.0], Some(0), false));
+        doc.shapes
+            .push(omask_rect([0.0, 0.0, 50.0, 100.0], [1.0, 1.0, 1.0, 1.0], Some(0), true));
+
+        let mut pixmap = Pixmap::new(100, 100).unwrap();
+        pixmap.fill(TsColor::WHITE);
+        for (i, shape) in doc.render_shapes() {
+            let mask = doc.opacity_mask_of(i);
+            draw_shape_skia(&mut pixmap, &shape, Transform::identity(), mask.as_ref());
+        }
+        // Under the white mask (x=25): red shows through.
+        let under = pixmap.pixel(25, 50).unwrap();
+        assert!(
+            under.red() > 200 && under.green() < 80 && under.blue() < 80,
+            "under mask should be red: {},{},{}",
+            under.red(),
+            under.green(),
+            under.blue()
+        );
+        // Outside the mask (x=75): content hidden → page white shows.
+        let outside = pixmap.pixel(75, 50).unwrap();
+        assert!(
+            outside.red() > 240 && outside.green() > 240 && outside.blue() > 240,
+            "outside mask should be white page: {},{},{}",
+            outside.red(),
+            outside.green(),
+            outside.blue()
+        );
+    }
+
+    /// SVG: an opacity-masked shape emits a luminance `<mask>` def and references
+    /// it on the content's group.
+    #[test]
+    fn svg_emits_opacity_mask_def_and_ref() {
+        let mut doc = Document::new();
+        doc.shapes.clear();
+        doc.shapes
+            .push(omask_rect([0.0, 0.0, 100.0, 100.0], [1.0, 0.0, 0.0, 1.0], Some(0), false));
+        doc.shapes
+            .push(omask_rect([0.0, 0.0, 50.0, 100.0], [1.0, 1.0, 1.0, 1.0], Some(0), true));
+        let svg = to_svg(&doc, 100.0, 100.0);
+        assert!(svg.contains("<mask id=\"om0\""), "mask def: {svg}");
+        assert!(svg.contains("mask-type=\"luminance\""), "luminance mask: {svg}");
+        assert!(svg.contains("mask=\"url(#om0)\""), "masked group: {svg}");
+        // The mask path itself is not emitted as a normal painted shape (only one
+        // <rect> for the content's fill, inside the masked group).
     }
 
     // --- Live effects -------------------------------------------------------
@@ -1084,6 +1442,9 @@ mod tests {
             group: None,
             clip: None,
             mask: false,
+            omask: None,
+            omask_path: false,
+            omask_invert: false,
         };
         s.set_appearance(Some(Appearance {
             fills: vec![Fill::solid([1.0, 0.0, 0.0, 1.0])],
@@ -1147,7 +1508,7 @@ mod tests {
         // shadow (not pure white).
         let mut pixmap = Pixmap::new(200, 200).unwrap();
         pixmap.fill(TsColor::WHITE);
-        draw_shape_skia(&mut pixmap, &doc.shapes[0], Transform::identity());
+        draw_shape_skia(&mut pixmap, &doc.shapes[0], Transform::identity(), None);
         let p = pixmap.pixel(85, 85).unwrap();
         assert!(
             p.red() < 250 && p.green() < 250 && p.blue() < 250,

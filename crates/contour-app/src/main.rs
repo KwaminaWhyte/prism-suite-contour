@@ -21,6 +21,7 @@ mod gradient;
 mod group;
 mod history;
 mod icons;
+mod opacity_mask;
 mod snap;
 mod swatches;
 mod theme;

@@ -264,15 +264,30 @@ impl ShapeGeometry {
 /// stroke (bottom-to-top) over the same geometry, so a shape with one fill +
 /// one stroke renders exactly as before and a stacked shape layers correctly.
 pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected: bool) {
+    paint_shape_masked(painter, view, shape, selected, None);
+}
+
+/// [`paint_shape`] with an optional resolved opacity mask `(mask_shape, invert)`.
+/// When a mask is present (or the appearance needs blur / blend), the shape is
+/// rasterized through the tiny-skia path and the mask's luminance is multiplied
+/// into its alpha; otherwise the plain egui painter is used.
+pub fn paint_shape_masked(
+    painter: &egui::Painter,
+    view: &View,
+    shape: &Shape,
+    selected: bool,
+    omask: Option<&(Shape, bool)>,
+) {
     let appearance = shape.effective_appearance();
     if !appearance.is_empty() {
-        if appearance.has_active_effects() {
-            // egui's painter can't blur: rasterize the fill/stroke stack with
-            // tiny-skia at the current zoom, apply the live effects on that
-            // raster, and composite the processed texture (the same pipeline the
-            // PNG exporter uses). Falls back to the plain painter if rasterizing
-            // fails (degenerate size / texture limit).
-            if paint_shape_with_effects(painter, view, shape, &appearance) {
+        if appearance.needs_raster() || omask.is_some() {
+            // egui's painter can neither blur, blend, nor mask: rasterize the
+            // fill/stroke stack with tiny-skia at the current zoom, composite each
+            // non-Normal blend layer, apply the live effects + opacity mask on that
+            // raster, then upload the processed texture (the same pipeline the PNG
+            // exporter uses). Falls back to the plain painter if rasterizing fails
+            // (degenerate size / texture limit) — only possible when unmasked.
+            if paint_shape_with_effects(painter, view, shape, &appearance, omask) {
                 if selected {
                     paint_selection_ring(painter, view, shape);
                 }
@@ -287,16 +302,17 @@ pub fn paint_shape(painter: &egui::Painter, view: &View, shape: &Shape, selected
     }
 }
 
-/// Render a shape whose appearance has live effects: rasterize + process via
-/// [`crate::export::render_shape_layer`], upload the result as an egui texture,
-/// and paint it at the matching screen rectangle. Returns `false` (so the caller
-/// can fall back to the plain painter) when the shape has no rasterizable path
-/// or the layer can't be built.
+/// Render a shape whose appearance has live effects, a non-Normal blend, or an
+/// opacity mask: rasterize + process via [`crate::export::render_shape_layer_masked`],
+/// upload the result as an egui texture, and paint it at the matching screen
+/// rectangle. Returns `false` (so the caller can fall back to the plain painter)
+/// when the shape has no rasterizable path or the layer can't be built.
 fn paint_shape_with_effects(
     painter: &egui::Painter,
     view: &View,
     shape: &Shape,
     appearance: &Appearance,
+    omask: Option<&(Shape, bool)>,
 ) -> bool {
     let Some((path, fillable)) = crate::export::skia_path_of(shape) else {
         return false;
@@ -305,9 +321,15 @@ fn paint_shape_with_effects(
         .bounds()
         .map(|b| [b.x, b.y, b.w, b.h])
         .unwrap_or([0.0; 4]);
-    let Some(layer) =
-        crate::export::render_shape_layer(&path, fillable, &bbox, appearance, view.zoom)
-    else {
+    let mask = omask.and_then(crate::export::OpacityMaskInput::of);
+    let Some(layer) = crate::export::render_shape_layer_masked(
+        &path,
+        fillable,
+        &bbox,
+        appearance,
+        view.zoom,
+        mask.as_ref(),
+    ) else {
         return false;
     };
     let w = layer.pixmap.width() as usize;
@@ -336,10 +358,13 @@ fn paint_shape_with_effects(
     true
 }
 
-/// Paint an [`Appearance`] stack over a shape's geometry: fills first
-/// (bottom-to-top), then strokes (bottom-to-top), each scaled by its per-item
-/// opacity. Hidden items are skipped. Only [`BlendMode::Normal`] is composited
-/// (the egui painter has no per-shape blend); other modes render as Normal.
+/// Paint an [`Appearance`] stack over a shape's geometry with the egui painter:
+/// fills first (bottom-to-top), then strokes (bottom-to-top), each scaled by its
+/// per-item opacity. Hidden items are skipped. This plain-painter path is taken
+/// only when the appearance is all-`Normal` with no active effects; any
+/// non-`Normal` blend or live effect routes through the tiny-skia raster path
+/// ([`paint_shape_with_effects`]) instead, since the egui painter can only
+/// source-over.
 fn paint_appearance(
     painter: &egui::Painter,
     view: &View,

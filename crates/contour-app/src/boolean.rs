@@ -131,6 +131,9 @@ pub fn apply(subj_shape: &Shape, clip_shape: &Shape, op: BoolOp) -> Option<Shape
         group: None,
         clip: None,
         mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
     })
 }
 
@@ -152,6 +155,9 @@ mod tests {
             group: None,
             clip: None,
             mask: false,
+            omask: None,
+            omask_path: false,
+            omask_invert: false,
         }
     }
 

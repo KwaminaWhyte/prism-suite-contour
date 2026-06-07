@@ -69,6 +69,9 @@ fn appearance_round_trips_on_shape_and_overrides_legacy() {
         group: None,
         clip: None,
         mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
     };
     // Two stacked fills override the single legacy red fill.
     s.set_appearance(Some(Appearance {
@@ -404,6 +407,9 @@ fn axis_aligned_scale_keeps_rect_a_rect() {
         group: None,
         clip: None,
         mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
     };
     // Scale ×2 about the origin.
     s.apply_affine(&Affine::scale(2.0, 2.0));
@@ -429,6 +435,9 @@ fn flip_keeps_rect_normalized() {
         group: None,
         clip: None,
         mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
     };
     // Horizontal flip about x = 30 (the rect's centre): bounds unchanged,
     // width/height stay positive.
@@ -457,6 +466,9 @@ fn rotation_converts_rect_to_path() {
         group: None,
         clip: None,
         mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
     };
     s.apply_affine(&Affine::rotate_about(0.5, 5.0, 5.0));
     assert!(
@@ -483,6 +495,9 @@ fn rotation_preserves_rect_center() {
         group: None,
         clip: None,
         mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
     };
     let before = s.bounds().unwrap();
     let (cx0, cy0) = (before.x + before.w * 0.5, before.y + before.h * 0.5);
@@ -510,6 +525,9 @@ fn ellipse_to_path_round_trips_bounds() {
         group: None,
         clip: None,
         mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
     };
     let p = s.to_path();
     let pb = p.bounds().unwrap();
@@ -538,6 +556,9 @@ fn path_handles_transform_by_linear_part() {
         group: None,
         clip: None,
         mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
     };
     s.apply_affine(&Affine::translate(100.0, 50.0));
     if let Shape::Path {
@@ -607,6 +628,9 @@ fn line_ignores_gradient_fill() {
         group: None,
         clip: None,
         mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
     };
     line.set_fill_gradient(Some(Gradient::two_stop(
         GradientKind::Linear,
@@ -652,6 +676,9 @@ fn group_accessor_covers_every_variant() {
         group: None,
         clip: None,
         mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
     };
     line.set_group(Some(3));
     assert_eq!(line.group(), Some(3));
@@ -676,6 +703,9 @@ fn to_path_preserves_group() {
         group: Some(42),
         clip: None,
         mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
     };
     assert_eq!(r.to_path().group(), Some(42));
 
@@ -702,6 +732,9 @@ fn with_outline_inherits_paint_and_clears_clip() {
         group: Some(5),
         clip: Some(9),
         mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
     };
     s.set_mask(true);
     let ring = vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)];
@@ -743,6 +776,9 @@ fn clip_rect(rect: [f32; 4], clip: Option<u64>, mask: bool) -> Shape {
         group: None,
         clip,
         mask,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
     }
 }
 
@@ -825,6 +861,76 @@ fn loads_pre_clip_document() {
     assert_eq!(doc.render_shapes().len(), 1);
 }
 
+// --- Opacity masks -----------------------------------------------------
+
+/// A styled rect with explicit opacity-mask tagging, for opacity-mask tests.
+fn omask_rect(rect: [f32; 4], fill: [f32; 4], omask: Option<u64>, mask: bool) -> Shape {
+    Shape::Rect {
+        rect,
+        fill,
+        fill_gradient: None,
+        stroke: [0.0, 0.0, 0.0, 1.0],
+        stroke_w: 1.0,
+        stroke_style: StrokeStyle::default(),
+        appearance: None,
+        visible: true,
+        group: None,
+        clip: None,
+        mask: false,
+        omask,
+        omask_path: mask,
+        omask_invert: false,
+    }
+}
+
+/// A pre-opacity-mask `.contour` (no `omask`/`omask_path`/`omask_invert` keys)
+/// loads unmasked and renders every shape as-is.
+#[test]
+fn loads_pre_opacity_mask_document() {
+    let json = r#"{"shapes":[
+        {"Rect":{"rect":[0,0,10,10],"fill":[1,0,0,1],"stroke":[0,0,0,1],"stroke_w":2}}
+    ]}"#;
+    let doc: Document = serde_json::from_str(json).unwrap();
+    assert_eq!(doc.shapes[0].omask(), None);
+    assert!(!doc.shapes[0].is_omask());
+    assert!(!doc.shapes[0].omask_invert());
+    assert!(doc.opacity_mask_of(0).is_none());
+}
+
+/// An opacity-masked shape round-trips through serde (id + mask flag + invert),
+/// and `opacity_mask_of` resolves the content's mask shape; `render_shapes` drops
+/// the mask path (it paints nothing) but keeps the masked content.
+#[test]
+fn opacity_mask_round_trip_and_resolution() {
+    let mut doc = Document::new();
+    doc.shapes.clear();
+    // Content (index 0) masked by the white mask path (index 1), invert on content.
+    let mut content = omask_rect([0.0, 0.0, 20.0, 20.0], [1.0, 0.0, 0.0, 1.0], Some(7), false);
+    content.set_omask_invert(true);
+    doc.shapes.push(content);
+    doc.shapes
+        .push(omask_rect([0.0, 0.0, 20.0, 20.0], [1.0, 1.0, 1.0, 1.0], Some(7), true));
+
+    let json = serde_json::to_string(&doc).unwrap();
+    let back: Document = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.shapes[0].omask(), Some(7));
+    assert!(back.shapes[0].omask_invert());
+    assert!(back.shapes[1].is_omask());
+
+    // Resolution: the content's mask is the white rect; invert carried through.
+    let (mask_shape, invert) = back.opacity_mask_of(0).expect("content has a mask");
+    assert!(invert, "invert flag carried");
+    assert_eq!(mask_shape.fill_color(), Some([1.0, 1.0, 1.0, 1.0]));
+    // The mask path itself is not "masked".
+    assert!(back.opacity_mask_of(1).is_none());
+
+    // render_shapes drops the mask path but keeps the (still full-geometry) content.
+    let rendered = back.render_shapes();
+    let indices: Vec<usize> = rendered.iter().map(|(i, _)| *i).collect();
+    assert!(indices.contains(&0), "masked content kept");
+    assert!(!indices.contains(&1), "mask path dropped");
+}
+
 /// A test rect with the given fill / stroke colours.
 fn swatch_rect(fill: [f32; 4], stroke: [f32; 4]) -> Shape {
     Shape::Rect {
@@ -839,6 +945,9 @@ fn swatch_rect(fill: [f32; 4], stroke: [f32; 4]) -> Shape {
         group: None,
         clip: None,
         mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
     }
 }
 

@@ -94,6 +94,9 @@ mod tests {
             group: Some(7),
             clip: None,
             mask: false,
+            omask: None,
+            omask_path: false,
+            omask_invert: false,
         }
     }
 
@@ -110,6 +113,9 @@ mod tests {
             group: None,
             clip: None,
             mask: false,
+            omask: None,
+            omask_path: false,
+            omask_invert: false,
         }
     }
 
@@ -125,6 +131,9 @@ mod tests {
             group: None,
             clip: None,
             mask: false,
+            omask: None,
+            omask_path: false,
+            omask_invert: false,
         }
     }
 

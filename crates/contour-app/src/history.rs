@@ -139,6 +139,9 @@ mod tests {
             group: None,
             clip: None,
             mask: false,
+            omask: None,
+            omask_path: false,
+            omask_invert: false,
         }
     }
 

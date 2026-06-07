@@ -113,14 +113,16 @@ impl ContourApp {
             if let Some(prev) = self.artboard_preview() {
                 canvas::paint_artboard(&painter, &self.view, &prev, "", true);
             }
-            // Bodies, with clipping masks resolved (mask paths paint nothing;
-            // clipped content is cropped to the mask). Rings are drawn separately
-            // below from the original shapes so a selected mask still shows.
-            for (_, s) in self.doc.render_shapes() {
+            // Bodies, with clipping + opacity masks resolved (mask paths paint
+            // nothing; clipped content is cropped, opacity-masked content has the
+            // mask's luminance multiplied into its alpha). Rings are drawn
+            // separately below from the original shapes so a selected mask shows.
+            for (i, s) in self.doc.render_shapes() {
                 if !s.visible() {
                     continue;
                 }
-                canvas::paint_shape(&painter, &self.view, &s, false);
+                let omask = self.doc.opacity_mask_of(i);
+                canvas::paint_shape_masked(&painter, &self.view, &s, false, omask.as_ref());
             }
             // Selection rings + a dashed outline for selected mask paths, drawn
             // from the original (pre-clip) shapes.
@@ -131,9 +133,9 @@ impl ContourApp {
                 if self.is_selected(i) {
                     canvas::paint_selection_ring(&painter, &self.view, s);
                 }
-                // A selected clip path is otherwise invisible; outline it so the
-                // user can see and edit the mask.
-                if s.is_mask() && self.is_selected(i) {
+                // A selected clip / opacity-mask path is otherwise invisible;
+                // outline it so the user can see and edit the mask.
+                if (s.is_mask() || s.is_omask()) && self.is_selected(i) {
                     canvas::paint_mask_outline(&painter, &self.view, s);
                 }
             }
@@ -734,6 +736,9 @@ impl ContourApp {
                         group: None,
                         clip: None,
                         mask: false,
+                        omask: None,
+                        omask_path: false,
+                        omask_invert: false,
                     }
                 } else {
                     Shape::Ellipse {
@@ -748,6 +753,9 @@ impl ContourApp {
                         group: None,
                         clip: None,
                         mask: false,
+                        omask: None,
+                        omask_path: false,
+                        omask_invert: false,
                     }
                 })
             }
@@ -766,6 +774,9 @@ impl ContourApp {
                     group: None,
                     clip: None,
                     mask: false,
+                    omask: None,
+                    omask_path: false,
+                    omask_invert: false,
                 })
             }
             _ => None,

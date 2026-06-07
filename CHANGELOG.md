@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Real blend-mode compositing for the Appearance stack + opacity masks** —
+  closes the long-standing "blend modes stored but only Normal composites" gap
+  the Appearance / live-effects passes left open, and adds Illustrator's **Make
+  Opacity Mask**:
+  - **Blend compositing.** The per-fill / per-stroke `BlendMode` now *actually
+    composites*. The enum gains Illustrator's separable set (Multiply, Screen,
+    Overlay, Darken, Lighten, **Color Dodge**, **Color Burn**, **Hard Light**,
+    **Soft Light**, **Difference**, **Exclusion**, plus Normal), each with a pure,
+    unit-tested per-channel blend function `B(cb, cs)` (the W3C compositing
+    formulas). A non-Normal fill / stroke is rasterized alone with `tiny-skia`
+    and composited against everything beneath it via a separable Porter-Duff
+    composite on **premultiplied** RGBA8 (`co = αs·(1−αb)·Cs + αs·αb·B(Cb,Cs) +
+    (1−αs)·αb·Cb`), so a Multiply layer darkens its backdrop, a Screen layer
+    lightens, Difference subtracts, etc. — instead of all rendering as Normal.
+  - **Every surface composites identically.** egui's painter can only
+    source-over, so any appearance with a non-Normal blend (or a live effect, or
+    an opacity mask) now routes through the shared `tiny-skia` rasterize-and-
+    composite pipeline on the **canvas** and **PNG** export (one
+    `render_shape_layer` path for both). **SVG** export tags each non-Normal
+    paint layer with `style="mix-blend-mode:…"` so it composites natively in any
+    viewer.
+  - **Opacity masks** (`Object ▸ Opacity Mask ▸ Make / Release / Invert Mask`).
+    An object can carry a mask defined by another shape whose **luminance**
+    (Rec. 709, weighted by the mask's own coverage) drives the object's alpha —
+    white reveals, black hides — with an **invert** option. Modelled the same
+    non-destructive way as clipping masks: additive `omask` / `omask_path` /
+    `omask_invert` tags (`#[serde(default)]`) on every shape, resolved at render
+    time (`Document::opacity_mask_of`) by rasterizing the mask shape's luminance
+    into the same scratch as the artwork and multiplying it into the alpha
+    (`effects::apply_luminance_mask`), applied after live effects. The mask path
+    paints nothing on its own (dropped by `render_shapes`, outlined when
+    selected). SVG export emits a luminance `<mask>` def referenced on the
+    content's group. Menu + inspector "Opacity Mask" section drive Make / Release
+    / Invert, one undo step each.
+  - **Backward compatible.** The new blend variants and the opacity-mask tags are
+    all additive (`#[serde(default)]`), so every pre-existing `.contour` file
+    loads and renders identically; an all-Normal, unmasked, effect-free shape
+    still takes the original plain egui-painter / direct-`tiny-skia` paths. The
+    separable blend formulas (Multiply / Screen / Overlay / Difference / dodge /
+    burn edges), the premultiplied composite (Multiply darkens, Screen lightens,
+    Difference, transparent-source no-op), the luminance→alpha mask
+    (white/black/mid-grey/invert/no-coverage), and serde round-trips of a blended
+    fill + a masked object are pinned by unit tests with no egui / GPU context.
+  - **Deferred** (noted as gaps): a true **per-object** blend mode (modes are
+    per-fill/stroke today; an object-level value still composites as Normal);
+    non-separable **HSL** modes (Hue / Saturation / Color / Luminosity);
+    **group / layer** opacity masks (single-mask-shape only this pass); and
+    **knockout** groups.
+
 - **Live (non-destructive) effects on the Appearance stack — Drop Shadow +
   Gaussian Blur** — a new pure, unit-tested `effects` module and an additive
   `effects: Vec<Effect>` on `Appearance` (`#[serde(default)]`), filling the

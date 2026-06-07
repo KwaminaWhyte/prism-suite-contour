@@ -69,6 +69,20 @@ pub enum Shape {
         /// (`#[serde(default)]` → `false`).
         #[serde(default)]
         mask: bool,
+        /// Opacity-mask set membership: shapes sharing a `Some(id)` form one
+        /// opacity-mask group, one of them flagged [`omask_path`](Self) as the
+        /// luminance mask. Additive (`#[serde(default)]` → `None`), so older
+        /// files load unmasked.
+        #[serde(default)]
+        omask: Option<u64>,
+        /// Whether this shape is the *luminance mask* of its opacity-mask set.
+        /// Additive (`#[serde(default)]` → `false`).
+        #[serde(default)]
+        omask_path: bool,
+        /// Invert the opacity mask (black reveals, white hides) for the masked
+        /// content of this set. Additive (`#[serde(default)]` → `false`).
+        #[serde(default)]
+        omask_invert: bool,
     },
     Ellipse {
         rect: [f32; 4],
@@ -89,6 +103,12 @@ pub enum Shape {
         clip: Option<u64>,
         #[serde(default)]
         mask: bool,
+        #[serde(default)]
+        omask: Option<u64>,
+        #[serde(default)]
+        omask_path: bool,
+        #[serde(default)]
+        omask_invert: bool,
     },
     Line {
         p0: (f32, f32),
@@ -107,6 +127,12 @@ pub enum Shape {
         clip: Option<u64>,
         #[serde(default)]
         mask: bool,
+        #[serde(default)]
+        omask: Option<u64>,
+        #[serde(default)]
+        omask_path: bool,
+        #[serde(default)]
+        omask_invert: bool,
     },
     Path {
         points: Vec<(f32, f32)>,
@@ -137,6 +163,12 @@ pub enum Shape {
         clip: Option<u64>,
         #[serde(default)]
         mask: bool,
+        #[serde(default)]
+        omask: Option<u64>,
+        #[serde(default)]
+        omask_path: bool,
+        #[serde(default)]
+        omask_invert: bool,
     },
 }
 
@@ -239,6 +271,76 @@ impl Shape {
     pub fn clear_clip(&mut self) {
         self.set_clip(None);
         self.set_mask(false);
+    }
+
+    /// The shape's opacity-mask set id, if it belongs to one. Shapes sharing an
+    /// id form one opacity-mask set; the one with [`is_omask`](Self::is_omask)
+    /// supplies the luminance that drives the others' alpha.
+    pub fn omask(&self) -> Option<u64> {
+        match self {
+            Shape::Rect { omask, .. }
+            | Shape::Ellipse { omask, .. }
+            | Shape::Line { omask, .. }
+            | Shape::Path { omask, .. } => *omask,
+        }
+    }
+
+    /// Set (or clear, with `None`) the shape's opacity-mask set membership.
+    pub fn set_omask(&mut self, m: Option<u64>) {
+        match self {
+            Shape::Rect { omask, .. }
+            | Shape::Ellipse { omask, .. }
+            | Shape::Line { omask, .. }
+            | Shape::Path { omask, .. } => *omask = m,
+        }
+    }
+
+    /// Whether this shape is the luminance mask of its opacity-mask set.
+    pub fn is_omask(&self) -> bool {
+        match self {
+            Shape::Rect { omask_path, .. }
+            | Shape::Ellipse { omask_path, .. }
+            | Shape::Line { omask_path, .. }
+            | Shape::Path { omask_path, .. } => *omask_path,
+        }
+    }
+
+    /// Flag (or unflag) this shape as the luminance mask of its opacity-mask set.
+    pub fn set_omask_path(&mut self, m: bool) {
+        match self {
+            Shape::Rect { omask_path, .. }
+            | Shape::Ellipse { omask_path, .. }
+            | Shape::Line { omask_path, .. }
+            | Shape::Path { omask_path, .. } => *omask_path = m,
+        }
+    }
+
+    /// Whether this shape's opacity mask is inverted (black reveals, white hides).
+    pub fn omask_invert(&self) -> bool {
+        match self {
+            Shape::Rect { omask_invert, .. }
+            | Shape::Ellipse { omask_invert, .. }
+            | Shape::Line { omask_invert, .. }
+            | Shape::Path { omask_invert, .. } => *omask_invert,
+        }
+    }
+
+    /// Set whether this shape's opacity mask is inverted.
+    pub fn set_omask_invert(&mut self, v: bool) {
+        match self {
+            Shape::Rect { omask_invert, .. }
+            | Shape::Ellipse { omask_invert, .. }
+            | Shape::Line { omask_invert, .. }
+            | Shape::Path { omask_invert, .. } => *omask_invert = v,
+        }
+    }
+
+    /// Clear all opacity-mask tags (id + mask flag + invert), releasing the shape
+    /// from any opacity mask. Used by `Object ▸ Opacity Mask ▸ Release`.
+    pub fn clear_omask(&mut self) {
+        self.set_omask(None);
+        self.set_omask_path(false);
+        self.set_omask_invert(false);
     }
 
     /// This shape's clip tag pair, for the pure [`clip`](crate::clip) helpers.
@@ -647,6 +749,11 @@ impl Shape {
             group: self.group(),
             clip: None,
             mask: false,
+            // Carry opacity-mask tags through so a clipped, opacity-masked shape
+            // keeps its mask after clipping.
+            omask: self.omask(),
+            omask_path: self.is_omask(),
+            omask_invert: self.omask_invert(),
         }
     }
 
@@ -669,6 +776,9 @@ impl Shape {
                 group,
                 clip,
                 mask,
+                omask,
+                omask_path,
+                omask_invert,
             } => {
                 let pts = vec![
                     (rect[0], rect[1]),
@@ -691,6 +801,9 @@ impl Shape {
                     group: *group,
                     clip: *clip,
                     mask: *mask,
+                    omask: *omask,
+                    omask_path: *omask_path,
+                    omask_invert: *omask_invert,
                 }
             }
             Shape::Ellipse {
@@ -705,6 +818,9 @@ impl Shape {
                 group,
                 clip,
                 mask,
+                omask,
+                omask_path,
+                omask_invert,
             } => {
                 // Four anchors at the extrema with the classic 0.5523 cubic
                 // tangent so the path traces a smooth ellipse.
@@ -741,6 +857,9 @@ impl Shape {
                     group: *group,
                     clip: *clip,
                     mask: *mask,
+                    omask: *omask,
+                    omask_path: *omask_path,
+                    omask_invert: *omask_invert,
                 }
             }
             Shape::Line {
@@ -754,6 +873,9 @@ impl Shape {
                 group,
                 clip,
                 mask,
+                omask,
+                omask_path,
+                omask_invert,
             } => Shape::Path {
                 points: vec![*p0, *p1],
                 closed: false,
@@ -768,6 +890,9 @@ impl Shape {
                 group: *group,
                 clip: *clip,
                 mask: *mask,
+                omask: *omask,
+                omask_path: *omask_path,
+                omask_invert: *omask_invert,
             },
         }
     }
@@ -1001,6 +1126,12 @@ impl Document {
         let tags: Vec<crate::clip::ClipTag> = self.shapes.iter().map(|s| s.clip_tag()).collect();
         let mut out: Vec<(usize, Shape)> = Vec::with_capacity(self.shapes.len());
         for (i, shape) in self.shapes.iter().enumerate() {
+            // An opacity-mask *path* paints nothing on its own: it only supplies
+            // luminance to its set's content (applied at raster time by the
+            // renderers via [`opacity_mask_of`]).
+            if shape.is_omask() {
+                continue;
+            }
             match shape.clip() {
                 None => out.push((i, shape.clone())),
                 Some(_) if shape.is_mask() => { /* mask paints nothing */ }
@@ -1029,5 +1160,24 @@ impl Document {
             }
         }
         out
+    }
+
+    /// The resolved **opacity mask** for the content shape at `index`, if it
+    /// belongs to an opacity-mask set as content (not the mask path itself):
+    /// returns the set's luminance-mask shape (cloned) plus its invert flag. The
+    /// renderers rasterize this mask's luminance and multiply it into the content
+    /// shape's alpha ([`crate::effects::apply_luminance_mask`]). `None` for an
+    /// unmasked shape, the mask path itself, or a dangling set.
+    pub fn opacity_mask_of(&self, index: usize) -> Option<(Shape, bool)> {
+        let s = self.shapes.get(index)?;
+        let set = s.omask()?;
+        if s.is_omask() {
+            return None; // the mask path is not itself masked
+        }
+        let mask = self
+            .shapes
+            .iter()
+            .find(|o| o.omask() == Some(set) && o.is_omask())?;
+        Some((mask.clone(), s.omask_invert()))
     }
 }

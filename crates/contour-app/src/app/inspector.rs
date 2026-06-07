@@ -157,6 +157,38 @@ impl ContourApp {
                             }
                         });
                     });
+                    ui.menu_button("Opacity Mask", |ui| {
+                        ui.add_enabled_ui(self.can_make_omask(), |ui| {
+                            if ui
+                                .button(format!("{}  Make", icons::CLIP_MAKE))
+                                .on_hover_text(
+                                    "Mask lower objects by the topmost shape's luminance",
+                                )
+                                .clicked()
+                            {
+                                self.make_omask();
+                                ui.close_menu();
+                            }
+                        });
+                        ui.add_enabled_ui(self.can_release_omask(), |ui| {
+                            if ui
+                                .button(format!("{}  Release", icons::CLIP_RELEASE))
+                                .on_hover_text("Release the opacity mask")
+                                .clicked()
+                            {
+                                self.release_omask();
+                                ui.close_menu();
+                            }
+                            if ui
+                                .button("Invert Mask")
+                                .on_hover_text("Flip the mask: black reveals, white hides")
+                                .clicked()
+                            {
+                                self.toggle_omask_invert();
+                                ui.close_menu();
+                            }
+                        });
+                    });
 
                     ui.separator();
                     ui.menu_button("Align", |ui| {
@@ -688,6 +720,11 @@ impl ContourApp {
                             .show(ui, |ui| {
                                 self.clip_section(ui);
                             });
+                        egui::CollapsingHeader::new("Opacity Mask")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                self.opacity_mask_section(ui);
+                            });
                         egui::CollapsingHeader::new("Arrange")
                             .default_open(false)
                             .show(ui, |ui| {
@@ -1169,6 +1206,44 @@ impl ContourApp {
         });
         if !self.can_make_clip() && !self.can_release_clip() {
             ui.weak("Select 2+ objects; the topmost becomes the mask.");
+        }
+    }
+
+    /// Opacity-mask controls: Make (topmost shape's luminance drives the lower
+    /// objects' alpha), Release, and Invert. Each is a single undo step; buttons
+    /// disable when the gesture is a no-op. Mirrors `Object ▸ Opacity Mask`.
+    fn opacity_mask_section(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(self.can_make_omask(), |ui| {
+                if ui
+                    .button(format!("{}  Make", icons::CLIP_MAKE))
+                    .on_hover_text("Mask lower objects by the topmost shape's luminance")
+                    .clicked()
+                {
+                    self.make_omask();
+                }
+            });
+            ui.add_enabled_ui(self.can_release_omask(), |ui| {
+                if ui
+                    .button(format!("{}  Release", icons::CLIP_RELEASE))
+                    .on_hover_text("Release the opacity mask")
+                    .clicked()
+                {
+                    self.release_omask();
+                }
+            });
+        });
+        ui.add_enabled_ui(self.can_release_omask(), |ui| {
+            if ui
+                .button("Invert mask")
+                .on_hover_text("Flip the mask: black reveals, white hides")
+                .clicked()
+            {
+                self.toggle_omask_invert();
+            }
+        });
+        if !self.can_make_omask() && !self.can_release_omask() {
+            ui.weak("Select 2+ objects; the topmost (white=reveal) masks the rest.");
         }
     }
 

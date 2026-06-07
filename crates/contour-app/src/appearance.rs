@@ -23,12 +23,15 @@ use crate::document::StrokeStyle;
 use crate::gradient::Gradient;
 use serde::{Deserialize, Serialize};
 
-/// A per-attribute blend mode. Stored on every [`Fill`] / [`Stroke`] so the
-/// model is forward-compatible with compositing; **only [`BlendMode::Normal`] is
-/// composited** by the current egui-painter / tiny-skia render paths (the others
-/// round-trip through serde and the UI but render as Normal — see the crate-level
-/// gap note). Kept app-local rather than reusing `prism-core`'s 18-mode enum to
-/// keep the Appearance model self-contained for this pass.
+/// A per-attribute blend mode. Stored on every [`Fill`] / [`Stroke`] and now
+/// **actually composited**: a non-[`Normal`](BlendMode::Normal) fill / stroke is
+/// rasterized with `tiny-skia` and blended against what is already painted using
+/// the separable Porter-Duff blend math in [`crate::effects`], on every render
+/// surface (canvas / PNG; SVG approximates via `mix-blend-mode`). The variants
+/// cover Illustrator's separable set. Kept app-local rather than reusing
+/// `prism-core`'s 18-mode enum (whose blend math lives in WGSL, not Rust) so the
+/// Appearance model stays self-contained and the CPU formulas live next to the
+/// raster compositor that uses them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BlendMode {
     #[default]
@@ -38,16 +41,28 @@ pub enum BlendMode {
     Overlay,
     Darken,
     Lighten,
+    ColorDodge,
+    ColorBurn,
+    HardLight,
+    SoftLight,
+    Difference,
+    Exclusion,
 }
 
 impl BlendMode {
-    pub const ALL: [BlendMode; 6] = [
+    pub const ALL: [BlendMode; 12] = [
         BlendMode::Normal,
         BlendMode::Multiply,
         BlendMode::Screen,
         BlendMode::Overlay,
         BlendMode::Darken,
         BlendMode::Lighten,
+        BlendMode::ColorDodge,
+        BlendMode::ColorBurn,
+        BlendMode::HardLight,
+        BlendMode::SoftLight,
+        BlendMode::Difference,
+        BlendMode::Exclusion,
     ];
 
     pub fn label(self) -> &'static str {
@@ -58,6 +73,95 @@ impl BlendMode {
             BlendMode::Overlay => "Overlay",
             BlendMode::Darken => "Darken",
             BlendMode::Lighten => "Lighten",
+            BlendMode::ColorDodge => "Color Dodge",
+            BlendMode::ColorBurn => "Color Burn",
+            BlendMode::HardLight => "Hard Light",
+            BlendMode::SoftLight => "Soft Light",
+            BlendMode::Difference => "Difference",
+            BlendMode::Exclusion => "Exclusion",
+        }
+    }
+
+    /// Whether this mode composites differently from plain source-over. Only
+    /// [`Normal`](BlendMode::Normal) is a no-op (source-over); everything else
+    /// needs the backdrop-reading blend path.
+    pub fn is_separable_blend(self) -> bool {
+        self != BlendMode::Normal
+    }
+
+    /// The CSS / SVG `mix-blend-mode` keyword for this mode (used by SVG export).
+    pub fn css(self) -> &'static str {
+        match self {
+            BlendMode::Normal => "normal",
+            BlendMode::Multiply => "multiply",
+            BlendMode::Screen => "screen",
+            BlendMode::Overlay => "overlay",
+            BlendMode::Darken => "darken",
+            BlendMode::Lighten => "lighten",
+            BlendMode::ColorDodge => "color-dodge",
+            BlendMode::ColorBurn => "color-burn",
+            BlendMode::HardLight => "hard-light",
+            BlendMode::SoftLight => "soft-light",
+            BlendMode::Difference => "difference",
+            BlendMode::Exclusion => "exclusion",
+        }
+    }
+
+    /// The separable per-channel blend function `B(cb, cs)` where `cb` is the
+    /// backdrop channel and `cs` the source channel, both **straight** (un-
+    /// premultiplied) and in `0..=1`. This is the channel core of the W3C
+    /// compositing spec's separable modes; the alpha-weighted Porter-Duff
+    /// composite is applied by [`crate::effects::blend_channel`].
+    pub fn blend(self, cb: f32, cs: f32) -> f32 {
+        match self {
+            // Normal is "use the source" (source-over handles the alpha mix).
+            BlendMode::Normal => cs,
+            BlendMode::Multiply => cb * cs,
+            BlendMode::Screen => cb + cs - cb * cs,
+            BlendMode::Overlay => BlendMode::HardLight.blend(cs, cb), // Overlay = HardLight w/ args swapped
+            BlendMode::Darken => cb.min(cs),
+            BlendMode::Lighten => cb.max(cs),
+            BlendMode::ColorDodge => {
+                if cb <= 0.0 {
+                    0.0
+                } else if cs >= 1.0 {
+                    1.0
+                } else {
+                    (cb / (1.0 - cs)).min(1.0)
+                }
+            }
+            BlendMode::ColorBurn => {
+                if cb >= 1.0 {
+                    1.0
+                } else if cs <= 0.0 {
+                    0.0
+                } else {
+                    1.0 - ((1.0 - cb) / cs).min(1.0)
+                }
+            }
+            BlendMode::HardLight => {
+                if cs <= 0.5 {
+                    cb * (2.0 * cs)
+                } else {
+                    let s = 2.0 * cs - 1.0;
+                    cb + s - cb * s // Screen(cb, 2·cs − 1)
+                }
+            }
+            BlendMode::SoftLight => {
+                // W3C soft-light.
+                if cs <= 0.5 {
+                    cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb)
+                } else {
+                    let d = if cb <= 0.25 {
+                        ((16.0 * cb - 12.0) * cb + 4.0) * cb
+                    } else {
+                        cb.sqrt()
+                    };
+                    cb + (2.0 * cs - 1.0) * (d - cb)
+                }
+            }
+            BlendMode::Difference => (cb - cs).abs(),
+            BlendMode::Exclusion => cb + cs - 2.0 * cb * cs,
         }
     }
 }
@@ -325,6 +429,25 @@ impl Appearance {
         self.effects.iter().any(Effect::is_active)
     }
 
+    /// Whether any *visible* fill or stroke carries a non-`Normal` blend mode, so
+    /// the canvas painter must take the tiny-skia rasterize-and-composite path
+    /// (egui's painter can only source-over) to blend it correctly.
+    pub fn has_blend_compositing(&self) -> bool {
+        self.fills
+            .iter()
+            .any(|f| f.visible && f.opacity > 0.0 && f.blend.is_separable_blend())
+            || self
+                .strokes
+                .iter()
+                .any(|s| s.visible && s.opacity > 0.0 && s.width > 0.0 && s.blend.is_separable_blend())
+    }
+
+    /// Whether this appearance needs the rasterize-and-composite render path
+    /// (because it has active effects **or** a non-`Normal` blend layer).
+    pub fn needs_raster(&self) -> bool {
+        self.has_active_effects() || self.has_blend_compositing()
+    }
+
     /// Total document-unit padding any effect needs around the artwork bounds
     /// (the max over all active effects' [`Effect::bounds_pad`]). `0.0` when
     /// there are no effects.
@@ -547,6 +670,55 @@ mod tests {
         assert_eq!(a.fills[0].opacity, 1.0);
         assert_eq!(a.fills[0].blend, BlendMode::Normal);
         assert!(a.fills[0].visible);
+    }
+
+    // --- Separable blend formulas (known pixels) ---------------------------
+
+    #[test]
+    fn blend_multiply_and_screen_on_known_channels() {
+        // Multiply darkens: 0.5·0.5 = 0.25.
+        assert!((BlendMode::Multiply.blend(0.5, 0.5) - 0.25).abs() < 1e-6);
+        // Multiply by white is identity; by black is black.
+        assert_eq!(BlendMode::Multiply.blend(0.7, 1.0), 0.7);
+        assert_eq!(BlendMode::Multiply.blend(0.7, 0.0), 0.0);
+        // Screen lightens: 1 − (1−.5)(1−.5) = 0.75.
+        assert!((BlendMode::Screen.blend(0.5, 0.5) - 0.75).abs() < 1e-6);
+        // Screen with black is identity; with white is white.
+        assert_eq!(BlendMode::Screen.blend(0.3, 0.0), 0.3);
+        assert!((BlendMode::Screen.blend(0.3, 1.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn blend_overlay_difference_exclusion_on_known_channels() {
+        // Overlay = HardLight with args swapped. cb=0.5 → identity-ish: for cb<=0.5
+        // path, 2·cb·cs. Overlay(cb=0.25, cs=0.5): cb<=0.5 ⇒ 2·0.25·0.5 = 0.25.
+        assert!((BlendMode::Overlay.blend(0.25, 0.5) - 0.25).abs() < 1e-6);
+        // Difference is symmetric absolute difference.
+        assert!((BlendMode::Difference.blend(0.8, 0.3) - 0.5).abs() < 1e-6);
+        assert!((BlendMode::Difference.blend(0.3, 0.8) - 0.5).abs() < 1e-6);
+        // Exclusion: cb + cs − 2·cb·cs; (0.5,0.5) → 0.5.
+        assert!((BlendMode::Exclusion.blend(0.5, 0.5) - 0.5).abs() < 1e-6);
+        // Darken / Lighten pick the min / max channel.
+        assert_eq!(BlendMode::Darken.blend(0.2, 0.7), 0.2);
+        assert_eq!(BlendMode::Lighten.blend(0.2, 0.7), 0.7);
+    }
+
+    #[test]
+    fn blend_dodge_burn_edges() {
+        // ColorDodge by white → 1; by black → backdrop.
+        assert_eq!(BlendMode::ColorDodge.blend(0.4, 1.0), 1.0);
+        assert_eq!(BlendMode::ColorDodge.blend(0.4, 0.0), 0.4);
+        // ColorBurn by black → 0; by white → backdrop.
+        assert_eq!(BlendMode::ColorBurn.blend(0.4, 0.0), 0.0);
+        assert!((BlendMode::ColorBurn.blend(0.4, 1.0) - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn blend_normal_is_identity_source() {
+        // Normal returns the source channel (alpha mixing is source-over's job).
+        assert_eq!(BlendMode::Normal.blend(0.1, 0.9), 0.9);
+        assert!(!BlendMode::Normal.is_separable_blend());
+        assert!(BlendMode::Multiply.is_separable_blend());
     }
 
     #[test]
