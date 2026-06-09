@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the bundled face rather than vanishing, and the inspector flags such a
     family as `(missing)` so the fallback is visible. Loaded faces are cached so
     a font file is read at most once, never per frame.
+  - **Guarded** by regression tests that lock in correct placement across a
+    property edit: changing a text object's **font family** or **size**
+    re-extracts the glyph outlines about the object's existing `origin` (via
+    `Shape::set_text_params`), so a placed — and moved — text object stays put
+    rather than jumping to the canvas corner on a font/size change.
 
 ## [0.2.0] - 2026-06-09
 
