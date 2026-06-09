@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Font family selection for the Type tool.** Point type can now be set in any
+  installed system typeface, not just the single bundled face. A new pure
+  `fonts` module enumerates installed families with the lightweight
+  [`fontdb`](https://crates.io/crates/fontdb) crate (built on the same
+  `ttf-parser` already used for outline extraction) and resolves a family name to
+  cached face bytes:
+  - A **Font** dropdown in the inspector's **Type** section (above Size/Align)
+    lists every available family — the bundled default (**Ubuntu**) first —
+    plus any system font. Picking a family re-extracts the glyph outlines from
+    the chosen face and re-lays-out as one undo step, so the canvas, SVG export,
+    and PNG export all render with the selected typeface (text continues to
+    compose / export as real even-odd glyph paths).
+  - The chosen family is **persisted per text object** in `.contour` as a new
+    additive `font_family` field (`#[serde(default)]` → `None`), so pre-existing
+    files — which carry no family — load and round-trip unchanged, defaulting to
+    the bundled face.
+  - Resolution is **forgiving**: an unknown / not-installed family falls back to
+    the bundled face rather than vanishing, and the inspector flags such a
+    family as `(missing)` so the fallback is visible. Loaded faces are cached so
+    a font file is read at most once, never per frame.
+
 ## [0.2.0] - 2026-06-09
 
 ### Added

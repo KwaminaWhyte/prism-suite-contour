@@ -1463,6 +1463,42 @@ impl ContourApp {
         }
 
         ui.horizontal(|ui| {
+            ui.label("Font");
+            // The currently-selected family (None → the bundled default's name).
+            let current = params
+                .font_family
+                .clone()
+                .unwrap_or_else(|| crate::fonts::DEFAULT_FONT_FAMILY.to_string());
+            // Flag a persisted family this machine doesn't have (it renders with
+            // the bundled fallback) so the mismatch is visible rather than silent.
+            let label = if crate::fonts::is_available(&current) {
+                current.clone()
+            } else {
+                format!("{current} (missing)")
+            };
+            egui::ComboBox::from_id_salt("type_font_family")
+                .selected_text(label)
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    for fam in crate::fonts::families() {
+                        if ui
+                            .selectable_label(current == *fam, fam)
+                            .clicked()
+                            && current != *fam
+                        {
+                            // Store None for the bundled default so new objects and
+                            // the explicit default serialize identically (and old
+                            // files keep round-tripping); a real family is stored
+                            // by name.
+                            params.font_family = (fam != crate::fonts::DEFAULT_FONT_FAMILY)
+                                .then(|| fam.clone());
+                            changed = true;
+                        }
+                    }
+                });
+        });
+
+        ui.horizontal(|ui| {
             ui.label("Size");
             if ui
                 .add(

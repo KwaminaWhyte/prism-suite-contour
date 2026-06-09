@@ -2422,6 +2422,7 @@ mod tests {
             text: "Ag".to_string(),
             font_size: 60.0,
             align: crate::text::TextAlign::Left,
+            font_family: None,
         };
         let glyphs = crate::text::layout(&params, (20.0, 20.0)).0;
         let text = Shape::Text {

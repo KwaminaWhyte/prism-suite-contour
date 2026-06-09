@@ -10,26 +10,24 @@
 //! `Object ▸ Type ▸ Convert to Outlines` is a one-liner: lift the cache into a
 //! [`Shape::Compound`].
 //!
-//! The glyph contours come from a bundled default font ([`Ubuntu-Light`], Ubuntu
-//! Font Licence) parsed with [`ttf_parser`]; the parser hands us TrueType
-//! `move/line/quad/cubic` segments through an [`OutlineBuilder`], which we map onto
-//! the document's `(points, handles, closed)` model (quadratics are elevated to
-//! cubics so the whole suite's bezier pipeline consumes them unchanged).
+//! The glyph contours come from a chosen TrueType face — the bundled default
+//! ([`Ubuntu-Light`], Ubuntu Font Licence) or any installed system family the user
+//! selects (see [`crate::fonts`]) — parsed with [`ttf_parser`]; the parser hands
+//! us TrueType `move/line/quad/cubic` segments through an [`OutlineBuilder`], which
+//! we map onto the document's `(points, handles, closed)` model (quadratics are
+//! elevated to cubics so the whole suite's bezier pipeline consumes them
+//! unchanged).
 //!
-//! **In scope (this pass):** point type, multi-line (`\n`), font size, left /
-//! centre / right alignment, fill + stroke, convert-to-outlines, `.contour`
+//! **In scope (this pass):** point type, multi-line (`\n`), font size, **font
+//! family selection** (system fonts via `fontdb`, bundled default fallback), left
+//! / centre / right alignment, fill + stroke, convert-to-outlines, `.contour`
 //! round-trip. **Out of scope (noted open):** area type, type-on-path, rich
-//! character / paragraph panels, font selection, kerning / OpenType shaping
-//! (advances are plain horizontal metrics; the bundled font has no kern table
-//! applied).
+//! character / paragraph panels, weight / style sub-selection, kerning / OpenType
+//! shaping (advances are plain horizontal metrics; no kern table applied),
+//! variable-font axes.
 
 use crate::document::SubPath;
 use serde::{Deserialize, Serialize};
-
-/// The bundled default font (Ubuntu Light, Ubuntu Font Licence — see
-/// `assets/fonts/UFL.txt`). Embedded so a fresh install always has a usable face
-/// without touching the host's font directories.
-static DEFAULT_FONT: &[u8] = include_bytes!("../assets/fonts/Ubuntu-Light.ttf");
 
 /// Horizontal alignment of a multi-line point-type block, relative to the text
 /// object's `origin` (Illustrator's paragraph alignment, the slice we ship).
@@ -69,6 +67,14 @@ pub struct TextParams {
     /// Horizontal alignment of each line about `origin.x`.
     #[serde(default)]
     pub align: TextAlign,
+    /// The font family the glyphs are extracted from. `None` (and any family not
+    /// installed on the host) resolves to the bundled default via
+    /// [`crate::fonts::resolve`], so old `.contour` files — which carry no family —
+    /// and documents authored against a font this machine lacks both still render.
+    /// Additive (`#[serde(default)]` → `None`) to keep the file format
+    /// back-compatible.
+    #[serde(default)]
+    pub font_family: Option<String>,
 }
 
 impl Default for TextParams {
@@ -77,6 +83,7 @@ impl Default for TextParams {
             text: "Text".to_string(),
             font_size: 72.0,
             align: TextAlign::default(),
+            font_family: None,
         }
     }
 }
@@ -113,10 +120,13 @@ struct LineLayout {
 /// can still exist and be edited with no visible glyphs). The pen advances per
 /// glyph by its horizontal advance metric — no kerning / shaping this pass.
 pub fn layout(params: &TextParams, origin: (f32, f32)) -> (Vec<SubPath>, f32) {
-    let face = match ttf_parser::Face::parse(DEFAULT_FONT, 0) {
+    // Resolve the chosen family to face bytes (unknown / absent → bundled
+    // default; cached so a font file is read at most once, never per frame).
+    let face_bytes = crate::fonts::resolve(params.font_family.as_deref());
+    let face = match ttf_parser::Face::parse(&face_bytes.data, face_bytes.index) {
         Ok(f) => f,
-        // A corrupt embedded font should never happen, but degrade to no glyphs
-        // rather than panic so the editor stays alive.
+        // A corrupt face (only the bundled one should ever reach here) degrades to
+        // no glyphs rather than panicking so the editor stays alive.
         Err(_) => return (Vec::new(), 0.0),
     };
     let metrics = face_metrics(&face);
@@ -386,6 +396,7 @@ mod tests {
             text: "A".to_string(),
             font_size: 100.0,
             align: TextAlign::Left,
+            font_family: None,
         };
         let (subs, width) = layout(&params, (0.0, 0.0));
         assert!(!subs.is_empty(), "letter A should produce contours");
@@ -408,6 +419,7 @@ mod tests {
                 text: "WWW".into(),
                 font_size: 50.0,
                 align: TextAlign::Left,
+                font_family: None,
             },
             (0.0, 0.0),
         )
@@ -417,6 +429,7 @@ mod tests {
                 text: "I".into(),
                 font_size: 50.0,
                 align: TextAlign::Left,
+                font_family: None,
             },
             (0.0, 0.0),
         )
@@ -432,6 +445,7 @@ mod tests {
                 text: "Ag".into(),
                 font_size: 40.0,
                 align: TextAlign::Left,
+                font_family: None,
             },
             (0.0, 0.0),
         )
@@ -441,6 +455,7 @@ mod tests {
                 text: "Ag".into(),
                 font_size: 80.0,
                 align: TextAlign::Left,
+                font_family: None,
             },
             (0.0, 0.0),
         )
@@ -459,6 +474,7 @@ mod tests {
                 text: "A".into(),
                 font_size: 60.0,
                 align: TextAlign::Left,
+                font_family: None,
             },
             (0.0, 0.0),
         )
@@ -468,6 +484,7 @@ mod tests {
                 text: "A\nA".into(),
                 font_size: 60.0,
                 align: TextAlign::Left,
+                font_family: None,
             },
             (0.0, 0.0),
         )
@@ -496,6 +513,7 @@ mod tests {
                     text: "Text".into(),
                     font_size: 50.0,
                     align: a,
+                    font_family: None,
                 },
                 (0.0, 0.0),
             )
@@ -529,6 +547,7 @@ mod tests {
                 text: String::new(),
                 font_size: 50.0,
                 align: TextAlign::Left,
+                font_family: None,
             },
             (0.0, 0.0),
         );
@@ -545,9 +564,89 @@ mod tests {
                 text: "o".into(),
                 font_size: 100.0,
                 align: TextAlign::Left,
+                font_family: None,
             },
             (0.0, 0.0),
         );
         assert_eq!(subs.len(), 2, "o has an outer + inner contour");
+    }
+
+    /// A fresh `TextParams` defaults its family to `None` (the bundled face), and
+    /// `None` lays out exactly like an explicit bundled-family request — proving
+    /// the default and the fallback agree.
+    #[test]
+    fn default_family_is_none_and_lays_out_like_bundled() {
+        let p = TextParams::default();
+        assert_eq!(p.font_family, None, "new type defaults to the bundled face");
+        let none = layout(
+            &TextParams {
+                text: "Ag".into(),
+                font_size: 60.0,
+                align: TextAlign::Left,
+                font_family: None,
+            },
+            (0.0, 0.0),
+        );
+        let explicit = layout(
+            &TextParams {
+                text: "Ag".into(),
+                font_size: 60.0,
+                align: TextAlign::Left,
+                font_family: Some(crate::fonts::DEFAULT_FONT_FAMILY.to_string()),
+            },
+            (0.0, 0.0),
+        );
+        assert_eq!(none.0.len(), explicit.0.len(), "same contour count");
+        assert_eq!(none.1, explicit.1, "same advance width");
+    }
+
+    /// An unknown family resolves to the bundled face — laying out identically to
+    /// `None` rather than vanishing.
+    #[test]
+    fn unknown_family_falls_back_to_bundled_geometry() {
+        let bogus = layout(
+            &TextParams {
+                text: "Ag".into(),
+                font_size: 60.0,
+                align: TextAlign::Left,
+                font_family: Some("No Such Font 99999".into()),
+            },
+            (0.0, 0.0),
+        );
+        let fallback = layout(
+            &TextParams {
+                text: "Ag".into(),
+                font_size: 60.0,
+                align: TextAlign::Left,
+                font_family: None,
+            },
+            (0.0, 0.0),
+        );
+        assert!(!bogus.0.is_empty(), "unknown family still renders glyphs");
+        assert_eq!(
+            bogus.1, fallback.1,
+            "unknown family advances like the bundled default"
+        );
+    }
+
+    /// `font_family` survives a JSON round-trip, and a legacy params object with no
+    /// `font_family` key deserializes to `None` (old `.contour` files round-trip).
+    #[test]
+    fn font_family_serde_round_trips_and_defaults() {
+        let original = TextParams {
+            text: "Hi".into(),
+            font_size: 48.0,
+            align: TextAlign::Center,
+            font_family: Some("Helvetica".into()),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let back: TextParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, original, "family survives serialize/deserialize");
+
+        // A document written before font selection existed has no family key.
+        let legacy = r#"{"text":"Old","font_size":72.0,"align":"Left"}"#;
+        let parsed: TextParams = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.font_family, None, "legacy file defaults family to None");
+        assert_eq!(parsed.text, "Old");
     }
 }

@@ -29,8 +29,15 @@ i_overlay = "7"
 # Glyph-outline extraction for the Type tool. The lightest crate that yields raw
 # TrueType contours (move/line/quad/cubic) via an `OutlineBuilder`, which we map
 # straight onto the document's path geometry so text composes / exports like any
-# vector. Already present transitively (cosmic-text / fontdb), so no new build.
+# vector.
 ttf-parser = "0.25"
+
+# System font enumeration + family resolution for the Type tool's font picker.
+# Pure-Rust, in-memory font database keyed by CSS-like family queries; built on
+# the same `ttf-parser = 0.25` we already use (no extra parser in the graph). We
+# only need filesystem enumeration + reading face bytes, so the heavier
+# `memmap`/`fontconfig` default features are dropped.
+fontdb = { version = "0.23", default-features = false, features = ["fs"] }
 
 # eframe with the default glow backend — Contour draws vectors through egui's
 # painter, so no custom GPU pass is needed.

@@ -1782,6 +1782,7 @@ fn text_shape(text: &str, origin: (f32, f32)) -> Shape {
         text: text.to_string(),
         font_size: 72.0,
         align: TextAlign::Left,
+        font_family: None,
     };
     let glyphs = crate::text::layout(&params, origin).0;
     Shape::Text {
@@ -1836,6 +1837,7 @@ fn set_text_params_relays_out_glyphs() {
         text: "IIIIIIII".into(),
         font_size: 72.0,
         align: TextAlign::Left,
+        font_family: None,
     });
     assert!(ok, "set_text_params applies to a text object");
     let after = s.bounds().unwrap().w;
@@ -1896,6 +1898,7 @@ fn text_round_trips_through_serde() {
         text: "Round\nTrip".into(),
         font_size: 48.0,
         align: TextAlign::Center,
+        font_family: None,
     });
     let doc = Document {
         shapes: vec![s],

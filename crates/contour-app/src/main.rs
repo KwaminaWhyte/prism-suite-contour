@@ -18,6 +18,7 @@ mod document;
 mod effects;
 mod export;
 mod eyedropper;
+mod fonts;
 mod gradient;
 mod graphic_styles;
 mod group;
