@@ -37,6 +37,20 @@ pub enum Align {
     Bottom,
 }
 
+impl Align {
+    /// Status / undo-step label for the operation.
+    pub fn label(self) -> &'static str {
+        match self {
+            Align::Left => "Align Left",
+            Align::CenterH => "Align Center Horizontal",
+            Align::Right => "Align Right",
+            Align::Top => "Align Top",
+            Align::CenterV => "Align Center Vertical",
+            Align::Bottom => "Align Bottom",
+        }
+    }
+}
+
 /// The distribute operations. The first four equalise the spacing of a chosen
 /// object feature (edge or centre); the last two equalise the *gaps* between
 /// objects, which is what "Distribute Spacing" does in Illustrator.
@@ -58,6 +72,22 @@ pub enum Distribute {
     HorizontalGap,
     /// Equalise the vertical gaps between adjacent objects.
     VerticalGap,
+}
+
+impl Distribute {
+    /// Status / undo-step label for the operation.
+    pub fn label(self) -> &'static str {
+        match self {
+            Distribute::LeftEdges => "Distribute Left Edges",
+            Distribute::CentersH => "Distribute Horizontal Centers",
+            Distribute::RightEdges => "Distribute Right Edges",
+            Distribute::TopEdges => "Distribute Top Edges",
+            Distribute::CentersV => "Distribute Vertical Centers",
+            Distribute::BottomEdges => "Distribute Bottom Edges",
+            Distribute::HorizontalGap => "Distribute Horizontal Gaps",
+            Distribute::VerticalGap => "Distribute Vertical Gaps",
+        }
+    }
 }
 
 /// Which rectangle the [`Align`] operations measure against.
@@ -283,6 +313,55 @@ mod tests {
         let d2 = align_deltas(&boxes, Align::Bottom, artboard);
         // Artboard bottom = 700; box bottom = 120; dy = 580.
         assert!(approx(d2[0].1, 580.0));
+    }
+
+    #[test]
+    fn align_single_object_to_own_bounds_is_noop() {
+        // Aligning one box to its own (selection) bounds can never move it: the
+        // frame's every edge/centre already coincides with the box's.
+        let boxes = [r(7.0, 11.0, 5.0, 9.0)];
+        let frame = union_bounds(&boxes).unwrap();
+        for op in [
+            Align::Left,
+            Align::CenterH,
+            Align::Right,
+            Align::Top,
+            Align::CenterV,
+            Align::Bottom,
+        ] {
+            let d = align_deltas(&boxes, op, frame);
+            assert!(approx(d[0].0, 0.0) && approx(d[0].1, 0.0), "{op:?} moved a lone box");
+        }
+    }
+
+    #[test]
+    fn align_empty_is_empty() {
+        // No boxes in, no deltas out — for every alignment.
+        let frame = r(0.0, 0.0, 100.0, 100.0);
+        for op in [Align::Left, Align::CenterV, Align::Bottom] {
+            assert!(align_deltas(&[], op, frame).is_empty());
+        }
+    }
+
+    #[test]
+    fn distribute_empty_is_empty() {
+        assert!(distribute_deltas(&[], Distribute::CentersH).is_empty());
+        assert!(distribute_deltas(&[], Distribute::VerticalGap).is_empty());
+    }
+
+    #[test]
+    fn distribute_single_object_is_noop() {
+        let boxes = [r(3.0, 4.0, 5.0, 6.0)];
+        let d = distribute_deltas(&boxes, Distribute::HorizontalGap);
+        assert_eq!(d, vec![(0.0, 0.0)]);
+    }
+
+    #[test]
+    fn labels_are_stable() {
+        assert_eq!(Align::Left.label(), "Align Left");
+        assert_eq!(Align::CenterV.label(), "Align Center Vertical");
+        assert_eq!(Distribute::HorizontalGap.label(), "Distribute Horizontal Gaps");
+        assert_eq!(Distribute::CentersV.label(), "Distribute Vertical Centers");
     }
 
     #[test]

@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Align & distribute** (Phase 2). A pure, unit-tested `align` module turns a
+  slice of bounding rects into per-object `(dx, dy)` translation deltas, surfaced
+  through both an inspector **Align section** and an **Object ▸ Align /
+  Distribute** menu over the current multi-selection:
+  - **Align** the selection's left / horizontal-centre / right edges and top /
+    vertical-centre / bottom edges to a reference frame, switchable between the
+    **selection bounds** and the **artboard** (so a lone shape can be centred on
+    the artboard).
+  - **Distribute** three-or-more shapes by evenly spacing a chosen feature (left
+    / right / top / bottom edges or centres) *or* by equalising the **gaps**
+    between them (horizontal / vertical "distribute spacing", à la Illustrator).
+    Distribution sorts by visual position, so selection order does not matter and
+    the two outermost shapes stay fixed.
+  - Each action applies its deltas through the existing `translate` + checkpoint
+    undo path as a **single, labelled undo step** (`Align Left`, `Distribute
+    Horizontal Gaps`, …); controls disable until the selection is large enough
+    (2+ to align, 3+ to distribute). No model change — it only moves existing
+    shapes, so `.contour` files are unaffected.
+
 - **Type tool — point type with real glyph outlines + Convert to Outlines**
   (Phase 5 "Type", foundational slice). Contour gains a **Type tool** (`T`):
   click the canvas to drop a point-type object, then type — characters append,

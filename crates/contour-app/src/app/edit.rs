@@ -1535,7 +1535,7 @@ impl ContourApp {
                 self.doc.shapes[sb.index].translate(dx, dy);
             }
         }
-        self.status = "Aligned".into();
+        self.status = op.label().into();
     }
 
     // --- Transform -----------------------------------------------------------
@@ -2065,7 +2065,7 @@ impl ContourApp {
                 self.doc.shapes[sb.index].translate(dx, dy);
             }
         }
-        self.status = "Distributed".into();
+        self.status = op.label().into();
     }
 }
 
