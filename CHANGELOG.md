@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-09
+
 ### Added
 
 - **Graphic styles** (Phase 3). A pure, unit-tested `graphic_styles` module adds
@@ -898,6 +900,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Depend on the suite-level shared crate `prism-core` (was a `pigment-core` path
   dependency) for `Size`, `geometry::Rect`, and the sRGB↔linear color boundary.
 
-[Unreleased]: https://github.com/prism-suite/contour/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/prism-suite/contour/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/prism-suite/contour/releases/tag/v0.2.0
 [0.1.0]: https://github.com/prism-suite/contour/releases/tag/v0.1.0
 [0.0.1]: https://github.com/prism-suite/contour/releases/tag/v0.0.1
