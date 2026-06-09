@@ -22,6 +22,7 @@ use crate::text::TextParams;
 use crate::appearance::Appearance;
 use crate::artboard::{self, Artboard};
 use crate::gradient::Gradient;
+use crate::graphic_styles::GraphicStyles;
 use crate::swatches::{self, Swatches};
 use crate::transform::Affine;
 use kurbo::Shape as KurboShape;
@@ -1887,6 +1888,12 @@ pub struct Document {
     /// default starter palette; saved palettes round-trip through serde.
     #[serde(default)]
     pub swatches: Swatches,
+    /// The document's named-appearance library (the Graphic Styles panel): each
+    /// entry captures an [`Appearance`] snapshot a user can apply to a selection.
+    /// Additive (`#[serde(default)]`), so a pre-styles `.contour` file loads with
+    /// an empty library; saved styles round-trip through serde.
+    #[serde(default)]
+    pub graphic_styles: GraphicStyles,
 }
 
 impl Default for Document {
@@ -1897,6 +1904,7 @@ impl Default for Document {
             artboards: default_artboards(),
             active_artboard: 0,
             swatches: Swatches::default(),
+            graphic_styles: GraphicStyles::default(),
         }
     }
 }

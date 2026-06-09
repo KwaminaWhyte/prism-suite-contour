@@ -1956,6 +1956,63 @@ impl ContourApp {
         }
     }
 
+    // --- Graphic styles ------------------------------------------------------
+
+    /// Save the primary selection's effective appearance as a new named graphic
+    /// style (one undo step). No-op with no selection. Returns the new style's id
+    /// so the panel can select it for renaming. The captured appearance is the
+    /// shape's explicit stack, or one migrated from its legacy fields, so a style
+    /// can be saved off any shape — stacked or not.
+    pub(super) fn save_graphic_style(&mut self) -> Option<u64> {
+        let i = self.primary()?;
+        let ap = self.doc.shapes.get(i)?.effective_appearance();
+        self.checkpoint();
+        let id = self.doc.graphic_styles.add("Style", ap);
+        self.status = "Saved graphic style".into();
+        Some(id)
+    }
+
+    /// Apply graphic style `id` to every selected shape, overwriting each one's
+    /// appearance with the style's snapshot (one undo step). Routes through the
+    /// same `set_appearance` path the Appearance panel uses, so it undoes as a
+    /// single labelled step. No-op with no selection or an unknown id.
+    pub(super) fn apply_graphic_style(&mut self, id: u64) {
+        let Some(ap) = self.doc.graphic_styles.appearance_of(id).cloned() else {
+            return;
+        };
+        if self.selection.is_empty() {
+            self.status = "Select a shape to apply a style".into();
+            return;
+        }
+        self.checkpoint();
+        let indices: Vec<usize> = self.selection.clone();
+        for i in indices {
+            if let Some(s) = self.doc.shapes.get_mut(i) {
+                s.set_appearance(Some(ap.clone()));
+            }
+        }
+        self.status = "Apply Graphic Style".into();
+    }
+
+    /// Rename graphic style `id` (one undo step). No-op if the name is unchanged.
+    pub(super) fn rename_graphic_style(&mut self, id: u64, name: &str) {
+        if self.doc.graphic_styles.get(id).map(|s| s.name.as_str()) == Some(name) {
+            return;
+        }
+        self.checkpoint();
+        self.doc.graphic_styles.rename(id, name);
+    }
+
+    /// Delete graphic style `id` (one undo step). The artwork is untouched — a
+    /// style is only a named shortcut, so removing it leaves shapes' appearances
+    /// intact.
+    pub(super) fn delete_graphic_style(&mut self, id: u64) {
+        self.checkpoint();
+        if self.doc.graphic_styles.remove(id) {
+            self.status = "Deleted graphic style".into();
+        }
+    }
+
     // --- Snapping ------------------------------------------------------------
 
     /// Document-space snap tolerance: a fixed ~6px pulled into document units so

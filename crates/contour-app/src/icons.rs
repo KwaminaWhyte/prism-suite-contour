@@ -125,6 +125,11 @@ pub const BRING_FORWARD: &str = ph::ARROW_UP;
 /// Send backward one step.
 pub const SEND_BACKWARD: &str = ph::ARROW_DOWN;
 
+// --- Graphic styles ---------------------------------------------------------
+
+/// A saved graphic style (a named appearance snapshot).
+pub const STYLE: &str = ph::PALETTE;
+
 // --- Grouping ---------------------------------------------------------------
 
 /// Group the selected shapes into one unit.

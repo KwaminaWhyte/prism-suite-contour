@@ -351,6 +351,10 @@ pub struct ContourApp {
     /// stable id (so it survives reordering). Drives the panel's rename /
     /// recolour / delete editor. `None` until a swatch is clicked.
     selected_swatch: Option<u64>,
+    /// The graphic style currently selected in the Graphic Styles section,
+    /// addressed by its stable id (so it survives reordering). Drives the
+    /// section's rename / delete editor. `None` until a style is clicked.
+    selected_style: Option<u64>,
     /// Group ids the user has collapsed in the Layers panel (their member rows
     /// are hidden). Transient UI state, not persisted.
     collapsed_layers: Vec<u64>,
@@ -392,6 +396,7 @@ impl ContourApp {
             cursor_doc: None,
             clipboard: Clipboard::default(),
             selected_swatch: None,
+            selected_style: None,
             collapsed_layers: Vec::new(),
             editing_text: None,
         }
@@ -404,6 +409,7 @@ impl ContourApp {
         self.history.clear();
         self.status.clear();
         self.selected_swatch = None;
+        self.selected_style = None;
         self.last_transform = None;
         self.collapsed_layers.clear();
         self.editing_text = None;

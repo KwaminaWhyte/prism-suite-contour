@@ -19,6 +19,7 @@ mod effects;
 mod export;
 mod eyedropper;
 mod gradient;
+mod graphic_styles;
 mod group;
 mod history;
 mod icons;

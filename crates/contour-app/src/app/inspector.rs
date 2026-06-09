@@ -856,6 +856,11 @@ impl ContourApp {
                             .show(ui, |ui| {
                                 self.appearance_section(ui);
                             });
+                        egui::CollapsingHeader::new("Graphic Styles")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                self.graphic_styles_section(ui);
+                            });
                         egui::CollapsingHeader::new("Transform")
                             .default_open(true)
                             .show(ui, |ui| {
@@ -1306,6 +1311,114 @@ impl ContourApp {
             self.checkpoint();
             if let Some(shape) = self.doc.shapes.get_mut(i) {
                 shape.set_appearance(Some(ap));
+            }
+        }
+    }
+
+    /// The **Graphic Styles** panel: the document's named-appearance library
+    /// (Illustrator's Graphic Styles panel). **Save** snapshots the current
+    /// selection's appearance as a new style; clicking a style **applies** it to
+    /// the selection (replacing its appearance); the per-style editor **renames**
+    /// or **deletes** it. Each action is one undo step.
+    fn graphic_styles_section(&mut self, ui: &mut egui::Ui) {
+        let has_selection = !self.selection.is_empty();
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Styles").strong());
+            ui.weak(format!("{}", self.doc.graphic_styles.len()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_enabled_ui(has_selection, |ui| {
+                    if ui
+                        .button("+")
+                        .on_hover_text("Save the selection's appearance as a style")
+                        .clicked()
+                    {
+                        // Select the new style so it's ready to rename.
+                        self.selected_style = self.save_graphic_style();
+                    }
+                });
+            });
+        });
+        ui.weak("Click a style to apply it to the selection.");
+
+        if self.doc.graphic_styles.is_empty() {
+            ui.weak("No styles. Save one with +.");
+            return;
+        }
+
+        // Deferred actions so we don't borrow the library while iterating it.
+        let mut apply: Option<u64> = None;
+        let mut select: Option<u64> = None;
+
+        let entries: Vec<(u64, String)> = self
+            .doc
+            .graphic_styles
+            .list
+            .iter()
+            .map(|s| (s.id, s.name.clone()))
+            .collect();
+
+        for (id, name) in &entries {
+            let selected = self.selected_style == Some(*id);
+            ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(selected, format!("{}  {name}", icons::STYLE))
+                    .on_hover_text("Apply to the selection (Alt: just select)")
+                    .clicked()
+                {
+                    // Alt-click selects for editing without applying.
+                    if ui.input(|i| i.modifiers.alt) {
+                        select = Some(*id);
+                    } else {
+                        apply = Some(*id);
+                    }
+                }
+            });
+        }
+
+        if let Some(id) = apply {
+            self.apply_graphic_style(id);
+            self.selected_style = Some(id);
+        }
+        if let Some(id) = select {
+            self.selected_style = Some(id);
+        }
+
+        // Editor for the selected style.
+        if let Some(id) = self.selected_style {
+            if let Some(st) = self.doc.graphic_styles.get(id).cloned() {
+                ui.separator();
+                ui.label(egui::RichText::new("Edit style").strong());
+
+                let mut name = st.name.clone();
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    if ui.text_edit_singleline(&mut name).lost_focus() {
+                        self.rename_graphic_style(id, &name);
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(has_selection, egui::Button::new("Apply"))
+                        .clicked()
+                    {
+                        self.apply_graphic_style(id);
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button(icons::TRASH)
+                            .on_hover_text("Delete style")
+                            .clicked()
+                        {
+                            self.delete_graphic_style(id);
+                            self.selected_style = None;
+                        }
+                    });
+                });
+            } else {
+                // The selected style was removed (e.g. undo).
+                self.selected_style = None;
             }
         }
     }

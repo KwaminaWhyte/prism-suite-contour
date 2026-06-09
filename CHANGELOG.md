@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Graphic styles** (Phase 3). A pure, unit-tested `graphic_styles` module adds
+  a document-level **named-appearance library** — each style captures a full
+  [`Appearance`] snapshot (its whole fill / stroke / effect stack, with every
+  item's paint, opacity, blend mode, and visibility), surfaced through a new
+  **Graphic Styles** section in the inspector:
+  - **Save** the current selection's effective appearance as a new named style
+    (`+`); a freshly-saved style is selected, ready to rename. The captured
+    appearance is the shape's explicit stack *or* one migrated from its legacy
+    single fill/stroke fields, so a style can be saved off any shape.
+  - **Apply** a style to the whole selection by clicking it — overwriting each
+    shape's appearance with the style's snapshot (replacing whatever stack it
+    had) through the existing `set_appearance` path, as a **single labelled undo
+    step** (`Apply Graphic Style`). Alt-click selects a style for editing without
+    applying.
+  - **Rename** and **delete** styles in the per-style editor, with the same
+    unique-name discipline (numeric-suffixed clashes) the Swatches panel uses.
+  - The library is a new optional document field (`graphic_styles`, additive
+    `#[serde(default)]` → empty), so every pre-existing `.contour` file loads
+    with no styles and round-trips unchanged; saved styles serialize with the
+    document.
+
 ## [0.1.0] - 2026-06-09
 
 ### Added

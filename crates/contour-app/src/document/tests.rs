@@ -1959,3 +1959,51 @@ fn text_hit_tests_inside_bounds() {
     assert!(s.hit(cx, cy, 0.1), "centre of the text box hits");
     assert!(!s.hit(b.x + b.w + 100.0, cy, 0.1), "far outside misses");
 }
+
+/// A pre-graphic-styles `.contour` (no `graphic_styles` key) loads with an empty
+/// style library — the additive `#[serde(default)]` field keeps older files
+/// round-tripping unchanged.
+#[test]
+fn loads_legacy_document_with_empty_graphic_styles() {
+    let json = r#"{"shapes":[
+        {"Rect":{"rect":[0,0,10,10],"fill":[1,0,0,1],"stroke":[0,0,0,1],"stroke_w":2}}
+    ]}"#;
+    let doc: Document = serde_json::from_str(json).unwrap();
+    assert!(doc.graphic_styles.is_empty(), "missing key defaults to empty");
+}
+
+/// The document's graphic-styles library — each entry a full `Appearance`
+/// snapshot — round-trips through `.contour` serialization unchanged.
+#[test]
+fn graphic_styles_library_round_trips_on_document() {
+    use crate::appearance::{Appearance, BlendMode, Effect, Fill, Paint, Stroke as AppStroke};
+    let style = Appearance {
+        fills: vec![
+            Fill::solid([0.1, 0.2, 0.3, 1.0]),
+            Fill {
+                paint: Paint::Gradient(crate::gradient::Gradient::default()),
+                opacity: 0.5,
+                blend: BlendMode::Multiply,
+                visible: false,
+            },
+        ],
+        strokes: vec![AppStroke {
+            paint: Paint::Solid([1.0, 0.0, 0.0, 0.8]),
+            width: 3.0,
+            style: StrokeStyle::default(),
+            opacity: 0.75,
+            blend: BlendMode::Screen,
+            visible: true,
+        }],
+        effects: vec![Effect::drop_shadow()],
+    };
+    let mut doc = Document::default();
+    let id = doc.graphic_styles.add("Card", style.clone());
+
+    let json = serde_json::to_string(&doc).unwrap();
+    let back: Document = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.graphic_styles.len(), 1, "the style survives the round-trip");
+    assert_eq!(back.graphic_styles.get(id).map(|s| s.name.as_str()), Some("Card"));
+    // The whole captured appearance stack is preserved byte-for-byte.
+    assert_eq!(back.graphic_styles.appearance_of(id), Some(&style));
+}
