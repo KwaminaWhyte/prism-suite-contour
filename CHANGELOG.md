@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Color system — Swatches, global colours & eyedropper.** A document colour
+  palette you build from your artwork and click to paint, with Illustrator-style
+  **global** swatches and an eyedropper:
+  - A pure, fully unit-tested `swatches` module — `Swatch { id, name, color,
+    global }` and an ordered, name-unique, id-stable `Swatches` palette — carried
+    on the document as additive `swatches: Swatches` (`#[serde(default)]` → a
+    starter palette of primaries + black / white / grey). Pre-swatches `.contour`
+    files round-trip and their shapes keep their literal colours unchanged.
+  - A **Swatches panel** (left dock) **adds** a swatch from the current fill
+    (`+`, de-duplicated by colour within picker tolerance), shows a colour-chip
+    grid (the chip naming the active fill is ringed; **global** swatches carry a
+    corner dot), and **applies** a swatch to the selection's **fill** (click) or
+    **stroke** (shift-click) — one labelled undo step each, or sets the app
+    default paint when nothing is selected. An inline editor **renames**,
+    **recolours**, toggles **global**, and **deletes** the selected swatch.
+  - A swatch marked **global** propagates a recolour to all artwork painted with
+    it: editing a global swatch remaps every matching fill, stroke, gradient
+    stop, and appearance-stack paint across the document (and reports the count);
+    editing a **non-global** swatch is a one-time copy that changes only the
+    swatch, never the artwork. The resolution is two pure, testable functions —
+    `Swatches::recolor` (hands back the `(old, new)` pair only for a global edit,
+    `None` otherwise) and `Document::remap_color` (the artwork walk) — kept out
+    of any egui / canvas state.
+  - An **Eyedropper** tool (`I`) samples the topmost shape's paint appearance
+    under the cursor into the active fill / stroke (and stroke width / style /
+    gradient) and applies it to the current selection as one undo step;
+    **Alt-click** picks up the look without painting (Illustrator's modifier).
+  - **Guarded** by unit tests: starter-palette id/name uniqueness, dedup-by-
+    colour with picker rounding tolerance, unique-name and self-rename
+    discipline, global recolour returns the `(old, new)` pair while a non-global
+    edit returns `None` but still mutates the swatch, `Document::remap_color`
+    across fills + strokes + gradients with an accurate affected-shape count, a
+    same-colour recolour is a no-op, serde round-trip including a legacy
+    no-swatches document (loads the starter palette, literal colours untouched),
+    and eyedropper sample / apply (paint transfers, geometry / grouping do not).
+
 ## [0.4.0] - 2026-06-13
 
 ### Added
