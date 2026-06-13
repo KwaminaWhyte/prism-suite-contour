@@ -357,6 +357,20 @@ impl ContourApp {
                     );
 
                     ui.separator();
+                    if ui
+                        .button("Recolor Artwork…")
+                        .on_hover_text(
+                            "Remap the selection's colours — reduce to N colours \
+                             or apply a harmony rule (whole document if nothing \
+                             is selected)",
+                        )
+                        .clicked()
+                    {
+                        self.open_recolor();
+                        ui.close_menu();
+                    }
+
+                    ui.separator();
                     ui.add_enabled_ui(self.can_group(), |ui| {
                         if ui.button(format!("{}  Group", icons::GROUP)).clicked() {
                             self.group_selection();
@@ -908,6 +922,121 @@ impl ContourApp {
                         }
                     });
             });
+    }
+
+    /// The **Recolor Artwork** dialog: a floating window showing the artwork's
+    /// current palette beside the working palette, with reduce-to-N and harmony
+    /// controls to generate the new palette, a live preview, and Apply / Cancel.
+    /// Driven entirely by [`crate::recolor::RecolorState`]; Apply routes through
+    /// [`apply_recolor`](Self::apply_recolor) as one undo step.
+    pub(super) fn recolor_dialog(&mut self, ctx: &egui::Context) {
+        if !self.recolor.open {
+            return;
+        }
+        let mut open = true;
+        let mut do_apply = false;
+        let mut do_cancel = false;
+        egui::Window::new("Recolor Artwork")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                let n_colors = self.recolor.current.len();
+                ui.label(format!("{n_colors} colour(s) in the artwork"));
+                ui.separator();
+
+                // Current → New palette, row by row. The current chip is read-only
+                // (the old side of the remap); the new chip is an editable picker.
+                egui::Grid::new("recolor_grid")
+                    .num_columns(3)
+                    .spacing([10.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Current").strong());
+                        ui.label("");
+                        ui.label(egui::RichText::new("New").strong());
+                        ui.end_row();
+                        for i in 0..n_colors {
+                            let cur = self.recolor.current[i];
+                            let srgb = egui::Color32::from_rgba_unmultiplied(
+                                (cur[0] * 255.0) as u8,
+                                (cur[1] * 255.0) as u8,
+                                (cur[2] * 255.0) as u8,
+                                (cur[3] * 255.0) as u8,
+                            );
+                            // Read-only current swatch.
+                            egui::color_picker::show_color(ui, srgb, egui::vec2(28.0, 18.0));
+                            ui.label("→");
+                            // Editable new colour.
+                            if let Some(nc) = self.recolor.new_palette.get_mut(i) {
+                                ui.color_edit_button_rgba_unmultiplied(nc);
+                            }
+                            ui.end_row();
+                        }
+                    });
+
+                ui.separator();
+                // Reduce to N colours.
+                ui.horizontal(|ui| {
+                    ui.label("Reduce to");
+                    ui.add(
+                        egui::DragValue::new(&mut self.recolor.reduce_n)
+                            .range(1..=n_colors.max(1))
+                            .suffix(" colours"),
+                    );
+                    if ui
+                        .button("Reduce")
+                        .on_hover_text("Cluster the artwork's colours to this many")
+                        .clicked()
+                    {
+                        self.recolor.apply_reduce();
+                    }
+                });
+
+                // Harmony rule.
+                ui.horizontal(|ui| {
+                    ui.label("Harmony");
+                    egui::ComboBox::from_id_salt("recolor_harmony")
+                        .selected_text(self.recolor.harmony_rule.label())
+                        .show_ui(ui, |ui| {
+                            for rule in crate::recolor::Harmony::ALL {
+                                ui.selectable_value(
+                                    &mut self.recolor.harmony_rule,
+                                    rule,
+                                    format!("{} ({})", rule.label(), rule.count()),
+                                );
+                            }
+                        });
+                    if ui
+                        .button("Apply rule")
+                        .on_hover_text("Generate a new palette from the first colour's hue")
+                        .clicked()
+                    {
+                        self.recolor.apply_harmony();
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    if ui.button("Reset").clicked() {
+                        self.recolor.new_palette = self.recolor.current.clone();
+                    }
+                    ui.weak(format!("{} remap(s)", self.recolor.pairs().len()));
+                });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        do_apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        do_cancel = true;
+                    }
+                });
+            });
+        if do_apply {
+            self.apply_recolor();
+        } else if do_cancel || !open {
+            self.recolor.open = false;
+        }
     }
 
     pub(super) fn tool_palette(&mut self, root: &mut egui::Ui) {

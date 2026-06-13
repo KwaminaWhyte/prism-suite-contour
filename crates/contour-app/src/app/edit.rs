@@ -2267,6 +2267,63 @@ impl ContourApp {
         }
     }
 
+    // --- Recolor Artwork -----------------------------------------------------
+
+    /// Open the **Recolor Artwork** dialog over the current target artwork: the
+    /// selection if any shapes are selected, otherwise the whole document. The
+    /// dialog captures that artwork's extracted palette as the *old* side of the
+    /// remap. No-op (status hint) when there is no artwork to recolour.
+    pub(super) fn open_recolor(&mut self) {
+        let shapes: Vec<crate::document::Shape> = if self.selection.is_empty() {
+            self.doc.shapes.clone()
+        } else {
+            self.selection
+                .iter()
+                .filter_map(|&i| self.doc.shapes.get(i).cloned())
+                .collect()
+        };
+        let palette = crate::recolor::extract_palette(&shapes);
+        if palette.is_empty() {
+            self.status = "Recolor: no coloured artwork".into();
+            return;
+        }
+        self.recolor.open_with(palette);
+    }
+
+    /// Apply the Recolor dialog's working palette to the target artwork as one
+    /// undo step: each `(old, new)` pair is remapped across the selection (or the
+    /// whole document when nothing is selected), reusing the same artwork-walk a
+    /// global-swatch recolour uses. Closes the dialog. No-op (no checkpoint) when
+    /// the remap is the identity.
+    pub(super) fn apply_recolor(&mut self) {
+        let pairs = self.recolor.pairs();
+        if pairs.is_empty() {
+            self.recolor.open = false;
+            self.status = "Recolor: no change".into();
+            return;
+        }
+        self.checkpoint();
+        let mut changed = 0usize;
+        if self.selection.is_empty() {
+            for (old, new) in &pairs {
+                changed += self.doc.remap_color(*old, *new);
+            }
+        } else {
+            let indices: Vec<usize> = self.selection.clone();
+            for &i in &indices {
+                if let Some(s) = self.doc.shapes.get_mut(i) {
+                    if pairs.iter().fold(false, |acc, (old, new)| {
+                        s.remap_color(*old, *new) || acc
+                    }) {
+                        changed += 1;
+                    }
+                }
+            }
+        }
+        self.recolor.open = false;
+        self.status = format!("Recolor Artwork · {changed} shape(s)");
+    }
+
     // --- Graphic styles ------------------------------------------------------
 
     /// Save the primary selection's effective appearance as a new named graphic

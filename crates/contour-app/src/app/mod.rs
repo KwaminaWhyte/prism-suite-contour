@@ -396,6 +396,10 @@ pub struct ContourApp {
     /// string takes keyboard input — typing / backspace / enter). `None` when no
     /// text edit is active. Transient UI state, not persisted.
     editing_text: Option<usize>,
+    /// State for the **Recolor Artwork** dialog (the artwork's extracted palette
+    /// and the user's working remap). Transient UI state, not persisted; the
+    /// dialog is closed (`open: false`) until opened from the Object menu.
+    recolor: crate::recolor::RecolorState,
 }
 
 impl ContourApp {
@@ -441,6 +445,7 @@ impl ContourApp {
             selected_instance: None,
             collapsed_layers: Vec::new(),
             editing_text: None,
+            recolor: crate::recolor::RecolorState::default(),
         }
     }
 
@@ -457,6 +462,7 @@ impl ContourApp {
         self.last_transform = None;
         self.collapsed_layers.clear();
         self.editing_text = None;
+        self.recolor = crate::recolor::RecolorState::default();
     }
 }
 
@@ -680,6 +686,8 @@ impl eframe::App for ContourApp {
             self.status_bar(root);
         }
         self.central_canvas(root);
+        // The Recolor Artwork dialog floats over the canvas while open.
+        self.recolor_dialog(&ctx);
     }
 }
 
