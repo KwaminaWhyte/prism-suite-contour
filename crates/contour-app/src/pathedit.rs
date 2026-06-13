@@ -1,5 +1,6 @@
-//! Pure path-editing geometry: **Simplify** (anchor reduction) and **Offset
-//! Path** (signed inset / outset).
+//! Pure path-editing geometry: **Simplify** (anchor reduction), **Offset
+//! Path** (signed inset / outset), and **Outline Stroke** (a path's stroke
+//! converted to a filled outline band).
 //!
 //! Like [`crate::stroke`], these are renderer- and UI-agnostic: they take and
 //! return plain `(f32, f32)` polylines in document space, so they unit-test
@@ -150,6 +151,50 @@ fn signed_area2(pts: &[Pt]) -> f32 {
         acc += a.0 * b.1 - b.0 * a.1;
     }
     acc
+}
+
+/// **Outline Stroke**: convert a path's *stroke* into a filled outline — the
+/// region the centred stroke of half-width `half_w` covers — returning one or
+/// more closed contours (Illustrator's `Object ▸ Path ▸ Outline Stroke`). The
+/// caller paints the result with the former stroke colour as its **fill** and no
+/// stroke.
+///
+/// - An **open** path becomes a single closed **band** that runs down one
+///   `+half_w` offset and back along the `-half_w` offset (butt caps at the
+///   ends), so the band's area ≈ path length × stroke width.
+/// - A **closed** path becomes an **annulus**: two contours, an outer `+half_w`
+///   ring and an inner `-half_w` ring, to be filled even-odd so the interior
+///   hole is carved (the stroke ring is the filled region between them).
+///
+/// A non-positive `half_w`, or a degenerate contour (< 2 points), yields no
+/// contours (the caller treats this as a no-op — nothing to outline).
+pub fn outline_stroke(pts: &[Pt], closed: bool, half_w: f32) -> Vec<Vec<Pt>> {
+    if half_w <= 0.0 || pts.len() < 2 {
+        return Vec::new();
+    }
+    if closed {
+        // Annulus: outer ring outset by +half_w, inner ring inset by half_w.
+        // `offset_path` makes the grow/shrink sense winding-independent, so the
+        // outer always encloses the inner regardless of authoring direction.
+        let outer = offset_path(pts, true, half_w);
+        let inner = offset_path(pts, true, -half_w);
+        if outer.len() < 3 || inner.len() < 3 {
+            return Vec::new();
+        }
+        vec![outer, inner]
+    } else {
+        // Open band: walk one side forward, the other side back, into one ring.
+        // `offset_contour` shifts the whole polyline ±half_w along its normal;
+        // the two sides sit on opposite sides of the centreline (butt caps).
+        let left = crate::stroke::offset_contour(pts, half_w, false);
+        let right = crate::stroke::offset_contour(pts, -half_w, false);
+        if left.len() < 2 || right.len() < 2 {
+            return Vec::new();
+        }
+        let mut band = left;
+        band.extend(right.into_iter().rev());
+        vec![band]
+    }
 }
 
 #[cfg(test)]
@@ -317,5 +362,58 @@ mod tests {
     fn offset_is_deterministic() {
         let sq = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
         assert_eq!(offset_path(&sq, true, 3.0), offset_path(&sq, true, 3.0));
+    }
+
+    // --- Outline Stroke ------------------------------------------------------
+
+    #[test]
+    fn outline_open_segment_is_band_of_length_by_width() {
+        // A horizontal segment of length 10, stroke width 4 (half = 2), outlines
+        // to one closed band whose bbox ≈ length × width.
+        let line = vec![(0.0, 0.0), (10.0, 0.0)];
+        let out = outline_stroke(&line, false, 2.0);
+        assert_eq!(out.len(), 1, "open path => single band: {out:?}");
+        let band = &out[0];
+        assert!(band.len() >= 4, "band has >= 4 corners: {band:?}");
+        let (min_x, min_y, max_x, max_y) = bbox(band);
+        assert!(approx(max_x - min_x, 10.0, 1e-3), "band length ≈ 10: {band:?}");
+        assert!(approx(max_y - min_y, 4.0, 1e-3), "band width ≈ 4: {band:?}");
+        // The band encloses real area (length × width).
+        assert!(approx(area(band), 40.0, 1e-2), "band area ≈ 40: {}", area(band));
+    }
+
+    #[test]
+    fn outline_closed_path_is_annulus_with_positive_area() {
+        // A closed square outlined yields two rings (outer + inner); the region
+        // between them (outer area − inner area) is positive.
+        let sq = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        let out = outline_stroke(&sq, true, 2.0);
+        assert_eq!(out.len(), 2, "closed path => annulus (outer + inner)");
+        let outer_a = area(&out[0]);
+        let inner_a = area(&out[1]);
+        assert!(outer_a > inner_a, "outer encloses inner: {outer_a} vs {inner_a}");
+        assert!(outer_a - inner_a > 0.0, "stroke band has positive area");
+    }
+
+    #[test]
+    fn outline_zero_width_is_noop() {
+        let line = vec![(0.0, 0.0), (10.0, 0.0)];
+        assert!(outline_stroke(&line, false, 0.0).is_empty());
+        let sq = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        assert!(outline_stroke(&sq, true, -1.0).is_empty(), "negative => no-op");
+    }
+
+    #[test]
+    fn outline_degenerate_is_noop() {
+        assert!(outline_stroke(&[(0.0, 0.0)], false, 2.0).is_empty());
+        assert!(outline_stroke(&[], true, 2.0).is_empty());
+    }
+
+    #[test]
+    fn outline_is_deterministic() {
+        let line = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 5.0)];
+        assert_eq!(outline_stroke(&line, false, 1.5), outline_stroke(&line, false, 1.5));
+        let sq = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        assert_eq!(outline_stroke(&sq, true, 1.5), outline_stroke(&sq, true, 1.5));
     }
 }

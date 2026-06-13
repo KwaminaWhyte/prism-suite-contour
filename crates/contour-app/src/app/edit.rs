@@ -572,6 +572,135 @@ impl ContourApp {
         }
     }
 
+    /// Whether **Outline Stroke** can act on the selection: a single shape that
+    /// is currently stroked (positive width and a non-transparent stroke colour).
+    pub(super) fn can_outline_stroke(&self) -> bool {
+        let Some(s) = self.primary().and_then(|i| self.doc.shapes.get(i)) else {
+            return false;
+        };
+        s.stroke_width() > 0.0 && s.stroke_color().is_some_and(|c| c[3] > 0.0)
+    }
+
+    /// **Outline Stroke** on the selected path: convert its stroke into a filled
+    /// outline shape (Illustrator's `Object ▸ Path ▸ Outline Stroke`). Each
+    /// (sub)contour is replaced by the band / annulus its centred stroke covers
+    /// (`pathedit::outline_stroke` at half the stroke width); the result is one
+    /// shape whose **fill** is the former stroke colour with **no stroke**.
+    ///
+    /// An open path yields a single closed band; a closed path (or a compound /
+    /// multi-contour shape) yields a [`Shape::Compound`] of every band / annulus
+    /// ring, filled even-odd so a closed ring's interior is carved out. `live`
+    /// params are dropped (the result is a plain corner path), and a shape with
+    /// no visible stroke is a no-op. One undo step.
+    pub(super) fn outline_stroke_selected(&mut self) {
+        let Some(i) = self.primary() else {
+            self.status = "Outline Stroke: select a path".into();
+            return;
+        };
+        let Some(src) = self.doc.shapes.get(i).cloned() else {
+            return;
+        };
+        let stroke = src.stroke_color().unwrap_or([0.0, 0.0, 0.0, 1.0]);
+        let half_w = src.stroke_width() * 0.5;
+        if half_w <= 0.0 || stroke[3] <= 0.0 {
+            self.status = "Outline Stroke: nothing to outline".into();
+            return;
+        }
+
+        // Demote to a path/compound, then outline each (sub)contour into one or
+        // more closed rings.
+        let demoted = src.to_path();
+        let contours: Vec<(Vec<(f32, f32)>, bool)> = match &demoted {
+            Shape::Path {
+                points,
+                handles,
+                closed,
+                ..
+            } => {
+                let flat = crate::document::flatten(points, handles, *closed);
+                vec![(flat, *closed)]
+            }
+            Shape::Compound { subpaths, .. } => subpaths
+                .iter()
+                .map(|sp| (sp.flatten(), sp.closed))
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        let mut rings: Vec<crate::document::SubPath> = Vec::new();
+        let mut all_closed = true;
+        for (flat, closed) in &contours {
+            for ring in crate::pathedit::outline_stroke(flat, *closed, half_w) {
+                if ring.len() >= 3 {
+                    rings.push(crate::document::SubPath::ring(ring));
+                }
+            }
+            all_closed &= *closed;
+        }
+        if rings.is_empty() {
+            self.status = "Outline Stroke: nothing to outline".into();
+            return;
+        }
+
+        self.checkpoint();
+        // A single open path's band is one ring — keep it a plain Path. Anything
+        // with an annulus or multiple rings becomes an even-odd Compound so the
+        // closed-path hole is carved.
+        let outlined = if rings.len() == 1 && !all_closed {
+            let ring = rings.into_iter().next().expect("one ring");
+            Shape::Path {
+                points: ring.points,
+                closed: true,
+                fill: stroke,
+                fill_gradient: None,
+                stroke: [0.0, 0.0, 0.0, 0.0],
+                stroke_w: 0.0,
+                stroke_style: src.stroke_style().clone(),
+                handles: ring.handles,
+                live: None,
+                appearance: None,
+                visible: true,
+                group: None,
+                clip: None,
+                mask: false,
+                omask: None,
+                omask_path: false,
+                omask_invert: false,
+                blend: None,
+                blend_step: false,
+                name: None,
+                locked: false,
+                layer_color: None,
+            }
+        } else {
+            Shape::Compound {
+                subpaths: rings,
+                fill_rule: crate::document::FillRule::EvenOdd,
+                fill: stroke,
+                fill_gradient: None,
+                stroke: [0.0, 0.0, 0.0, 0.0],
+                stroke_w: 0.0,
+                stroke_style: src.stroke_style().clone(),
+                appearance: None,
+                visible: true,
+                group: None,
+                clip: None,
+                mask: false,
+                omask: None,
+                omask_path: false,
+                omask_invert: false,
+                blend: None,
+                blend_step: false,
+                name: None,
+                locked: false,
+                layer_color: None,
+            }
+        };
+        self.doc.shapes[i] = outlined;
+        self.select_only(Some(i));
+        self.status = "Outlined stroke".into();
+    }
+
     /// Demote the primary-selected shape to a plain [`Shape::Path`] (via
     /// [`Shape::to_path`], preserving paint / group / membership tags), flatten
     /// its outline to a polyline, run `op` on it, and store the result back as a

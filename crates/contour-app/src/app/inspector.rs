@@ -243,6 +243,21 @@ impl ContourApp {
                                 ui.close_menu();
                             }
                         });
+                        ui.separator();
+                        // Outline Stroke: convert the stroke to a filled outline.
+                        ui.add_enabled_ui(self.can_outline_stroke(), |ui| {
+                            if ui
+                                .button(format!("{}  Outline Stroke", icons::OUTLINE))
+                                .on_hover_text(
+                                    "Convert the stroke into a filled outline shape \
+                                     (fill = former stroke colour, no stroke)",
+                                )
+                                .clicked()
+                            {
+                                self.outline_stroke_selected();
+                                ui.close_menu();
+                            }
+                        });
                     });
 
                     ui.menu_button(format!("{}  Type", icons::TYPE), |ui| {

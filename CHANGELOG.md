@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Path editing — Outline Stroke.** A new `Object ▸ Path ▸ Outline Stroke`
+  command (Illustrator's `Object ▸ Path ▸ Outline Stroke`) converts the selected
+  path's **stroke** into a filled outline shape, as one undo step:
+  - The result is the region the centred stroke covered — each (sub)contour is
+    offset by ±(stroke width / 2) and combined into a band: an **open** path
+    becomes one closed band (butt caps) whose area ≈ path length × stroke width;
+    a **closed** path becomes an **annulus** (outer + inner ring) filled
+    even-odd so its interior is carved out.
+  - After the op the new shape's **fill** is the former stroke colour with **no
+    stroke**. A single open band stays a plain `Shape::Path`; any annulus /
+    multi-contour result is an even-odd `Shape::Compound`. `live` parametric
+    params are dropped (consistent with Simplify / Offset). A shape with no
+    visible stroke is a no-op (the menu item is disabled).
+  - Implemented as a pure `pathedit::outline_stroke` helper (points + closed flag
+    + half-width → closed ring(s)), reusing `stroke::offset_contour` /
+    `pathedit::offset_path`. **Guarded** by unit tests: an open segment outlines
+    to a band whose bbox ≈ length × width, a closed path to an annulus of
+    positive area, zero / negative width and degenerate input are no-ops, and the
+    result is deterministic. No `.contour` model change.
 - **Path editing — Simplify & Offset Path.** Two new commands under a new
   **`Object ▸ Path`** menu act on the selected shape as one undo step:
   - **Simplify** reduces a path's anchor count while preserving its shape:
