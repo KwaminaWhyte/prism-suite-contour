@@ -1411,6 +1411,57 @@ impl ContourApp {
         }
     }
 
+    /// `File ▸ Image Trace…` / `Object ▸ Image Trace…`: pick a raster image,
+    /// trace it into vector paths with the current [`crate::trace::TraceConfig`],
+    /// and add the result as one grouped, undoable block on top of the document.
+    /// The traced paths are positioned at the image's pixel coordinates (top-left
+    /// at the document origin); the user can then move / scale the group.
+    pub(super) fn image_trace_dialog(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Image", &["png", "jpg", "jpeg", "bmp", "gif"])
+            .pick_file()
+        else {
+            return;
+        };
+        let img = match image::open(&path) {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => {
+                self.status = format!("Image Trace: could not load image ({e})");
+                log::error!("image trace load failed: {e}");
+                return;
+            }
+        };
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let group_id = crate::group::next_group_id(&self.group_tags());
+        let shapes = match crate::trace::trace_to_shapes(
+            img.as_raw(),
+            w,
+            h,
+            self.trace_cfg,
+            group_id,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = format!("Image Trace: {e}");
+                return;
+            }
+        };
+        if shapes.is_empty() {
+            self.status = "Image Trace: no regions found".into();
+            return;
+        }
+
+        self.checkpoint();
+        let start = self.doc.shapes.len();
+        let count = shapes.len();
+        self.doc.shapes.extend(shapes);
+        self.selection = (start..start + count).collect();
+        self.status = format!(
+            "Image Trace ({}): {count} path(s)",
+            self.trace_cfg.mode.label()
+        );
+    }
+
     pub(super) fn save_dialog(&self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Contour document", &["contour", "json"])

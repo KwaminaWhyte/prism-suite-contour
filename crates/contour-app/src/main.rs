@@ -34,6 +34,7 @@ mod stroke;
 mod swatches;
 mod text;
 mod theme;
+mod trace;
 mod transform;
 mod workspace;
 

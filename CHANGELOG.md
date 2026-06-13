@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Image Trace.** A new `File ▸ Image Trace…` (and an `Object ▸ Image Trace`
+  submenu with the controls) loads a raster image and traces it into editable
+  vector paths, as one undo step:
+  - Backed by **`vtracer`** (the visioncortex tracer behind Illustrator's Image
+    Trace): the picked PNG/JPEG/BMP/GIF is decoded to RGBA, traced into
+    colour-region outlines, and converted into the document's path model — one
+    filled, closed `Shape::Path` per traced contour, all tagged into a single
+    **group** so the result selects / moves as one object and lands on top of the
+    document at the image's pixel coordinates.
+  - **Mode preset:** **Black & White** (binary, with an adjustable luminance
+    **Threshold** 0–255) and **Color** (multi-region, with **Color precision**).
+    Both expose vtracer's key knobs — **Filter speckle** (drop tiny regions),
+    **Corner threshold** (corner vs smooth spline), and **Path precision** — with
+    vtracer's own defaults.
+  - The vtracer-output → anchor/handle step is a pure, dependency-light SVG
+    path-`d` parser (`trace::svg_path_to_contours`: `M`/`L`/`C`/`Z`, absolute,
+    plus the per-region translate offset vtracer emits), reusable as a general
+    line/cubic SVG path importer. **Guarded** by 8 unit tests: cubic / line / Z
+    parsing and handle correctness (round-tripped through `bez_path`), multiple
+    sub-paths, negative/decimal coords, a synthetic black square traces to a
+    closed path whose bbox ≈ the square, B/W and Color modes both produce grouped
+    shapes, the trace is deterministic, and empty input errors. No `.contour`
+    model change (results are ordinary grouped paths).
 - **Path editing — Outline Stroke.** A new `Object ▸ Path ▸ Outline Stroke`
   command (Illustrator's `Object ▸ Path ▸ Outline Stroke`) converts the selected
   path's **stroke** into a filled outline shape, as one undo step:

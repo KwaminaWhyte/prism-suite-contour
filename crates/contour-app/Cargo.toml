@@ -48,5 +48,17 @@ egui = "0.34"
 rfd = "0.15"
 egui-phosphor = "0.12.0"
 
+# Image Trace (Object ▸ Image Trace): raster → vector. `vtracer` clusters a
+# raster into colour regions and fits cubic-spline outlines (the engine behind
+# Illustrator's Image Trace); we parse its per-region SVG path output into the
+# document's own path model. `visioncortex` is vtracer's geometry crate, pulled
+# in directly so we can build its `ColorImage`/`PointF64` (vtracer only
+# re-exports `ColorImage`) — same 0.8.10 already in the graph, no extra build.
+# `image` decodes the picked raster to RGBA; default features dropped to the
+# formats the file dialog offers.
+vtracer = "0.6.5"
+visioncortex = "0.8.10"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "gif"] }
+
 [lints]
 workspace = true

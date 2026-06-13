@@ -188,3 +188,7 @@ pub const PATH: &str = ph::PATH;
 pub const SIMPLIFY: &str = ph::SCRIBBLE;
 /// Offset path inward / outward.
 pub const OFFSET_PATH: &str = ph::ARROWS_OUT;
+
+// --- Image trace (Object ▸ Image Trace) ----------------------------------
+/// Trace a raster image into vector paths.
+pub const IMAGE_TRACE: &str = ph::MAGIC_WAND;

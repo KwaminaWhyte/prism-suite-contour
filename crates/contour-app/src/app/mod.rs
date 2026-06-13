@@ -345,6 +345,9 @@ pub struct ContourApp {
     /// with — non-zero (default) vs even-odd (compound-path hole rule). Toggled
     /// from the Object ▸ Pathfinder menu.
     bool_fill_rule: BoolFillRule,
+    /// Image Trace settings (mode preset + vtracer knobs) used by `File ▸ Image
+    /// Trace…`. Edited from the Object ▸ Image Trace submenu.
+    trace_cfg: crate::trace::TraceConfig,
     /// Which snapping sources (grid / guides / objects) are active + grid size.
     snap: SnapConfig,
     /// Whether to paint the document grid.
@@ -412,6 +415,7 @@ impl ContourApp {
             simplify_tol: 2.0,
             offset_dist: 10.0,
             bool_fill_rule: BoolFillRule::default(),
+            trace_cfg: crate::trace::TraceConfig::default(),
             snap: SnapConfig::default(),
             show_grid: false,
             show_rulers: true,

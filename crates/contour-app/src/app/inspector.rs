@@ -30,6 +30,15 @@ impl ContourApp {
                         ui.close_menu();
                     }
                     ui.separator();
+                    if ui
+                        .button(format!("{}  Image Trace…", icons::IMAGE_TRACE))
+                        .on_hover_text("Trace a raster image into editable vector paths")
+                        .clicked()
+                    {
+                        self.image_trace_dialog();
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Export SVG…").clicked() {
                         self.export_svg_dialog();
                         ui.close_menu();
@@ -275,6 +284,77 @@ impl ContourApp {
                             }
                         });
                     });
+
+                    ui.menu_button(
+                        format!("{}  Image Trace", icons::IMAGE_TRACE),
+                        |ui| {
+                            use crate::trace::TraceMode;
+                            let cfg = &mut self.trace_cfg;
+                            ui.label("Mode");
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(
+                                    &mut cfg.mode,
+                                    TraceMode::BlackWhite,
+                                    "B/W",
+                                );
+                                ui.selectable_value(&mut cfg.mode, TraceMode::Color, "Color");
+                            });
+                            ui.separator();
+                            if cfg.mode == TraceMode::BlackWhite {
+                                ui.horizontal(|ui| {
+                                    ui.label("Threshold");
+                                    ui.add(
+                                        egui::DragValue::new(&mut cfg.threshold)
+                                            .range(0..=255),
+                                    )
+                                    .on_hover_text("Pixels darker than this become foreground");
+                                });
+                            } else {
+                                ui.horizontal(|ui| {
+                                    ui.label("Color precision");
+                                    ui.add(
+                                        egui::DragValue::new(&mut cfg.color_precision)
+                                            .range(1..=8),
+                                    )
+                                    .on_hover_text("Bits of colour kept (more = more regions)");
+                                });
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label("Filter speckle");
+                                ui.add(
+                                    egui::DragValue::new(&mut cfg.filter_speckle)
+                                        .range(0..=64),
+                                )
+                                .on_hover_text("Discard regions smaller than this many px");
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Corner threshold");
+                                ui.add(
+                                    egui::DragValue::new(&mut cfg.corner_threshold)
+                                        .range(0..=180)
+                                        .suffix("°"),
+                                )
+                                .on_hover_text("Sharper turns than this become corners");
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Path precision");
+                                ui.add(
+                                    egui::DragValue::new(&mut cfg.path_precision)
+                                        .range(0..=8),
+                                )
+                                .on_hover_text("Decimal places kept in fitted coordinates");
+                            });
+                            ui.separator();
+                            if ui
+                                .button(format!("{}  Trace Image…", icons::IMAGE_TRACE))
+                                .on_hover_text("Pick a raster image and trace it to paths")
+                                .clicked()
+                            {
+                                self.image_trace_dialog();
+                                ui.close_menu();
+                            }
+                        },
+                    );
 
                     ui.separator();
                     ui.add_enabled_ui(self.can_group(), |ui| {
