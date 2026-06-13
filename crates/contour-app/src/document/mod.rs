@@ -25,6 +25,7 @@ use crate::gradient::Gradient;
 use crate::graphic_styles::GraphicStyles;
 use crate::liveshape::LiveShape;
 use crate::swatches::{self, Swatches};
+use crate::symbols::Symbols;
 use crate::transform::Affine;
 use kurbo::Shape as KurboShape;
 use prism_core::geometry::Rect as CoreRect;
@@ -552,6 +553,22 @@ impl Shape {
             | Shape::Compound { group, .. }
             | Shape::Text { group, .. } => *group = g,
         }
+    }
+
+    /// Clear every *set-membership* tag (group / clip / mask / opacity-mask /
+    /// blend) so the shape is a self-contained unit. Used when capturing a
+    /// **symbol master** from a selection: the master's geometry and paint are
+    /// kept, but its links into the source document's clip/blend/group sets are
+    /// dropped so an instance never collides with those sets at resolve time.
+    pub fn clear_set_membership(&mut self) {
+        self.set_group(None);
+        self.set_clip(None);
+        self.set_mask(false);
+        self.set_omask(None);
+        self.set_omask_path(false);
+        self.set_omask_invert(false);
+        self.set_blend(None);
+        self.set_blend_step(false);
     }
 
     /// The shape's clip-set id, if it belongs to a clipping mask. Shapes sharing
@@ -1990,6 +2007,14 @@ pub struct Document {
     /// an empty library; saved styles round-trip through serde.
     #[serde(default)]
     pub graphic_styles: GraphicStyles,
+    /// The document's **symbols** library and its placed instances (the Symbols
+    /// panel): each symbol is a reusable master shape set; each instance is a
+    /// reference to a master plus a placement transform, resolved to drawable
+    /// shapes at render / export time so editing a master propagates to every
+    /// instance. Additive (`#[serde(default)]`), so a pre-symbols `.contour` file
+    /// loads with an empty library; saved symbols round-trip through serde.
+    #[serde(default)]
+    pub symbols: Symbols,
 }
 
 impl Default for Document {
@@ -2001,6 +2026,7 @@ impl Default for Document {
             active_artboard: 0,
             swatches: Swatches::default(),
             graphic_styles: GraphicStyles::default(),
+            symbols: Symbols::default(),
         }
     }
 }
@@ -2060,6 +2086,24 @@ impl Document {
             }
         }
         n
+    }
+
+    /// A render/export-ready clone with every placed **symbol instance** baked
+    /// into `shapes` (resolved against its live master) and the instance list
+    /// cleared. Export surfaces (SVG / PNG) flatten through this so an instance
+    /// appears in the output exactly as it does on the canvas; the on-screen
+    /// editor keeps the live `symbols` model for editing. Cheap when there are no
+    /// instances (returns a plain clone).
+    pub fn flattened_for_export(&self) -> Document {
+        if self.symbols.instances.is_empty() {
+            return self.clone();
+        }
+        let mut out = self.clone();
+        for (_, shapes) in self.symbols.resolved_instances() {
+            out.shapes.extend(shapes);
+        }
+        out.symbols.instances.clear();
+        out
     }
 
     /// The shapes to *render*, with clipping masks resolved, paired with the

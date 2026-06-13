@@ -381,6 +381,14 @@ pub struct ContourApp {
     /// addressed by its stable id (so it survives reordering). Drives the
     /// section's rename / delete editor. `None` until a style is clicked.
     selected_style: Option<u64>,
+    /// The symbol currently selected in the Symbols panel, addressed by its
+    /// stable id. Drives the panel's place / rename / delete editor. `None` until
+    /// a symbol is clicked.
+    selected_symbol: Option<u64>,
+    /// The placed symbol instance currently selected on the canvas / in the
+    /// panel, addressed by its stable id. Drives the instance transform editor.
+    /// `None` when no instance is selected. Transient UI state, not persisted.
+    selected_instance: Option<u64>,
     /// Group ids the user has collapsed in the Layers panel (their member rows
     /// are hidden). Transient UI state, not persisted.
     collapsed_layers: Vec<u64>,
@@ -429,6 +437,8 @@ impl ContourApp {
             clipboard: Clipboard::default(),
             selected_swatch: None,
             selected_style: None,
+            selected_symbol: None,
+            selected_instance: None,
             collapsed_layers: Vec::new(),
             editing_text: None,
         }
@@ -442,6 +452,8 @@ impl ContourApp {
         self.status.clear();
         self.selected_swatch = None;
         self.selected_style = None;
+        self.selected_symbol = None;
+        self.selected_instance = None;
         self.last_transform = None;
         self.collapsed_layers.clear();
         self.editing_text = None;

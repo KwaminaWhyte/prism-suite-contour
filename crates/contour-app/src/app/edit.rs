@@ -2324,6 +2324,196 @@ impl ContourApp {
         }
     }
 
+    // --- Symbols -------------------------------------------------------------
+
+    /// Define a new symbol from the current selection (one undo step): the
+    /// selected shapes become a reusable master, and the selection is **replaced
+    /// in place** by a single instance of the new symbol placed with the identity
+    /// transform — so the artwork looks unchanged but is now an instance. Returns
+    /// the new symbol id so the panel can select it. No-op with no selection.
+    ///
+    /// The captured masters have their set-membership tags (group / clip / blend
+    /// / opacity-mask) cleared so the master is a self-contained unit; their
+    /// original positions are kept, so the identity instance sits exactly where
+    /// the artwork was.
+    pub(super) fn create_symbol_from_selection(&mut self) -> Option<u64> {
+        if self.selection.is_empty() {
+            return None;
+        }
+        // Capture the selected shapes (in document paint order) as the master.
+        let mut idx: Vec<usize> = self.selection.clone();
+        idx.sort_unstable();
+        idx.dedup();
+        let mut masters: Vec<crate::document::Shape> = idx
+            .iter()
+            .filter_map(|&i| self.doc.shapes.get(i).cloned())
+            .collect();
+        if masters.is_empty() {
+            return None;
+        }
+        for m in masters.iter_mut() {
+            m.clear_set_membership();
+        }
+
+        self.checkpoint();
+        let id = self.doc.symbols.add("Symbol", masters);
+        // Replace the selected shapes with one identity instance.
+        for &i in idx.iter().rev() {
+            if i < self.doc.shapes.len() {
+                self.doc.shapes.remove(i);
+            }
+        }
+        self.selection.clear();
+        let inst = self.doc.symbols.place(id, Affine::IDENTITY);
+        self.selected_symbol = Some(id);
+        self.selected_instance = inst;
+        self.status = "Created symbol from selection".into();
+        Some(id)
+    }
+
+    /// Place a new instance of symbol `id` (one undo step), offset from the
+    /// previous placements so it doesn't sit exactly on top of the master. The
+    /// new instance becomes the selected instance. No-op for an unknown id.
+    pub(super) fn place_symbol_instance(&mut self, id: u64) {
+        if self.doc.symbols.get(id).is_none() {
+            return;
+        }
+        // Cascade each new placement by a fixed offset so repeated placements
+        // fan out rather than overlap.
+        let n = self
+            .doc
+            .symbols
+            .instances
+            .iter()
+            .filter(|i| i.symbol == id)
+            .count() as f32;
+        let off = 20.0 * (n + 1.0);
+        self.checkpoint();
+        let inst = self.doc.symbols.place(id, Affine::translate(off, off));
+        self.selected_symbol = Some(id);
+        self.selected_instance = inst;
+        self.status = "Placed symbol instance".into();
+    }
+
+    /// **Edit master**: redefine symbol `id`'s master shapes from the current
+    /// selection (one undo step). Every placed instance resolves through the new
+    /// geometry on the next frame, so this is the user-facing edit-master
+    /// propagation path. No-op with no selection or an unknown id.
+    pub(super) fn update_symbol_master_from_selection(&mut self, id: u64) {
+        if self.selection.is_empty() || self.doc.symbols.get(id).is_none() {
+            return;
+        }
+        let mut idx: Vec<usize> = self.selection.clone();
+        idx.sort_unstable();
+        idx.dedup();
+        let mut masters: Vec<crate::document::Shape> = idx
+            .iter()
+            .filter_map(|&i| self.doc.shapes.get(i).cloned())
+            .collect();
+        if masters.is_empty() {
+            return;
+        }
+        for m in masters.iter_mut() {
+            m.clear_set_membership();
+        }
+        self.checkpoint();
+        self.doc.symbols.set_master_shapes(id, masters);
+        self.status = "Updated symbol master".into();
+    }
+
+    /// Rename symbol `id` (one undo step). No-op if the name is unchanged.
+    pub(super) fn rename_symbol(&mut self, id: u64, name: &str) {
+        if self.doc.symbols.get(id).map(|s| s.name.as_str()) == Some(name) {
+            return;
+        }
+        self.checkpoint();
+        self.doc.symbols.rename(id, name);
+    }
+
+    /// Delete symbol `id` and every instance of it (one undo step).
+    pub(super) fn delete_symbol(&mut self, id: u64) {
+        self.checkpoint();
+        if self.doc.symbols.remove(id) {
+            if self.selected_symbol == Some(id) {
+                self.selected_symbol = None;
+            }
+            // Drop the selected instance if it referenced the gone symbol.
+            if let Some(iid) = self.selected_instance {
+                if self.doc.symbols.instance(iid).is_none() {
+                    self.selected_instance = None;
+                }
+            }
+            self.status = "Deleted symbol".into();
+        }
+    }
+
+    /// **Break** the selected instance into editable shapes (one undo step): the
+    /// instance is resolved against its live master and its resolved shapes are
+    /// appended to the document as plain artwork, then the instance is removed.
+    /// The instances become a one-off copy that no longer follows the master.
+    pub(super) fn break_selected_instance(&mut self) {
+        let Some(iid) = self.selected_instance else {
+            return;
+        };
+        let Some(inst) = self.doc.symbols.instance(iid).copied() else {
+            return;
+        };
+        let resolved = self.doc.symbols.resolve(&inst);
+        if resolved.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        let first = self.doc.shapes.len();
+        self.doc.shapes.extend(resolved);
+        self.doc.symbols.remove_instance(iid);
+        self.selected_instance = None;
+        // Select the freshly-expanded shapes so the user can edit them.
+        self.selection = (first..self.doc.shapes.len()).collect();
+        self.status = "Broke link to symbol".into();
+    }
+
+    /// Delete the selected instance (one undo step); the master is untouched.
+    pub(super) fn delete_selected_instance(&mut self) {
+        let Some(iid) = self.selected_instance else {
+            return;
+        };
+        self.checkpoint();
+        if self.doc.symbols.remove_instance(iid) {
+            self.selected_instance = None;
+            self.status = "Deleted instance".into();
+        }
+    }
+
+    /// Apply a numeric transform to the selected instance about the centre of its
+    /// resolved bounds (one undo step): the request composes onto the instance's
+    /// existing matrix, so move / scale / rotate accumulate. No-op with no
+    /// selected instance or an identity request.
+    pub(super) fn transform_selected_instance(&mut self, nt: crate::transform::NumericTransform) {
+        let Some(iid) = self.selected_instance else {
+            return;
+        };
+        let Some(inst) = self.doc.symbols.instance(iid).copied() else {
+            return;
+        };
+        // Pivot: centre of the resolved bounds, so a scale/rotate stays put.
+        let resolved = self.doc.symbols.resolve(&inst);
+        let boxes: Vec<_> = resolved.iter().filter_map(|s| s.bounds()).collect();
+        let (px, py) = match crate::align::union_bounds(&boxes) {
+            Some(r) => (r.x + r.w * 0.5, r.y + r.h * 0.5),
+            None => (0.0, 0.0),
+        };
+        let m = nt.to_affine(px, py);
+        if m.is_identity() {
+            return;
+        }
+        self.checkpoint();
+        if let Some(i) = self.doc.symbols.instance_mut(iid) {
+            // Apply the request *after* the instance's current placement.
+            i.transform = m.then(i.transform);
+        }
+        self.status = "Transformed instance".into();
+    }
+
     // --- Snapping ------------------------------------------------------------
 
     /// Document-space snap tolerance: a fixed ~6px pulled into document units so

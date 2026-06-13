@@ -137,6 +137,22 @@ impl ContourApp {
                 let omask = self.doc.opacity_mask_of(i);
                 canvas::paint_shape_masked(&painter, &self.view, &s, false, omask.as_ref());
             }
+            // Placed symbol instances, resolved against their live masters (so a
+            // master edit shows here immediately) and drawn over the plain
+            // shapes. The selected instance gets a selection ring per resolved
+            // shape so it reads as one placed object.
+            for (inst_id, shapes) in self.doc.symbols.resolved_instances() {
+                let selected = self.selected_instance == Some(inst_id);
+                for s in &shapes {
+                    if !s.visible() {
+                        continue;
+                    }
+                    canvas::paint_shape(&painter, &self.view, s, false);
+                    if selected {
+                        canvas::paint_selection_ring(&painter, &self.view, s);
+                    }
+                }
+            }
             // Selection rings + a dashed outline for selected mask paths, drawn
             // from the original (pre-clip) shapes.
             for (i, s) in self.doc.shapes.iter().enumerate() {

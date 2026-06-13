@@ -134,6 +134,11 @@ pub const SEND_BACKWARD: &str = ph::ARROW_DOWN;
 /// A saved graphic style (a named appearance snapshot).
 pub const STYLE: &str = ph::PALETTE;
 
+// --- Symbols ----------------------------------------------------------------
+
+/// A symbol master / placed instance (the Symbols panel).
+pub const SYMBOL: &str = ph::SHAPES;
+
 // --- Grouping ---------------------------------------------------------------
 
 /// Group the selected shapes into one unit.

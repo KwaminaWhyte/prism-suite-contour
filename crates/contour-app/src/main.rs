@@ -32,6 +32,7 @@ mod shapebuilder;
 mod snap;
 mod stroke;
 mod swatches;
+mod symbols;
 mod text;
 mod theme;
 mod trace;

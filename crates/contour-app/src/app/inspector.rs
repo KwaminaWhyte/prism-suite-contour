@@ -1016,6 +1016,11 @@ impl ContourApp {
                             .show(ui, |ui| {
                                 self.graphic_styles_section(ui);
                             });
+                        egui::CollapsingHeader::new("Symbols")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                self.symbols_section(ui);
+                            });
                         egui::CollapsingHeader::new("Transform")
                             .default_open(true)
                             .show(ui, |ui| {
@@ -1574,6 +1579,200 @@ impl ContourApp {
             } else {
                 // The selected style was removed (e.g. undo).
                 self.selected_style = None;
+            }
+        }
+    }
+
+    /// The **Symbols** panel: the document's reusable-master library plus its
+    /// placed instances (Illustrator's Symbols panel). **Create from selection**
+    /// turns the current selection into a master and replaces it with an
+    /// instance; clicking **Place** drops another instance; editing a master's
+    /// shapes propagates to every instance. Selecting an instance reveals a small
+    /// numeric transform editor and break/delete actions. Each action is one undo
+    /// step.
+    fn symbols_section(&mut self, ui: &mut egui::Ui) {
+        let has_selection = !self.selection.is_empty();
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Symbols").strong());
+            ui.weak(format!("{}", self.doc.symbols.len()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_enabled_ui(has_selection, |ui| {
+                    if ui
+                        .button("+")
+                        .on_hover_text("Create a symbol from the selection")
+                        .clicked()
+                    {
+                        self.create_symbol_from_selection();
+                    }
+                });
+            });
+        });
+        ui.weak("Select artwork, then + to define a symbol.");
+
+        if !self.doc.symbols.is_empty() {
+            // Deferred actions so we don't borrow the library while iterating it.
+            let mut place: Option<u64> = None;
+            let mut select: Option<u64> = None;
+            let entries: Vec<(u64, String, usize)> = self
+                .doc
+                .symbols
+                .list
+                .iter()
+                .map(|s| {
+                    let count = self
+                        .doc
+                        .symbols
+                        .instances
+                        .iter()
+                        .filter(|i| i.symbol == s.id)
+                        .count();
+                    (s.id, s.name.clone(), count)
+                })
+                .collect();
+
+            for (id, name, count) in &entries {
+                let selected = self.selected_symbol == Some(*id);
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(selected, format!("{}  {name}", icons::SYMBOL))
+                        .on_hover_text("Select this symbol")
+                        .clicked()
+                    {
+                        select = Some(*id);
+                    }
+                    ui.weak(format!("{count}×"));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Place").on_hover_text("Place an instance").clicked() {
+                            place = Some(*id);
+                        }
+                    });
+                });
+            }
+
+            if let Some(id) = select {
+                self.selected_symbol = Some(id);
+            }
+            if let Some(id) = place {
+                self.place_symbol_instance(id);
+            }
+
+            // Editor for the selected symbol (rename / delete).
+            if let Some(id) = self.selected_symbol {
+                if let Some(sym) = self.doc.symbols.get(id).cloned() {
+                    ui.separator();
+                    let mut name = sym.name.clone();
+                    ui.horizontal(|ui| {
+                        ui.label("Name");
+                        if ui.text_edit_singleline(&mut name).lost_focus() {
+                            self.rename_symbol(id, &name);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Place instance").clicked() {
+                            self.place_symbol_instance(id);
+                        }
+                        ui.add_enabled_ui(has_selection, |ui| {
+                            if ui
+                                .button("Update master")
+                                .on_hover_text(
+                                    "Redefine this symbol from the selection — all instances update",
+                                )
+                                .clicked()
+                            {
+                                self.update_symbol_master_from_selection(id);
+                            }
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .button(icons::TRASH)
+                                .on_hover_text("Delete symbol and all its instances")
+                                .clicked()
+                            {
+                                self.delete_symbol(id);
+                            }
+                        });
+                    });
+                } else {
+                    self.selected_symbol = None;
+                }
+            }
+        } else {
+            ui.weak("No symbols yet.");
+        }
+
+        // --- Placed instance editor ----------------------------------------
+        let inst_ids: Vec<(u64, u64)> = self
+            .doc
+            .symbols
+            .instances
+            .iter()
+            .map(|i| (i.id, i.symbol))
+            .collect();
+        if !inst_ids.is_empty() {
+            ui.separator();
+            ui.label(egui::RichText::new("Instances").strong());
+            let mut select_inst: Option<u64> = None;
+            for (iid, sym_id) in &inst_ids {
+                let label = self
+                    .doc
+                    .symbols
+                    .get(*sym_id)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| "?".into());
+                let selected = self.selected_instance == Some(*iid);
+                if ui
+                    .selectable_label(selected, format!("{}  {label} #{iid}", icons::SYMBOL))
+                    .clicked()
+                {
+                    select_inst = Some(*iid);
+                }
+            }
+            if let Some(iid) = select_inst {
+                self.selected_instance = Some(iid);
+            }
+
+            if self.selected_instance.is_some() {
+                ui.separator();
+                ui.label("Transform selected instance");
+                // A small, transient numeric request applied on click.
+                let mut nt = crate::transform::NumericTransform::default();
+                ui.horizontal(|ui| {
+                    if ui.button("Move +10,+10").clicked() {
+                        nt.move_x = 10.0;
+                        nt.move_y = 10.0;
+                        self.transform_selected_instance(nt);
+                    }
+                    if ui.button("Scale ×1.25").clicked() {
+                        nt.scale_x = 1.25;
+                        nt.scale_y = 1.25;
+                        self.transform_selected_instance(nt);
+                    }
+                    if ui.button("Rotate 15°").clicked() {
+                        nt.rotate = 15.0_f32.to_radians();
+                        self.transform_selected_instance(nt);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Break link")
+                        .on_hover_text("Expand to editable shapes (stop following the master)")
+                        .clicked()
+                    {
+                        self.break_selected_instance();
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button(icons::TRASH)
+                            .on_hover_text("Delete this instance")
+                            .clicked()
+                        {
+                            self.delete_selected_instance();
+                        }
+                    });
+                });
             }
         }
     }

@@ -29,7 +29,10 @@
 /// `(a, b, c, d)` is the linear part (rotation/scale/shear/reflect); `(e, f)` is
 /// the translation. This matches the SVG / `kurbo` / PostScript `matrix(a b c d
 /// e f)` convention, so it maps cleanly onto export later.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// Serializable so a **symbol instance** can persist its placement matrix in the
+/// `.contour` file.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Affine {
     pub a: f32,
     pub b: f32,

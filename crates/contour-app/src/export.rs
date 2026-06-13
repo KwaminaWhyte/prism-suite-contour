@@ -63,6 +63,9 @@ pub fn to_svg(doc: &Document, w: f32, h: f32) -> String {
 /// Build the inner SVG body (`<defs>` for gradients + the shape elements) shared
 /// by [`to_svg`] and [`to_svg_artboard`]. Does not emit the `<svg>` wrapper.
 fn svg_body(doc: &Document) -> String {
+    // Bake placed symbol instances into plain shapes so they export like any
+    // other artwork (a no-op clone when there are none).
+    let doc = &doc.flattened_for_export();
     // Build the <defs> for every gradient (one per gradient-painted fill/stroke
     // layer) and the layered shape elements. Clipping masks are resolved before
     // emission: a clip mask path drops out, and clipped content is emitted
@@ -690,6 +693,8 @@ pub fn to_png(doc: &Document, w: f32, h: f32) -> Option<Vec<u8>> {
 /// by `(-ox, -oy)`, so the chosen artboard's content fills the image. Returns
 /// `None` on degenerate sizes / encode error.
 pub fn to_png_artboard(doc: &Document, ab: [f32; 4]) -> Option<Vec<u8>> {
+    // Bake placed symbol instances into plain shapes (no-op clone when none).
+    let doc = &doc.flattened_for_export();
     let (ox, oy, w, h) = (ab[0], ab[1], ab[2], ab[3]);
     let pw = w.round().max(1.0) as u32;
     let ph = h.round().max(1.0) as u32;

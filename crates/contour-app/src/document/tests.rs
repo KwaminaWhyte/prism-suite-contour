@@ -2167,6 +2167,73 @@ fn graphic_styles_library_round_trips_on_document() {
     assert_eq!(back.graphic_styles.appearance_of(id), Some(&style));
 }
 
+/// A pre-symbols `.contour` (no `symbols` key) loads with an empty symbol
+/// library — the additive `#[serde(default)]` field keeps older files
+/// round-tripping unchanged.
+#[test]
+fn loads_legacy_document_with_empty_symbols() {
+    let json = r#"{"shapes":[
+        {"Rect":{"rect":[0,0,10,10],"fill":[1,0,0,1],"stroke":[0,0,0,1],"stroke_w":2}}
+    ]}"#;
+    let doc: Document = serde_json::from_str(json).unwrap();
+    assert!(doc.symbols.is_empty(), "missing key defaults to empty");
+    assert!(doc.symbols.instances.is_empty());
+}
+
+/// The document's symbol library + placed instances round-trip through `.contour`
+/// serialization, and a master edit (re-serialized) propagates to instances.
+#[test]
+fn symbols_round_trip_and_propagate_on_document() {
+    use crate::transform::Affine;
+    let mut doc = Document::default();
+    let sq = Shape::Rect {
+        rect: [0.0, 0.0, 10.0, 10.0],
+        fill: [1.0, 0.0, 0.0, 1.0],
+        fill_gradient: None,
+        stroke: [0.0, 0.0, 0.0, 1.0],
+        stroke_w: 1.0,
+        stroke_style: StrokeStyle::default(),
+        appearance: None,
+        visible: true,
+        group: None,
+        clip: None,
+        mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
+        blend: None,
+        blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
+    };
+    let id = doc.symbols.add("Box", vec![sq]);
+    doc.symbols.place(id, Affine::translate(100.0, 0.0));
+    doc.symbols.place(id, Affine::translate(0.0, 100.0));
+
+    // Round-trips: re-serializing the loaded doc matches the original JSON.
+    let json = serde_json::to_string(&doc).unwrap();
+    let back: Document = serde_json::from_str(&json).unwrap();
+    assert_eq!(json, serde_json::to_string(&back).unwrap());
+    assert_eq!(back.symbols.len(), 1);
+    assert_eq!(back.symbols.instances.len(), 2);
+
+    // Edit the master to 50 wide → both instances resolve 50 wide.
+    let mut wider = back.symbols.get(id).unwrap().shapes[0].clone();
+    if let Shape::Rect { rect, .. } = &mut wider {
+        rect[2] = 50.0;
+    }
+    let mut edited = back;
+    edited.symbols.set_master_shapes(id, vec![wider]);
+    for inst in &edited.symbols.instances {
+        let r = edited.symbols.resolve(inst);
+        match &r[0] {
+            Shape::Rect { rect, .. } => assert_eq!(rect[2], 50.0),
+            _ => unreachable!(),
+        }
+    }
+}
+
 /// Build a placed point-type [`Shape::Text`] at `origin` for the text-placement
 /// regression tests below: glyph cache laid out immediately, every additive
 /// field at its default, so it matches what the Type tool produces.

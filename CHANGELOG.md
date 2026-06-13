@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Symbols — library, instances & edit-master propagation.** A document symbol
+  library plus placed instances, the way Illustrator's Symbols panel works:
+  - A pure, fully unit-tested `symbols` module — `Symbol { id, name, shapes }`
+    (a reusable *master* = a set of shapes), `SymbolInstance { id, symbol,
+    transform }` (a reference to a master + its own placement `Affine`), and an
+    ordered, name-unique, id-stable `Symbols` collection holding both. Carried on
+    the document as additive `symbols: Symbols` (`#[serde(default)]` → empty), so
+    pre-symbols `.contour` files round-trip unchanged.
+  - **Edit-master propagation** falls out of one indirection: an instance stores
+    no geometry — it is **resolved** on demand (`Symbols::resolve`) by cloning
+    the *live* master's shapes and pushing them through the instance transform.
+    Editing a master (move / recolour / reshape) therefore changes what every
+    instance resolves to, with no per-instance fix-up. Resolution is a pure,
+    deterministic function.
+  - A **Symbols panel** (right inspector): **Create from selection** turns the
+    selection into a master and replaces it in place with an identity instance;
+    **Place** drops more instances (cascaded so they fan out); **Update master**
+    redefines a symbol from the selection and every instance follows; per-symbol
+    **rename** / **delete** (delete cascades to its instances). A placed instance
+    can be selected (with a canvas selection ring), nudged / scaled / rotated
+    numerically about its centre, **Break link**-ed into editable shapes, or
+    deleted — each one a labelled undo step.
+  - Instances render on the canvas resolved against their masters, and are
+    **baked into SVG / PNG export** (`Document::flattened_for_export`) so output
+    matches the canvas. The `Affine` transform is now serializable so a
+    placement persists in `.contour`.
+  - **Guarded** by unit tests: define-from-N-shapes, two instances resolving
+    through their own transforms, master-edit propagation (geometry + colour) to
+    all instances, instance break / delete, symbol-delete cascade, dangling-
+    instance safety, id non-reuse, serde round-trip (incl. legacy / no-symbols),
+    and determinism.
+  - *Follow-ups (noted):* the symbol **sprayer / shifter / sizer** tool set, and
+    on-canvas direct drag/scale/rotate of an instance (today's instance edits are
+    driven from the panel's numeric buttons).
+
 - **Color system — Swatches, global colours & eyedropper.** A document colour
   palette you build from your artwork and click to paint, with Illustrator-style
   **global** swatches and an eyedropper:
