@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-13
+
 ### Added
 
 - **Image Trace.** A new `File ▸ Image Trace…` (and an `Object ▸ Image Trace`
@@ -1033,7 +1035,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Depend on the suite-level shared crate `prism-core` (was a `pigment-core` path
   dependency) for `Size`, `geometry::Rect`, and the sRGB↔linear color boundary.
 
-[Unreleased]: https://github.com/prism-suite/contour/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/prism-suite/contour/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/prism-suite/contour/releases/tag/v0.4.0
 [0.3.0]: https://github.com/prism-suite/contour/releases/tag/v0.3.0
 [0.2.0]: https://github.com/prism-suite/contour/releases/tag/v0.2.0
 [0.1.0]: https://github.com/prism-suite/contour/releases/tag/v0.1.0
