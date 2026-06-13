@@ -35,6 +35,8 @@ fn loads_legacy_document() {
     } else {
         panic!("expected Path");
     }
+    // A pre-live-shape document loads with every path as a plain (non-live) path.
+    assert_eq!(doc.shapes[1].live_shape(), None);
     // A pre-appearance document loads with no explicit stack on any shape.
     assert!(doc.shapes[0].appearance().is_none());
     assert!(doc.shapes[1].appearance().is_none());
@@ -145,6 +147,112 @@ fn blend_tags_round_trip() {
     let back: Document = serde_json::from_str(&json).unwrap();
     assert_eq!(back.shapes[0].blend(), Some(7));
     assert!(back.shapes[0].is_blend_step());
+}
+
+/// Build a live polygon / star `Shape::Path` centred at the origin (the form the
+/// Polygon / Star tools create). Mirrors `ContourApp::live_shape_at`.
+fn live_path(live: crate::liveshape::LiveShape) -> Shape {
+    let (points, handles) = live.outline((0.0, 0.0));
+    Shape::Path {
+        points,
+        closed: true,
+        fill: [0.0; 4],
+        fill_gradient: None,
+        stroke: [0.0, 0.0, 0.0, 1.0],
+        stroke_w: 1.0,
+        stroke_style: StrokeStyle::default(),
+        handles,
+        live: Some(live),
+        appearance: None,
+        visible: true,
+        group: None,
+        clip: None,
+        mask: false,
+        omask: None,
+        omask_path: false,
+        omask_invert: false,
+        blend: None,
+        blend_step: false,
+        name: None,
+        locked: false,
+        layer_color: None,
+    }
+}
+
+/// A live polygon / star's parameters round-trip through serde and keep the
+/// generated geometry; the layer label follows the live kind.
+#[test]
+fn live_shape_round_trips_and_labels() {
+    use crate::liveshape::LiveShape;
+    let doc = Document {
+        shapes: vec![
+            live_path(LiveShape::Polygon {
+                sides: 6,
+                radius: 50.0,
+            }),
+            live_path(LiveShape::Star {
+                points: 5,
+                radius: 40.0,
+                inner_ratio: 0.5,
+            }),
+        ],
+        ..Default::default()
+    };
+    assert_eq!(doc.shapes[0].label(), "Polygon");
+    assert_eq!(doc.shapes[1].label(), "Star");
+
+    let json = serde_json::to_string(&doc).unwrap();
+    let back: Document = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        back.shapes[0].live_shape(),
+        Some(LiveShape::Polygon {
+            sides: 6,
+            radius: 50.0
+        })
+    );
+    assert_eq!(
+        back.shapes[1].live_shape(),
+        Some(LiveShape::Star {
+            points: 5,
+            radius: 40.0,
+            inner_ratio: 0.5
+        })
+    );
+    // The polygon's six vertices survived serialization.
+    if let Shape::Path { points, .. } = &back.shapes[0] {
+        assert_eq!(points.len(), 6);
+    } else {
+        panic!("expected Path");
+    }
+}
+
+/// Editing a live shape's parameters regenerates its outline about the current
+/// centre (so a moved shape stays put), and directly editing an anchor demotes
+/// it to a plain path.
+#[test]
+fn live_shape_regenerates_and_demotes_on_anchor_edit() {
+    use crate::liveshape::LiveShape;
+    let mut s = live_path(LiveShape::Polygon {
+        sides: 4,
+        radius: 10.0,
+    });
+    // Move it, then bump the side count: the new outline keeps the moved centre.
+    s.translate(100.0, 0.0);
+    assert!(s.set_live_shape(LiveShape::Polygon {
+        sides: 8,
+        radius: 10.0,
+    }));
+    if let Shape::Path { points, .. } = &s {
+        assert_eq!(points.len(), 8, "regenerated to the new side count");
+        let cx = points.iter().map(|p| p.0).sum::<f32>() / points.len() as f32;
+        assert!((cx - 100.0).abs() < 1e-2, "centre stayed at the moved x");
+    } else {
+        panic!("expected Path");
+    }
+    // Directly editing an anchor drops the live parameters (it becomes a plain
+    // editable path, Illustrator-style).
+    assert!(s.set_anchor(0, 0, 5.0, 5.0));
+    assert_eq!(s.live_shape(), None);
 }
 
 /// A shape with no explicit `appearance` migrates its legacy single fill/stroke
@@ -670,6 +778,7 @@ fn delete_anchor_in_refuses_below_two_points() {
         stroke_style: StrokeStyle::default(),
         appearance: None,
         handles: vec![(0.0, 0.0); 2],
+        live: None,
         visible: true,
         group: None,
         clip: None,
@@ -699,6 +808,7 @@ fn open_path() -> Shape {
         stroke_style: StrokeStyle::default(),
         appearance: None,
         handles: vec![(0.0, 0.0); 3],
+        live: None,
         visible: true,
         group: None,
         clip: None,
@@ -955,6 +1065,7 @@ fn path_handles_transform_by_linear_part() {
         stroke_style: StrokeStyle::default(),
         appearance: None,
         handles: vec![(3.0, 4.0), (0.0, 0.0)],
+        live: None,
         visible: true,
         group: None,
         clip: None,

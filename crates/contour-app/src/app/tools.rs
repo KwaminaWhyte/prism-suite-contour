@@ -5,6 +5,7 @@
 use super::{AnchorRef, ContourApp, DsDrag, GuideDrag, PathEdit, PenDrag, Tool, TransformKind};
 use crate::canvas;
 use crate::document::{self, Guide, Shape};
+use crate::liveshape::LiveShape;
 use crate::snap::{self, SnapFeatures, SnapResult};
 use crate::transform::Handle;
 
@@ -321,7 +322,9 @@ impl ContourApp {
         match self.tool {
             Tool::Select => self.handle_select(response, doc_pos),
             Tool::DirectSelect => self.handle_direct_select(response, doc_pos),
-            Tool::Rect | Tool::Ellipse | Tool::Line => self.handle_create_drag(response, doc_pos),
+            Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Polygon | Tool::Star => {
+                self.handle_create_drag(response, doc_pos)
+            }
             Tool::Pen => self.handle_pen(response, doc_pos),
             Tool::Artboard => self.handle_artboard(response, doc_pos),
             Tool::Eyedropper => self.handle_eyedropper(response, doc_pos),
@@ -1328,7 +1331,62 @@ impl ContourApp {
                     layer_color: None,
                 })
             }
+            // Polygon / Star are drawn from the **centre** outward: the press
+            // point `a` is the centre and the drag distance to `b` is the outer
+            // radius. The parameters (sides / points / inner ratio) come from the
+            // remembered app defaults and are then editable in the inspector.
+            Tool::Polygon | Tool::Star => {
+                let radius = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+                if radius < 1.0 {
+                    return None;
+                }
+                let live = if self.tool == Tool::Polygon {
+                    LiveShape::Polygon {
+                        sides: self.poly_sides,
+                        radius,
+                    }
+                } else {
+                    LiveShape::Star {
+                        points: self.star_points,
+                        radius,
+                        inner_ratio: self.star_ratio,
+                    }
+                };
+                Some(self.live_shape_at(a, live))
+            }
             _ => None,
+        }
+    }
+
+    /// Build a closed [`Shape::Path`] for a freshly-created live shape (`live`)
+    /// centred at `center`, generating its outline and inheriting the current
+    /// paint defaults — the live-shape analogue of the `Rect`/`Ellipse` arms of
+    /// [`shape_from_drag`](Self::shape_from_drag).
+    fn live_shape_at(&self, center: (f32, f32), live: LiveShape) -> Shape {
+        let (points, handles) = live.outline(center);
+        Shape::Path {
+            points,
+            closed: true,
+            fill: self.fill,
+            fill_gradient: self.fill_gradient.clone(),
+            stroke: self.stroke,
+            stroke_w: self.stroke_w,
+            stroke_style: self.stroke_style.clone(),
+            handles,
+            live: Some(live),
+            appearance: None,
+            visible: true,
+            group: None,
+            clip: None,
+            mask: false,
+            omask: None,
+            omask_path: false,
+            omask_invert: false,
+            blend: None,
+            blend_step: false,
+            name: None,
+            locked: false,
+            layer_color: None,
         }
     }
 

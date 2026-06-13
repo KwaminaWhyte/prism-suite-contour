@@ -1498,6 +1498,7 @@ mod tests {
                     stroke_style: StrokeStyle::default(),
                     appearance: None,
                     handles: vec![(10.0, 0.0), (0.0, 0.0), (0.0, 0.0)],
+                    live: None,
                     visible: true,
                     group: None,
                     clip: None,

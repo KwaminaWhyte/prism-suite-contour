@@ -786,6 +786,8 @@ impl ContourApp {
                                 Tool::Rect,
                                 Tool::Ellipse,
                                 Tool::Line,
+                                Tool::Polygon,
+                                Tool::Star,
                                 Tool::Pen,
                                 Tool::Type,
                                 Tool::Eyedropper,
@@ -843,6 +845,17 @@ impl ContourApp {
                                 .default_open(true)
                                 .show(ui, |ui| {
                                     self.type_section(ui);
+                                });
+                        }
+
+                        // Live Shape section: only shown when a parametric
+                        // polygon / star is the primary selection. Editing a
+                        // count / radius / ratio regenerates its outline live.
+                        if self.primary_live_shape().is_some() {
+                            egui::CollapsingHeader::new("Live Shape")
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    self.live_shape_section(ui);
                                 });
                         }
 
@@ -1433,6 +1446,111 @@ impl ContourApp {
             self.primary().and_then(|i| self.doc.shapes.get(i)),
             Some(crate::document::Shape::Text { .. })
         )
+    }
+
+    /// The live-shape parameters of the primary selection, if it is a parametric
+    /// polygon / star (gates the Live Shape section).
+    fn primary_live_shape(&self) -> Option<crate::liveshape::LiveShape> {
+        self.primary()
+            .and_then(|i| self.doc.shapes.get(i))
+            .and_then(|s| s.live_shape())
+    }
+
+    /// The Live Shape inspector: edit the primary polygon / star's parameters
+    /// (sides / points, radius, inner ratio). Any change regenerates its outline
+    /// (via `set_live_shape`) as one undo step, like the Type section.
+    fn live_shape_section(&mut self, ui: &mut egui::Ui) {
+        use crate::liveshape::{LiveShape, MAX_SIDES, MIN_SIDES};
+        let Some(idx) = self.primary() else { return };
+        let Some(mut live) = self.primary_live_shape() else {
+            return;
+        };
+        let mut changed = false;
+
+        match &mut live {
+            LiveShape::Polygon { sides, radius } => {
+                ui.horizontal(|ui| {
+                    ui.label("Sides");
+                    if ui
+                        .add(egui::Slider::new(sides, MIN_SIDES..=MAX_SIDES))
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Radius");
+                    if ui
+                        .add(
+                            egui::DragValue::new(radius)
+                                .speed(0.5)
+                                .range(0.0..=f32::MAX)
+                                .suffix(" px"),
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                });
+            }
+            LiveShape::Star {
+                points,
+                radius,
+                inner_ratio,
+            } => {
+                ui.horizontal(|ui| {
+                    ui.label("Points");
+                    if ui
+                        .add(egui::Slider::new(points, MIN_SIDES..=MAX_SIDES))
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Radius");
+                    if ui
+                        .add(
+                            egui::DragValue::new(radius)
+                                .speed(0.5)
+                                .range(0.0..=f32::MAX)
+                                .suffix(" px"),
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Inner ratio");
+                    if ui
+                        .add(egui::Slider::new(inner_ratio, 0.05..=1.0).fixed_decimals(2))
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                });
+            }
+        }
+
+        if changed {
+            // Mirror the working defaults so the next new shape inherits them.
+            match live {
+                LiveShape::Polygon { sides, .. } => self.poly_sides = sides,
+                LiveShape::Star {
+                    points,
+                    inner_ratio,
+                    ..
+                } => {
+                    self.star_points = points;
+                    self.star_ratio = inner_ratio;
+                }
+            }
+            self.checkpoint();
+            if let Some(shape) = self.doc.shapes.get_mut(idx) {
+                shape.set_live_shape(live);
+            }
+        }
     }
 
     /// The Type inspector: edit the primary text object's string, font size, and

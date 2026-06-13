@@ -25,6 +25,7 @@ mod group;
 mod history;
 mod icons;
 mod layers;
+mod liveshape;
 mod opacity_mask;
 mod shapebuilder;
 mod snap;

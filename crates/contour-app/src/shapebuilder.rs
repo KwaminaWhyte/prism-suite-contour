@@ -357,6 +357,7 @@ fn region_to_shape_subpaths(subpaths: Vec<SubPath>, style: Option<&Shape>) -> Sh
             stroke_style,
             appearance,
             handles: sp.handles,
+            live: None,
             visible: true,
             group: None,
             clip: None,

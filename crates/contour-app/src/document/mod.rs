@@ -23,6 +23,7 @@ use crate::appearance::Appearance;
 use crate::artboard::{self, Artboard};
 use crate::gradient::Gradient;
 use crate::graphic_styles::GraphicStyles;
+use crate::liveshape::LiveShape;
 use crate::swatches::{self, Swatches};
 use crate::transform::Affine;
 use kurbo::Shape as KurboShape;
@@ -226,6 +227,14 @@ pub enum Shape {
         /// loads identically to the v0 model.
         #[serde(default)]
         handles: Vec<(f32, f32)>,
+        /// Optional **live-shape** parameters (polygon / star). When `Some`, the
+        /// `points` / `handles` above are *generated* from these parameters
+        /// (about the points' bounding-box centre) and the inspector edits the
+        /// count / radius / inner-ratio to regenerate them live, like text type's
+        /// `params` → `glyphs`. Additive (`#[serde(default)]` → `None`), so a
+        /// hand-drawn path and every older file load as a plain (non-live) path.
+        #[serde(default)]
+        live: Option<LiveShape>,
         #[serde(default)]
         appearance: Option<Appearance>,
         #[serde(default = "default_true")]
@@ -379,6 +388,9 @@ impl Shape {
             Shape::Rect { .. } => "Rectangle",
             Shape::Ellipse { .. } => "Ellipse",
             Shape::Line { .. } => "Line",
+            // A live polygon / star labels itself so the layer row reads
+            // "Polygon" / "Star" rather than the generic "Path".
+            Shape::Path { live: Some(ls), .. } => ls.label(),
             Shape::Path { .. } => "Path",
             Shape::Compound { .. } => "Compound Path",
             Shape::Text { .. } => "Type",
@@ -848,6 +860,76 @@ impl Shape {
         } = self
         {
             *glyphs = crate::text::layout(params, *origin).0;
+        }
+    }
+
+    /// The live-shape parameters (polygon / star), if this path is a live shape.
+    pub fn live_shape(&self) -> Option<LiveShape> {
+        match self {
+            Shape::Path { live, .. } => *live,
+            _ => None,
+        }
+    }
+
+    /// The centre about which a live shape regenerates: the centroid of its
+    /// current anchor points (stable under translation, so a moved polygon stays
+    /// put when an edit re-generates it). `None` if not a live path / no points.
+    fn live_center(&self) -> Option<(f32, f32)> {
+        if let Shape::Path {
+            points,
+            live: Some(_),
+            ..
+        } = self
+        {
+            if points.is_empty() {
+                return None;
+            }
+            let n = points.len() as f32;
+            let (sx, sy) = points
+                .iter()
+                .fold((0.0f32, 0.0f32), |(ax, ay), &(x, y)| (ax + x, ay + y));
+            Some((sx / n, sy / n))
+        } else {
+            None
+        }
+    }
+
+    /// Replace this path's live-shape parameters and regenerate its outline about
+    /// the current centre. No-op (returns `false`) on a non-live path. Editing a
+    /// count / radius / inner-ratio routes through here so the cached geometry
+    /// always matches the editable parameters (mirrors [`set_text_params`]).
+    ///
+    /// [`set_text_params`]: Self::set_text_params
+    pub fn set_live_shape(&mut self, new: LiveShape) -> bool {
+        let Some(center) = self.live_center() else {
+            return false;
+        };
+        if let Shape::Path {
+            points,
+            handles,
+            closed,
+            live,
+            ..
+        } = self
+        {
+            let (pts, hs) = new.outline(center);
+            *points = pts;
+            *handles = hs;
+            *closed = true;
+            *live = Some(new);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drop the live-shape parameters (if any), demoting a polygon / star to a
+    /// plain editable path. Called whenever an anchor / handle is edited directly,
+    /// since the hand-edited geometry no longer matches the parameters (this is
+    /// Illustrator's behaviour: reshaping a live shape's points expands it).
+    fn drop_live(&mut self) {
+        if let Shape::Path { live, .. } = self {
+            *live = None;
         }
     }
 
@@ -1378,6 +1460,9 @@ impl Shape {
             // keeps its full paint stack after clipping.
             appearance: self.appearance().cloned(),
             handles: vec![(0.0, 0.0); n],
+            // The outline replaces the geometry, so the result is a plain path
+            // (a clipped polygon / star is no longer parametric).
+            live: None,
             visible: self.visible(),
             group: self.group(),
             clip: None,
@@ -1449,6 +1534,7 @@ impl Shape {
                     stroke_style: stroke_style.clone(),
                     appearance: appearance.clone(),
                     handles,
+                    live: None,
                     visible: *visible,
                     group: *group,
                     clip: *clip,
@@ -1515,6 +1601,7 @@ impl Shape {
                     stroke_style: stroke_style.clone(),
                     appearance: appearance.clone(),
                     handles,
+                    live: None,
                     visible: *visible,
                     group: *group,
                     clip: *clip,
@@ -1558,6 +1645,7 @@ impl Shape {
                 stroke_style: stroke_style.clone(),
                 appearance: appearance.clone(),
                 handles: vec![(0.0, 0.0); 2],
+                live: None,
                 visible: *visible,
                 group: *group,
                 clip: *clip,
@@ -1577,6 +1665,7 @@ impl Shape {
     /// Insert an anchor into this path at segment `seg`, parameter `t`,
     /// preserving shape. No-op (returns `None`) on non-`Path` shapes.
     pub fn insert_anchor(&mut self, seg: usize, t: f32) -> Option<usize> {
+        self.drop_live();
         if let Shape::Path {
             points,
             closed,
@@ -1592,6 +1681,7 @@ impl Shape {
 
     /// Delete anchor `i` from this path (keeps ≥2 points). No-op on non-`Path`.
     pub fn delete_anchor(&mut self, i: usize) -> bool {
+        self.drop_live();
         if let Shape::Path {
             points, handles, ..
         } = self
@@ -1605,6 +1695,7 @@ impl Shape {
     /// Toggle anchor `i` smooth↔corner on this path. Returns the new smooth
     /// state (`true` = now smooth). No-op (returns `false`) on non-`Path`.
     pub fn toggle_anchor_smooth(&mut self, i: usize) -> bool {
+        self.drop_live();
         if let Shape::Path {
             points,
             closed,
@@ -1680,6 +1771,7 @@ impl Shape {
 
     /// Move anchor `a` of sub-contour `c` to `(x, y)`. Returns `true` on success.
     pub fn set_anchor(&mut self, c: usize, a: usize, x: f32, y: f32) -> bool {
+        self.drop_live();
         if let Some((points, _, _)) = self.contour_mut(c) {
             if let Some(p) = points.get_mut(a) {
                 *p = (x, y);
@@ -1692,6 +1784,7 @@ impl Shape {
     /// Set the out-tangent handle of anchor `a` of sub-contour `c` so its out-knob
     /// sits at `(x, y)` (the in-knob mirrors). Returns `true` on success.
     pub fn set_handle(&mut self, c: usize, a: usize, x: f32, y: f32) -> bool {
+        self.drop_live();
         if let Some((points, handles, _)) = self.contour_mut(c) {
             if let (Some(&(ax, ay)), Some(h)) = (points.get(a), handles.get_mut(a)) {
                 *h = (x - ax, y - ay);
@@ -1704,6 +1797,7 @@ impl Shape {
     /// Insert an anchor into sub-contour `c` at segment `seg`, parameter `t`.
     pub fn insert_anchor_in(&mut self, c: usize, seg: usize, t: f32) -> Option<usize> {
         let closed = self.contour(c)?.2;
+        self.drop_live();
         if let Some((points, handles, _)) = self.contour_mut(c) {
             path::insert_anchor(points, handles, closed, seg, t)
         } else {
@@ -1713,6 +1807,7 @@ impl Shape {
 
     /// Delete anchor `a` from sub-contour `c` (keeps ≥2 points). `true` on remove.
     pub fn delete_anchor_in(&mut self, c: usize, a: usize) -> bool {
+        self.drop_live();
         if let Some((points, handles, _)) = self.contour_mut(c) {
             path::delete_anchor(points, handles, a)
         } else {
@@ -1729,6 +1824,7 @@ impl Shape {
             Some((_, handles, closed)) => (closed, path::is_corner(handles, a)),
             None => return false,
         };
+        self.drop_live();
         if let Some((points, handles, _)) = self.contour_mut(c) {
             if was_corner {
                 // Corner → smooth needs the neighbour points; snapshot them so the

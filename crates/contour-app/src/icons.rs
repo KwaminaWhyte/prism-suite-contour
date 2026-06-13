@@ -41,6 +41,10 @@ pub const RECT: &str = ph::SQUARE;
 pub const ELLIPSE: &str = ph::CIRCLE;
 /// Line tool.
 pub const LINE: &str = ph::LINE_SEGMENT;
+/// Polygon tool (parametric N-gon live shape).
+pub const POLYGON: &str = ph::POLYGON;
+/// Star tool (parametric N-point star live shape).
+pub const STAR: &str = ph::STAR;
 /// Pen / bezier path tool.
 pub const PEN: &str = ph::PEN_NIB;
 /// Artboard tool (create / move / resize artboards).

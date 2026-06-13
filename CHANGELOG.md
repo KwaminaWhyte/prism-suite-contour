@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Live shapes — Polygon & Star.** Two new creation tools draw parametric
+  primitives that stay editable after the fact, the suite's first live shapes:
+  - **Polygon** and **Star** tools in the toolbar (and the `polygon` / `star`
+    icons). Each draws from the **centre** outward — the press point is the
+    centre and the drag distance sets the outer radius — with a live rubber-band
+    preview, like the Rectangle / Ellipse tools.
+  - A new pure, headless-testable `liveshape` module generates the closed outline
+    from a small parameter set: a **Polygon** is `sides` vertices (3–100) on a
+    circle of `radius`; a **Star** is `points` tips (3–100) on `radius`
+    alternating with inner vertices on `radius × inner_ratio` (0.05–1.0).
+    Vertices are emitted clockwise from 12 o'clock; counts / radii are clamped so
+    even a hand-edited file yields a valid closed ring.
+  - The parameters ride on the existing `Shape::Path` in a new additive
+    `live: Option<LiveShape>` field (`#[serde(default)]` → `None`), so the
+    generated `points` / `handles` render, hit-test, boolean-op, and export
+    exactly like any other path with no special cases, and **pre-existing
+    `.contour` files load and round-trip unchanged** as plain (non-live) paths.
+  - A **Live Shape** inspector section (shown only for a selected polygon / star)
+    edits the sides / points, radius, and inner ratio; each change regenerates
+    the outline about the shape's current centre — so a *moved* shape stays put —
+    as one undo step (the same cache-from-params idea point type uses for its
+    glyph cache). The last-used counts / ratio are remembered for the next draw,
+    and the layer row labels the object **Polygon** / **Star**.
+  - **Illustrator-style demotion:** directly editing an anchor or handle (move /
+    add / delete / smooth-corner toggle) drops the live parameters, expanding the
+    shape into a plain editable path so the geometry and parameters never drift
+    apart.
+  - **Guarded** by unit tests for the pure geometry (per-side vertex count, all
+    vertices on the radius, first vertex straight up, linear radius scaling, star
+    outer/inner alternation, `inner_ratio == 1.0` degenerating to a polygon,
+    count clamping, determinism, centre translation) plus document tests for
+    serde round-trip, the layer label, regeneration about a moved centre, and
+    anchor-edit demotion.
+
 ## [0.3.0] - 2026-06-13
 
 ### Added

@@ -268,6 +268,7 @@ fn ring_to_path(ring: Vec<(f32, f32)>, style: &Shape, fill_override: Option<[f32
             style.appearance().cloned()
         },
         handles: Vec::new(),
+        live: None,
         visible: true,
         group: None,
         clip: None,

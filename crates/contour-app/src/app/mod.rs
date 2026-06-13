@@ -28,6 +28,12 @@ enum Tool {
     Rect,
     Ellipse,
     Line,
+    /// Drag from the centre to create a parametric **polygon** (a live shape);
+    /// the inspector then edits its sides & radius.
+    Polygon,
+    /// Drag from the centre to create a parametric **star** (a live shape); the
+    /// inspector then edits its points, radius & inner ratio.
+    Star,
     Pen,
     /// Create / move / resize artboards (Illustrator's Artboard tool).
     Artboard,
@@ -50,6 +56,8 @@ impl Tool {
             Tool::Rect => icons::RECT,
             Tool::Ellipse => icons::ELLIPSE,
             Tool::Line => icons::LINE,
+            Tool::Polygon => icons::POLYGON,
+            Tool::Star => icons::STAR,
             Tool::Pen => icons::PEN,
             Tool::Artboard => icons::ARTBOARD,
             Tool::Eyedropper => icons::EYEDROPPER,
@@ -64,6 +72,8 @@ impl Tool {
             Tool::Rect => "Rectangle",
             Tool::Ellipse => "Ellipse",
             Tool::Line => "Line",
+            Tool::Polygon => "Polygon",
+            Tool::Star => "Star",
             Tool::Pen => "Pen",
             Tool::Artboard => "Artboard",
             Tool::Eyedropper => "Eyedropper (I)",
@@ -303,6 +313,13 @@ pub struct ContourApp {
     /// Current stroke attributes (caps/joins/dashes) applied to new shapes and
     /// to the selected shape via the inspector's Stroke section.
     stroke_style: StrokeStyle,
+    /// Side count a new **polygon** live shape is created with (remembered between
+    /// draws, like Illustrator's last-used polygon settings).
+    poly_sides: u32,
+    /// Point count a new **star** live shape is created with.
+    star_points: u32,
+    /// Inner/outer radius ratio a new **star** live shape is created with.
+    star_ratio: f32,
     /// Reference frame the Align operations measure against (selection bounds or
     /// the active artboard rectangle).
     align_to: AlignTo,
@@ -378,6 +395,9 @@ impl ContourApp {
             stroke: [0.10, 0.12, 0.15, 1.0],
             stroke_w: 2.0,
             stroke_style: StrokeStyle::default(),
+            poly_sides: 6,
+            star_points: 5,
+            star_ratio: 0.5,
             align_to: AlignTo::Selection,
             transform_angle: 45.0,
             numeric: crate::transform::NumericTransform::default(),
