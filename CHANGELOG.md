@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Path editing — Simplify & Offset Path.** Two new commands under a new
+  **`Object ▸ Path`** menu act on the selected shape as one undo step:
+  - **Simplify** reduces a path's anchor count while preserving its shape:
+    it flattens the outline (honouring bezier handles) and runs a
+    **Douglas–Peucker** line-reduction at an adjustable **Tolerance** (document
+    units; higher drops more anchors). Endpoints are always kept, a closed path
+    stays closed (never collapsing below 3 anchors, open below 2), and re-running
+    on an already-minimal path is a no-op.
+  - **Offset Path** produces a new contour offset by a signed **Offset** distance
+    from the flattened source, using **miter joins** (angle-bisector offset with a
+    miter clamp): positive grows a closed path outward, negative shrinks it
+    inward (winding-independent), and an open path shifts to one side. Offset by 0
+    is the identity.
+  - Both live in a new pure, headless-testable **`pathedit`** module
+    (`simplify` / `offset_path`, input points → output points). The UI demotes
+    the selected shape to a plain corner path first (`Shape::to_path`, preserving
+    paint / group / membership tags and dropping any `live` parametric params,
+    consistent with the existing live-shape→path demotion); a **Compound** path is
+    simplified / offset per sub-contour and stays a compound. No `.contour` model
+    change.
+  - **Guarded** by unit tests: Simplify drops redundant collinear anchors while
+    keeping endpoints + genuine corners, is idempotent on a minimal path, honours
+    the closed-ring floor, and is deterministic; Offset grows the bbox / area on
+    `+d`, shrinks on `−d`, is identity at `0`, grows outward regardless of
+    winding, is an exact miter on a right angle, and is deterministic.
 - **Live shapes — Polygon & Star.** Two new creation tools draw parametric
   primitives that stay editable after the fact, the suite's first live shapes:
   - **Polygon** and **Star** tools in the toolbar (and the `polygon` / `star`

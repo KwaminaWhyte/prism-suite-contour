@@ -27,6 +27,7 @@ mod icons;
 mod layers;
 mod liveshape;
 mod opacity_mask;
+mod pathedit;
 mod shapebuilder;
 mod snap;
 mod stroke;

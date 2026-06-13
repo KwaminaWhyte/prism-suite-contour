@@ -180,3 +180,11 @@ pub const MERGE: &str = ph::STACK;
 pub const CROP: &str = ph::FRAME_CORNERS;
 /// Outline the combined boundary as strokes.
 pub const OUTLINE: &str = ph::BEZIER_CURVE;
+
+// --- Path editing (Object ▸ Path) ----------------------------------------
+/// The `Object ▸ Path` submenu.
+pub const PATH: &str = ph::PATH;
+/// Reduce anchor count (Douglas–Peucker).
+pub const SIMPLIFY: &str = ph::SCRIBBLE;
+/// Offset path inward / outward.
+pub const OFFSET_PATH: &str = ph::ARROWS_OUT;

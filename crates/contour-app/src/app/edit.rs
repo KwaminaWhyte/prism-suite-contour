@@ -533,6 +533,136 @@ impl ContourApp {
         self.status = "Expanded blend".into();
     }
 
+    // --- Path editing (Simplify / Offset Path) -------------------------------
+
+    /// Whether Simplify / Offset Path can act on the current selection: a single
+    /// outline shape is primary. The op demotes the shape to a plain path first
+    /// (Text → glyph compound), so any shape with geometry qualifies.
+    pub(super) fn can_edit_path(&self) -> bool {
+        self.primary()
+            .and_then(|i| self.doc.shapes.get(i))
+            .is_some()
+    }
+
+    /// **Simplify** the selected path: flatten its outline, run Douglas–Peucker
+    /// anchor reduction at `self.simplify_tol`, and write the result back as a
+    /// plain corner path (dropping any `live` parametric params). One undo step.
+    pub(super) fn simplify_selected(&mut self) {
+        let tol = self.simplify_tol;
+        let applied = self.apply_path_geometry(|pts, closed| crate::pathedit::simplify(pts, closed, tol));
+        if let Some(n) = applied {
+            self.status = format!("Simplified to {n} anchor{}", if n == 1 { "" } else { "s" });
+        } else {
+            self.status = "Simplify: select a path".into();
+        }
+    }
+
+    /// **Offset Path** on the selected path: flatten its outline, offset it by
+    /// the signed `self.offset_dist` (miter joins; + grows a closed path, −
+    /// shrinks it), and write the result back as a plain corner path. One undo
+    /// step.
+    pub(super) fn offset_selected(&mut self) {
+        let dist = self.offset_dist;
+        let applied =
+            self.apply_path_geometry(|pts, closed| crate::pathedit::offset_path(pts, closed, dist));
+        if applied.is_some() {
+            self.status = format!("Offset path by {dist:.1}");
+        } else {
+            self.status = "Offset Path: select a path".into();
+        }
+    }
+
+    /// Demote the primary-selected shape to a plain [`Shape::Path`] (via
+    /// [`Shape::to_path`], preserving paint / group / membership tags), flatten
+    /// its outline to a polyline, run `op` on it, and store the result back as a
+    /// corner path with no `live` params. Returns the resulting anchor count, or
+    /// `None` when nothing suitable is selected / the result is degenerate. One
+    /// undo step (checkpoint taken only when an edit is actually applied).
+    ///
+    /// A `Compound` is offset / simplified per sub-contour, keeping it a compound.
+    fn apply_path_geometry(
+        &mut self,
+        op: impl Fn(&[(f32, f32)], bool) -> Vec<(f32, f32)>,
+    ) -> Option<usize> {
+        let i = self.primary()?;
+        let src = self.doc.shapes.get(i)?.clone();
+        // A bare Line / open-ended primitive still demotes to a path; Text
+        // demotes to a compound of glyph outlines.
+        let demoted = src.to_path();
+
+        match demoted {
+            Shape::Path { .. } => {
+                let (pts, handles, closed) = match &demoted {
+                    Shape::Path {
+                        points,
+                        handles,
+                        closed,
+                        ..
+                    } => (points.clone(), handles.clone(), *closed),
+                    _ => unreachable!(),
+                };
+                let flat = crate::document::flatten(&pts, &handles, closed);
+                if flat.len() < 2 {
+                    return None;
+                }
+                let out = op(&flat, closed);
+                let min = if closed { 3 } else { 2 };
+                if out.len() < min {
+                    return None;
+                }
+                let count = out.len();
+                self.checkpoint();
+                let mut shape = demoted;
+                if let Shape::Path {
+                    points,
+                    handles,
+                    live,
+                    ..
+                } = &mut shape
+                {
+                    let n = out.len();
+                    *points = out;
+                    *handles = vec![(0.0, 0.0); n];
+                    *live = None;
+                }
+                self.doc.shapes[i] = shape;
+                self.select_only(Some(i));
+                Some(count)
+            }
+            mut shape @ Shape::Compound { .. } => {
+                let Shape::Compound { subpaths, .. } = &mut shape else {
+                    unreachable!()
+                };
+                let mut total = 0usize;
+                let mut any = false;
+                for sp in subpaths.iter_mut() {
+                    let flat = sp.flatten();
+                    if flat.len() < 2 {
+                        continue;
+                    }
+                    let out = op(&flat, sp.closed);
+                    let min = if sp.closed { 3 } else { 2 };
+                    if out.len() < min {
+                        continue;
+                    }
+                    let n = out.len();
+                    sp.points = out;
+                    sp.handles = vec![(0.0, 0.0); n];
+                    total += n;
+                    any = true;
+                }
+                if !any {
+                    return None;
+                }
+                self.checkpoint();
+                self.doc.shapes[i] = shape;
+                self.select_only(Some(i));
+                Some(total)
+            }
+            _ => None,
+        }
+    }
+
     // --- Compound paths ------------------------------------------------------
 
     /// Whether the selection can be made into a compound path: at least two

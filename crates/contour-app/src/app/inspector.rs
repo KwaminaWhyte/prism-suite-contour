@@ -198,6 +198,53 @@ impl ContourApp {
                         });
                     });
 
+                    ui.menu_button(format!("{}  Path", icons::PATH), |ui| {
+                        let can = self.can_edit_path();
+                        // Simplify: tolerance + apply.
+                        ui.add_enabled_ui(can, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("Tolerance");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.simplify_tol)
+                                        .speed(0.1)
+                                        .range(0.0..=200.0)
+                                        .suffix(" px"),
+                                )
+                                .on_hover_text("Higher = fewer anchors");
+                            });
+                            if ui
+                                .button(format!("{}  Simplify", icons::SIMPLIFY))
+                                .on_hover_text("Reduce anchor count, preserving the shape")
+                                .clicked()
+                            {
+                                self.simplify_selected();
+                                ui.close_menu();
+                            }
+                        });
+                        ui.separator();
+                        // Offset Path: signed distance + apply.
+                        ui.add_enabled_ui(can, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("Offset");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.offset_dist)
+                                        .speed(0.2)
+                                        .range(-1000.0..=1000.0)
+                                        .suffix(" px"),
+                                )
+                                .on_hover_text("Positive grows outward, negative inward");
+                            });
+                            if ui
+                                .button(format!("{}  Offset Path", icons::OFFSET_PATH))
+                                .on_hover_text("Offset the path by the signed distance (miter joins)")
+                                .clicked()
+                            {
+                                self.offset_selected();
+                                ui.close_menu();
+                            }
+                        });
+                    });
+
                     ui.menu_button(format!("{}  Type", icons::TYPE), |ui| {
                         ui.add_enabled_ui(self.has_text_selected(), |ui| {
                             if ui
