@@ -273,6 +273,79 @@ impl ShapeGeometry {
     }
 }
 
+/// Paint a [`crate::placed_image::PlacedImage`] on the canvas: upload its RGBA
+/// pixels as a texture and draw it over the image's four transformed corners as a
+/// textured quad (so position / scale / rotation all show). When the image has a
+/// **clipping mask**, the draw is clipped to the clip path's bounding rectangle
+/// (the canvas preview of the clip — the exact per-pixel clip test lives in
+/// [`crate::placed_image::PlacedImage::clip_contains`] and drives hit-testing /
+/// export). A selected image gets a ring around its quad.
+///
+/// `pixels` is the resolved `(width, height, rgba8)` — embedded bytes or the
+/// linked file's cached pixels. A degenerate (empty) image is skipped.
+pub fn paint_placed_image(
+    painter: &egui::Painter,
+    view: &View,
+    img: &crate::placed_image::PlacedImage,
+    pixels: (u32, u32, &[u8]),
+    selected: bool,
+) {
+    let (w, h, rgba) = pixels;
+    if w == 0 || h == 0 || rgba.len() != (w as usize * h as usize * 4) {
+        return;
+    }
+    let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba);
+    let tex = painter
+        .ctx()
+        .load_texture("contour-placed-image", image, egui::TextureOptions::LINEAR);
+
+    // The four image corners (TL, TR, BR, BL) mapped to screen.
+    let c = img.corners();
+    let screen: Vec<Pos2> = c.iter().map(|&p| view.doc_to_screen(p)).collect();
+
+    // Build a two-triangle textured mesh over the quad. UVs match the corner
+    // order so the texture maps the right way up under any rotation.
+    let mut mesh = Mesh::with_texture(tex.id());
+    let uv = [
+        egui::pos2(0.0, 0.0),
+        egui::pos2(1.0, 0.0),
+        egui::pos2(1.0, 1.0),
+        egui::pos2(0.0, 1.0),
+    ];
+    for (p, u) in screen.iter().zip(uv) {
+        mesh.vertices.push(Vertex {
+            pos: *p,
+            uv: u,
+            color: Color32::WHITE,
+        });
+    }
+    mesh.indices.extend([0, 1, 2, 0, 2, 3]);
+
+    // Clip the preview to the effective clip bounds (image ∩ clip path) when a
+    // clipping mask is set, so the preview never exceeds the masked region.
+    if img.clip.is_some() {
+        // A clip with no overlap (`clip_bounds` → None) excludes the image
+        // entirely, so nothing is drawn.
+        if let Some(cb) = img.clip_bounds() {
+            let min = view.doc_to_screen((cb.x, cb.y));
+            let max = view.doc_to_screen((cb.x + cb.w, cb.y + cb.h));
+            let clipped = painter.with_clip_rect(Rect::from_min_max(min, max));
+            clipped.add(egui::Shape::Mesh(mesh.into()));
+        }
+    } else {
+        painter.add(egui::Shape::Mesh(mesh.into()));
+    }
+
+    if selected {
+        let mut ring: Vec<Pos2> = screen.clone();
+        ring.push(screen[0]);
+        painter.add(egui::Shape::line(
+            ring,
+            Stroke::new(1.5, theme::accent()),
+        ));
+    }
+}
+
 /// Paint one shape using the painter, transforming document coords to screen.
 ///
 /// Walks the shape's *effective* [`Appearance`] stack — its explicit stack if it

@@ -403,6 +403,62 @@ fn guides_round_trip() {
     );
 }
 
+/// Placed images carried on the document round-trip through serde, and a fresh
+/// document has none.
+#[test]
+fn placed_images_round_trip_on_document() {
+    use crate::placed_image::{ImageSource, PlacedImage};
+    let doc = Document::new();
+    assert!(doc.placed_images.is_empty(), "fresh document places no images");
+
+    let mut doc = Document::new();
+    let id = doc.placed_images.place(
+        "logo",
+        ImageSource::Embedded {
+            width: 2,
+            height: 2,
+            rgba: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        },
+        10.0,
+        20.0,
+    );
+    doc.placed_images
+        .get_mut(id)
+        .unwrap()
+        .set_clip(vec![(0.0, 0.0), (5.0, 0.0), (5.0, 5.0)]);
+    doc.placed_images.list.push(PlacedImage::new(
+        9,
+        "linked",
+        ImageSource::Linked {
+            path: std::path::PathBuf::from("/tmp/a.png"),
+            width: 4,
+            height: 3,
+        },
+        1.0,
+        2.0,
+    ));
+    let json = serde_json::to_string(&doc).unwrap();
+    let back: Document = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.placed_images.len(), 2);
+    assert!(back.placed_images.get(id).unwrap().clip.is_some());
+    assert_eq!(
+        back.placed_images.list[1].source.natural_size(),
+        (4, 3),
+        "linked natural size preserved"
+    );
+}
+
+/// A pre-Place `.contour` (JSON missing the `placed_images` key) loads with an
+/// empty placed-image collection — the additive default.
+#[test]
+fn legacy_document_loads_without_placed_images() {
+    // A minimal legacy document: just a shapes list (the other fields are all
+    // `#[serde(default)]`).
+    let json = r#"{ "shapes": [] }"#;
+    let doc: Document = serde_json::from_str(json).unwrap();
+    assert!(doc.placed_images.is_empty());
+}
+
 /// A fresh document has exactly one default artboard, active.
 #[test]
 fn fresh_document_has_one_default_artboard() {

@@ -153,6 +153,25 @@ impl ContourApp {
                     }
                 }
             }
+            // Placed / linked raster images, drawn over the shapes and symbol
+            // instances. Each resolves its pixels (embedded bytes or a linked
+            // file's cached pixels); a clipped image is clipped to its clip-path
+            // bounds; the selected image gets a ring.
+            for img in &self.doc.placed_images.list {
+                if !img.visible {
+                    continue;
+                }
+                if let Some((w, h, px)) = self.image_pixels_for(img) {
+                    let selected = self.selected_image == Some(img.id);
+                    canvas::paint_placed_image(
+                        &painter,
+                        &self.view,
+                        img,
+                        (w, h, &px),
+                        selected,
+                    );
+                }
+            }
             // Selection rings + a dashed outline for selected mask paths, drawn
             // from the original (pre-clip) shapes.
             for (i, s) in self.doc.shapes.iter().enumerate() {
@@ -738,6 +757,26 @@ impl ContourApp {
                     .rev()
                     .find(|(_, s)| s.selectable() && s.hit(x, y, tol))
                     .map(|(i, _)| i);
+                // A placed image sits over the shapes; pick the topmost hit one
+                // (clearing any shape selection) so it can be selected / clipped.
+                let img_hit = self
+                    .doc
+                    .placed_images
+                    .list
+                    .iter()
+                    .rev()
+                    .find(|p| p.selectable() && p.hit(x, y))
+                    .map(|p| p.id);
+                if hit.is_none() {
+                    if let Some(id) = img_hit {
+                        self.selected_image = Some(id);
+                        self.selected_instance = None;
+                        self.select_only(None);
+                        return;
+                    }
+                }
+                // Clicking a shape (or empty canvas) drops any image selection.
+                self.selected_image = None;
                 let shift = response.ctx.input(|inp| inp.modifiers.shift);
                 if shift {
                     // Shift-click toggles the hit shape (and its group) in the

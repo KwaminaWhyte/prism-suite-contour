@@ -24,6 +24,7 @@ use crate::artboard::{self, Artboard};
 use crate::gradient::Gradient;
 use crate::graphic_styles::GraphicStyles;
 use crate::liveshape::LiveShape;
+use crate::placed_image::PlacedImages;
 use crate::swatches::{self, Swatches};
 use crate::symbols::Symbols;
 use crate::transform::Affine;
@@ -2015,6 +2016,13 @@ pub struct Document {
     /// loads with an empty library; saved symbols round-trip through serde.
     #[serde(default)]
     pub symbols: Symbols,
+    /// The document's **placed / linked raster images** (the *Place Image*
+    /// model): each carries its pixel source (embedded bytes or a disk link), a
+    /// placement transform, and an optional clipping path, drawn over the plain
+    /// shapes. Additive (`#[serde(default)]`), so a pre-Place `.contour` file
+    /// loads with none; saved placed images round-trip through serde.
+    #[serde(default)]
+    pub placed_images: PlacedImages,
 }
 
 impl Default for Document {
@@ -2027,6 +2035,7 @@ impl Default for Document {
             swatches: Swatches::default(),
             graphic_styles: GraphicStyles::default(),
             symbols: Symbols::default(),
+            placed_images: PlacedImages::default(),
         }
     }
 }

@@ -400,6 +400,15 @@ pub struct ContourApp {
     /// and the user's working remap). Transient UI state, not persisted; the
     /// dialog is closed (`open: false`) until opened from the Object menu.
     recolor: crate::recolor::RecolorState,
+    /// The placed image currently selected (the *Place Image* element), addressed
+    /// by its stable id. Drives the placed-image inspector + clip / relink / move
+    /// actions. `None` when none selected. Transient UI state, not persisted.
+    selected_image: Option<u64>,
+    /// Runtime pixel cache for **linked** placed images: id → (w, h, RGBA8). A
+    /// linked image's pixels are re-read from disk on relink/refresh and cached
+    /// here so the canvas does not touch the disk every frame. Embedded images
+    /// carry their own bytes and are not cached here. Transient, not persisted.
+    image_pixels: std::collections::HashMap<u64, (u32, u32, std::sync::Arc<Vec<u8>>)>,
 }
 
 impl ContourApp {
@@ -446,6 +455,8 @@ impl ContourApp {
             collapsed_layers: Vec::new(),
             editing_text: None,
             recolor: crate::recolor::RecolorState::default(),
+            selected_image: None,
+            image_pixels: std::collections::HashMap::new(),
         }
     }
 
@@ -463,6 +474,8 @@ impl ContourApp {
         self.collapsed_layers.clear();
         self.editing_text = None;
         self.recolor = crate::recolor::RecolorState::default();
+        self.selected_image = None;
+        self.image_pixels.clear();
     }
 }
 
@@ -685,6 +698,9 @@ impl eframe::App for ContourApp {
         if self.workspace.visible(crate::workspace::Panel::StatusBar) {
             self.status_bar(root);
         }
+        // Resolve any linked placed images' pixels into the cache before paint so
+        // the canvas never touches the disk inside the render loop.
+        self.ensure_image_pixels();
         self.central_canvas(root);
         // The Recolor Artwork dialog floats over the canvas while open.
         self.recolor_dialog(&ctx);

@@ -28,6 +28,7 @@ mod layers;
 mod liveshape;
 mod opacity_mask;
 mod pathedit;
+mod placed_image;
 mod recolor;
 mod shapebuilder;
 mod snap;

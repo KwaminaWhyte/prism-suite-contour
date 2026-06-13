@@ -1402,6 +1402,8 @@ impl ContourApp {
                         self.doc = doc;
                         self.history = crate::history::History::default();
                         self.selection.clear();
+                        self.selected_image = None;
+                        self.image_pixels.clear();
                         log::info!("opened {}", path.display());
                     }
                     Err(e) => log::error!("parse failed: {e}"),
@@ -1460,6 +1462,243 @@ impl ContourApp {
             "Image Trace ({}): {count} path(s)",
             self.trace_cfg.mode.label()
         );
+    }
+
+    /// `File ▸ Place Image…`: pick a raster image and place it into the document
+    /// as a [`crate::placed_image::PlacedImage`] with its top-left at the centre
+    /// of the active artboard. When `embed` is set the decoded pixels are stored
+    /// in the document (self-contained); otherwise the image is **linked** (only
+    /// the path is stored and the pixels are re-read from disk). One undo step.
+    pub(super) fn place_image_dialog(&mut self, embed: bool) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Image", &["png", "jpg", "jpeg", "bmp", "gif"])
+            .pick_file()
+        else {
+            return;
+        };
+        let img = match image::open(&path) {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => {
+                self.status = format!("Place Image: could not load image ({e})");
+                log::error!("place image load failed: {e}");
+                return;
+            }
+        };
+        let (w, h) = (img.width(), img.height());
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Image")
+            .to_string();
+        // Position the image so it sits centred on the active artboard.
+        let (x, y) = match self.doc.active_artboard() {
+            Some(ab) => (
+                ab.rect[0] + (ab.rect[2] - w as f32) * 0.5,
+                ab.rect[1] + (ab.rect[3] - h as f32) * 0.5,
+            ),
+            None => (0.0, 0.0),
+        };
+        // Keep the decoded pixels to seed the linked cache (so a link renders
+        // immediately) before they are moved into an embedded source.
+        let raw = img.into_raw();
+        let source = if embed {
+            crate::placed_image::ImageSource::Embedded {
+                width: w,
+                height: h,
+                rgba: raw.clone(),
+            }
+        } else {
+            crate::placed_image::ImageSource::Linked {
+                path: path.clone(),
+                width: w,
+                height: h,
+            }
+        };
+        self.checkpoint();
+        let id = self.doc.placed_images.place(&name, source, x, y);
+        if !embed {
+            // Seed the runtime cache so the link renders without a refresh.
+            self.image_pixels
+                .insert(id, (w, h, std::sync::Arc::new(raw)));
+        }
+        self.selected_image = Some(id);
+        self.selection.clear();
+        self.selected_instance = None;
+        self.status = format!(
+            "Placed image \"{name}\" ({})",
+            if embed { "embedded" } else { "linked" }
+        );
+    }
+
+    /// Ensure every **linked** placed image has its pixels in the runtime cache,
+    /// reading any missing one from its file. Embedded images carry their own
+    /// bytes and are skipped. Called once per frame before the canvas paints so
+    /// the render loop never touches the disk. A read failure is logged and the
+    /// image simply isn't drawn that frame.
+    pub(super) fn ensure_image_pixels(&mut self) {
+        for img in &self.doc.placed_images.list {
+            let crate::placed_image::ImageSource::Linked { path, .. } = &img.source else {
+                continue;
+            };
+            if self.image_pixels.contains_key(&img.id) {
+                continue;
+            }
+            match image::open(path) {
+                Ok(decoded) => {
+                    let r = decoded.to_rgba8();
+                    let (w, h) = (r.width(), r.height());
+                    self.image_pixels
+                        .insert(img.id, (w, h, std::sync::Arc::new(r.into_raw())));
+                }
+                Err(e) => log::warn!("linked image {} unreadable: {e}", path.display()),
+            }
+        }
+    }
+
+    /// Resolve a placed image's drawable pixels: embedded bytes, or the linked
+    /// file's cached pixels. `None` when a linked image has not been (re-)read.
+    pub(super) fn image_pixels_for(
+        &self,
+        img: &crate::placed_image::PlacedImage,
+    ) -> Option<(u32, u32, std::sync::Arc<Vec<u8>>)> {
+        match &img.source {
+            crate::placed_image::ImageSource::Embedded {
+                width,
+                height,
+                rgba,
+            } => Some((*width, *height, std::sync::Arc::new(rgba.clone()))),
+            crate::placed_image::ImageSource::Linked { .. } => {
+                self.image_pixels.get(&img.id).cloned()
+            }
+        }
+    }
+
+    /// **Relink / refresh** the selected linked image: drop its cached pixels and
+    /// re-read its natural size from disk, so an edited source file updates. No-op
+    /// for an embedded image or with nothing selected. One undo step.
+    pub(super) fn relink_selected_image(&mut self) {
+        let Some(id) = self.selected_image else {
+            return;
+        };
+        let path = match self.doc.placed_images.get(id).map(|i| &i.source) {
+            Some(crate::placed_image::ImageSource::Linked { path, .. }) => path.clone(),
+            _ => {
+                self.status = "Relink: selected image is embedded".into();
+                return;
+            }
+        };
+        match image::open(&path) {
+            Ok(decoded) => {
+                let r = decoded.to_rgba8();
+                let (w, h) = (r.width(), r.height());
+                self.checkpoint();
+                if let Some(img) = self.doc.placed_images.get_mut(id) {
+                    if let crate::placed_image::ImageSource::Linked { width, height, .. } =
+                        &mut img.source
+                    {
+                        *width = w;
+                        *height = h;
+                    }
+                }
+                self.image_pixels
+                    .insert(id, (w, h, std::sync::Arc::new(r.into_raw())));
+                self.status = "Refreshed linked image".into();
+            }
+            Err(e) => {
+                self.status = format!("Relink failed: {e}");
+            }
+        }
+    }
+
+    /// **Make clipping mask** from the selected image + the selected path: the
+    /// topmost selected shape's outer contour becomes the image's clip, bounding
+    /// where the image draws. The mask shape is consumed (removed from the
+    /// document) the way Illustrator's clip absorbs the masking path. One undo
+    /// step. No-op without both a selected image and a selectable path.
+    pub(super) fn clip_selected_image(&mut self) {
+        let Some(id) = self.selected_image else {
+            self.status = "Make clipping mask: select a placed image first".into();
+            return;
+        };
+        // Use the topmost selected shape as the masking path.
+        let Some(&shape_idx) = self.selection.iter().max() else {
+            self.status = "Make clipping mask: select a path to clip with".into();
+            return;
+        };
+        let Some(shape) = self.doc.shapes.get(shape_idx) else {
+            return;
+        };
+        let Some(ring) = shape.outline_polygon().filter(|r| r.len() >= 3) else {
+            self.status = "Make clipping mask: needs a closed path".into();
+            return;
+        };
+        self.checkpoint();
+        if let Some(img) = self.doc.placed_images.get_mut(id) {
+            img.set_clip(ring);
+        }
+        // Consume the masking path (clip absorbs it).
+        self.doc.shapes.remove(shape_idx);
+        self.selection.clear();
+        self.status = "Made clipping mask".into();
+    }
+
+    /// **Release** the selected image's clipping mask (the whole image draws
+    /// again). One undo step; no-op without a clipped selected image.
+    pub(super) fn release_selected_image_clip(&mut self) {
+        let Some(id) = self.selected_image else {
+            return;
+        };
+        let has_clip = self
+            .doc
+            .placed_images
+            .get(id)
+            .is_some_and(|i| i.clip.is_some());
+        if !has_clip {
+            return;
+        }
+        self.checkpoint();
+        if let Some(img) = self.doc.placed_images.get_mut(id) {
+            img.clear_clip();
+        }
+        self.status = "Released clipping mask".into();
+    }
+
+    /// Apply a numeric transform to the selected placed image about the centre of
+    /// its drawn bounds (one undo step): the request composes onto the image's
+    /// existing matrix, so move / scale / rotate accumulate. No-op with no
+    /// selected image or an identity request.
+    pub(super) fn transform_selected_image(&mut self, nt: crate::transform::NumericTransform) {
+        let Some(id) = self.selected_image else {
+            return;
+        };
+        let Some(img) = self.doc.placed_images.get(id) else {
+            return;
+        };
+        let (px, py) = match img.drawn_bounds() {
+            Some(r) => (r.x + r.w * 0.5, r.y + r.h * 0.5),
+            None => (0.0, 0.0),
+        };
+        let m = nt.to_affine(px, py);
+        if m.is_identity() {
+            return;
+        }
+        self.checkpoint();
+        if let Some(img) = self.doc.placed_images.get_mut(id) {
+            img.transform = m.then(img.transform);
+        }
+    }
+
+    /// Delete the selected placed image (one undo step).
+    pub(super) fn delete_selected_image(&mut self) {
+        let Some(id) = self.selected_image else {
+            return;
+        };
+        self.checkpoint();
+        if self.doc.placed_images.remove(id) {
+            self.image_pixels.remove(&id);
+            self.selected_image = None;
+            self.status = "Deleted placed image".into();
+        }
     }
 
     pub(super) fn save_dialog(&self) {

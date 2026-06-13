@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Place / Link images — embedded or linked rasters with a clipping mask.**
+  Place a raster image into the document as a first-class element the way
+  Illustrator's *File ▸ Place* does:
+  - A pure, fully unit-tested `placed_image` module. A `PlacedImage` carries an
+    `ImageSource` — **`Embedded`** (decoded RGBA8 pixels stored in the document,
+    self-contained) or **`Linked`** (only the on-disk path + cached natural size,
+    pixels re-read from disk) — plus its own placement `Affine` (position /
+    scale / rotation) applied to the image's natural pixel rectangle, and an
+    optional **clipping mask** (a closed ring of document points outside of which
+    the image isn't drawn). The placement / clip math is pure `f32`: `corners`,
+    `drawn_bounds`, `clip_bounds` (image ∩ clip), `clip_contains` (per-pixel
+    test) and `hit`. Carried on the document as additive `placed_images`
+    (`#[serde(default)]` → empty; pre-Place `.contour` round-trips unchanged).
+  - **File ▸ Place Image ▸ Embed… / Link…** picks a raster (`rfd`), decodes it
+    (`image`), and places it centred on the active artboard. Placed images render
+    on the canvas as a textured quad (position / scale / rotation all show),
+    clipped to the clip-path bounds when a mask is set; a linked image's pixels
+    are read once into a per-session cache so the render loop never touches disk.
+  - **Placed Images inspector**: place embed/link, list + select an image,
+    numeric move/scale/rotate (composed onto its transform), **Make clipping
+    mask** from the topmost selected path (the mask path is consumed) + **Release
+    clip**, **Relink / refresh** a linked image from disk, and delete — each a
+    labelled undo step. A placed image is also click-selectable on the canvas
+    (topmost-hit, respecting its clip).
+  - **Guarded** by unit tests: a drawn rect reflects position + scale; corners
+    are the transformed rectangle; a clip limits the drawn region to the path
+    bounds (and a non-overlapping clip excludes the image); `clip_contains`
+    respects the ring; embed stores pixels / link stores the path; ids never
+    reuse within a session; serde round-trip (embedded + linked + clipped) incl.
+    legacy (no `clip`/`visible`/`locked`, no `placed_images` key) and
+    determinism; plus document-level round-trip + legacy-load tests.
+  - **Follow-ups (noted):** crop the placed image, baking placed images into
+    SVG/PNG export (currently canvas-only), live mtime polling of linked files
+    (relink is explicit today), and round-tripping a placed `.pigment` via suite
+    interop.
+
 - **Recolor Artwork — palette remap, reduce-to-N & harmony rules.** Remap a
   selection's colours in one step, the way Illustrator's *Recolor Artwork*
   dialog works:

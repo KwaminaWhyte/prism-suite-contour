@@ -30,6 +30,24 @@ impl ContourApp {
                         ui.close_menu();
                     }
                     ui.separator();
+                    ui.menu_button(format!("{}  Place Image", icons::IMAGE_TRACE), |ui| {
+                        if ui
+                            .button("Embed…")
+                            .on_hover_text("Place a raster image, storing its pixels in the document")
+                            .clicked()
+                        {
+                            self.place_image_dialog(true);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .button("Link…")
+                            .on_hover_text("Place a raster image, linking to the file on disk")
+                            .clicked()
+                        {
+                            self.place_image_dialog(false);
+                            ui.close_menu();
+                        }
+                    });
                     if ui
                         .button(format!("{}  Image Trace…", icons::IMAGE_TRACE))
                         .on_hover_text("Trace a raster image into editable vector paths")
@@ -1150,6 +1168,11 @@ impl ContourApp {
                             .show(ui, |ui| {
                                 self.symbols_section(ui);
                             });
+                        egui::CollapsingHeader::new("Placed Images")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                self.placed_images_section(ui);
+                            });
                         egui::CollapsingHeader::new("Transform")
                             .default_open(true)
                             .show(ui, |ui| {
@@ -1719,6 +1742,161 @@ impl ContourApp {
     /// shapes propagates to every instance. Selecting an instance reveals a small
     /// numeric transform editor and break/delete actions. Each action is one undo
     /// step.
+    /// The **Placed Images** inspector: place embed/link, list the placed images,
+    /// select one, make / release its clipping mask from a selected path, relink a
+    /// linked image, and delete. Mirrors the Symbols panel's deferred-action
+    /// pattern so the document collection isn't borrowed while iterating it.
+    fn placed_images_section(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Placed Images").strong());
+            ui.weak(format!("{}", self.doc.placed_images.len()));
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .button("Embed…")
+                .on_hover_text("Place an image, storing its pixels")
+                .clicked()
+            {
+                self.place_image_dialog(true);
+            }
+            if ui
+                .button("Link…")
+                .on_hover_text("Place an image, linking to the file")
+                .clicked()
+            {
+                self.place_image_dialog(false);
+            }
+        });
+
+        if self.doc.placed_images.is_empty() {
+            ui.weak("No placed images.");
+            return;
+        }
+
+        let entries: Vec<(u64, String, bool, bool)> = self
+            .doc
+            .placed_images
+            .list
+            .iter()
+            .map(|p| (p.id, p.name.clone(), p.source.is_embedded(), p.clip.is_some()))
+            .collect();
+
+        let mut select: Option<u64> = None;
+        for (id, name, embedded, clipped) in &entries {
+            let selected = self.selected_image == Some(*id);
+            ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(selected, format!("{}  {name}", icons::IMAGE_TRACE))
+                    .clicked()
+                {
+                    select = Some(*id);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if *clipped {
+                        ui.weak("clip");
+                    }
+                    ui.weak(if *embedded { "embed" } else { "link" });
+                });
+            });
+        }
+        if let Some(id) = select {
+            self.selected_image = Some(id);
+            self.selected_instance = None;
+        }
+
+        // Editor for the selected image.
+        if let Some(id) = self.selected_image {
+            let info = self.doc.placed_images.get(id).map(|p| {
+                (
+                    p.source.is_embedded(),
+                    p.clip.is_some(),
+                    p.source
+                        .link_path()
+                        .map(|pth| pth.display().to_string()),
+                )
+            });
+            let Some((embedded, clipped, link)) = info else {
+                self.selected_image = None;
+                return;
+            };
+            ui.separator();
+            if let Some(path) = &link {
+                ui.weak(path).on_hover_text(path);
+            }
+
+            // Numeric placement edit (move / scale / rotate about the image
+            // centre), composed onto the image's transform as one undo step.
+            ui.horizontal(|ui| {
+                ui.label("Scale");
+                ui.add(
+                    egui::DragValue::new(&mut self.numeric.scale_x)
+                        .speed(0.01)
+                        .range(0.01..=100.0)
+                        .prefix("x "),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut self.numeric.scale_y)
+                        .speed(0.01)
+                        .range(0.01..=100.0)
+                        .prefix("y "),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("Move");
+                ui.add(egui::DragValue::new(&mut self.numeric.move_x).speed(0.5).suffix(" x"));
+                ui.add(egui::DragValue::new(&mut self.numeric.move_y).speed(0.5).suffix(" y"));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Rotate");
+                ui.add(
+                    egui::DragValue::new(&mut self.numeric.rotate)
+                        .speed(0.01)
+                        .suffix(" rad"),
+                );
+                if ui.button("Apply").clicked() {
+                    let nt = self.numeric;
+                    self.transform_selected_image(nt);
+                    self.numeric = crate::transform::NumericTransform::default();
+                }
+            });
+            let has_path_selected = !self.selection.is_empty();
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(has_path_selected, |ui| {
+                    if ui
+                        .button("Make clipping mask")
+                        .on_hover_text("Clip this image to the topmost selected path")
+                        .clicked()
+                    {
+                        self.clip_selected_image();
+                    }
+                });
+                if clipped && ui.button("Release clip").clicked() {
+                    self.release_selected_image_clip();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(!embedded, |ui| {
+                    if ui
+                        .button("Relink / refresh")
+                        .on_hover_text("Re-read the linked file from disk")
+                        .clicked()
+                    {
+                        self.relink_selected_image();
+                    }
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button(icons::TRASH)
+                        .on_hover_text("Delete the placed image")
+                        .clicked()
+                    {
+                        self.delete_selected_image();
+                    }
+                });
+            });
+        }
+    }
+
     fn symbols_section(&mut self, ui: &mut egui::Ui) {
         let has_selection = !self.selection.is_empty();
 
